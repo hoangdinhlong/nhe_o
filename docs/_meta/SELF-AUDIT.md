@@ -100,14 +100,14 @@ Select-String -Path AGENTS.md -Pattern '`docs/[A-Za-z0-9_./-]+`' -AllMatches |
     ForEach-Object { if (-not (Test-Path $_)) { Write-Warning "MISSING: $_" } }
 ```
 
-### B5 - SPARK_Mode boundary (BR-001: only `src/nheo-io.adb` may disable SPARK_Mode)
+### B5 - SPARK_Mode boundary (BR-001: only `src/nhe_o-io.adb` may disable SPARK_Mode)
 
 ```bash
-grep -rnE 'pragma +SPARK_Mode *\( *Off *\)' src/ | grep -v '^src/nheo-io\.adb:' || true
+grep -rnE 'pragma +SPARK_Mode *\( *Off *\)' src/ | grep -v '^src/nhe_o-io\.adb:' || true
 ```
 
 ```powershell
-Select-String -Path src/* -Pattern 'pragma\s+SPARK_Mode\s*\(\s*Off\s*\)' | Where-Object { $_.Filename -ne 'nheo-io.adb' }
+Select-String -Path src/* -Pattern 'pragma\s+SPARK_Mode\s*\(\s*Off\s*\)' | Where-Object { $_.Filename -ne 'nhe_o-io.adb' }
 ```
 
 ### B7 - the template revision stamp

@@ -2,10 +2,10 @@
 pragma SPARK_Mode (On);
 
 with Interfaces; use Interfaces;
-with Nheo.Types; use Nheo.Types;
-with Nheo.IO;    use Nheo.IO;
+with Nhe_O.Types; use Nhe_O.Types;
+with Nhe_O.IO;    use Nhe_O.IO;
 
-package Nheo.Transaction is
+package Nhe_O.Transaction is
 
    Max_Tx_Id : constant := 1_000_000_000;
    type Tx_Id is range 0 .. Max_Tx_Id;
@@ -57,7 +57,7 @@ package Nheo.Transaction is
                   and then Ctx.Id = Next_Tx'Old
                   and then Next_Tx = Next_Tx'Old + 1;
 
-   --  Commit an active transaction: writes WAL frame & slotted page via Nheo.IO (BR-002)
+   --  Commit an active transaction: writes WAL frame & slotted page via Nhe_O.IO (BR-002)
    procedure Commit_Tx
      (Ctx      : in out Transaction_Context;
       DB_Path  : in     Bounded_Text;
@@ -77,4 +77,4 @@ package Nheo.Transaction is
      with Pre  => Ctx.State = Tx_Active,
           Post => Ctx.State = Tx_Aborted;
 
-end Nheo.Transaction;
+end Nhe_O.Transaction;

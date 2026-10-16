@@ -1,7 +1,7 @@
 --  Formally verified PostgreSQL pgvector-compatible Vector Engine (BR-003)
 pragma SPARK_Mode (On);
 
-package Nheo.Vector is
+package Nhe_O.Vector is
 
    Max_Vector_Dim : constant := 256;
    subtype Vector_Dim is Positive range 1 .. Max_Vector_Dim;
@@ -55,4 +55,4 @@ package Nheo.Vector is
      with Pre  => A.Dim = B.Dim,
           Post => Cosine_Distance'Result in 0.0 .. 2.0;
 
-end Nheo.Vector;
+end Nhe_O.Vector;

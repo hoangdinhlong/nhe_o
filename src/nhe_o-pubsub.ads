@@ -1,9 +1,9 @@
 --  Formally verified Deterministic Ring-Buffer Pub/Sub Broker (BR-005)
 pragma SPARK_Mode (On);
 
-with Nheo.Types; use Nheo.Types;
+with Nhe_O.Types; use Nhe_O.Types;
 
-package Nheo.PubSub is
+package Nhe_O.PubSub is
 
    Max_Subscribers : constant := 16;
    subtype Subscriber_Id is Positive range 1 .. Max_Subscribers;
@@ -74,4 +74,4 @@ package Nheo.PubSub is
                      Broker.Subscribers (Sub_Id).Count =
                        Broker'Old.Subscribers (Sub_Id).Count - 1);
 
-end Nheo.PubSub;
+end Nhe_O.PubSub;

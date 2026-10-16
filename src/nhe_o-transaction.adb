@@ -1,6 +1,6 @@
 pragma SPARK_Mode (On);
 
-package body Nheo.Transaction is
+package body Nhe_O.Transaction is
 
    --  Magic bytes "NHEO" (0x4E, 0x48, 0x45, 0x4F)
    Magic_0 : constant Byte := 16#4E#;
@@ -165,4 +165,4 @@ package body Nheo.Transaction is
       Ctx.State := Tx_Aborted;
    end Rollback_Tx;
 
-end Nheo.Transaction;
+end Nhe_O.Transaction;

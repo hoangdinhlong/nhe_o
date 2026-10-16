@@ -1,6 +1,6 @@
 pragma SPARK_Mode (On);
 
-package body Nheo.SQL is
+package body Nhe_O.SQL is
 
    function Contains_Substring_CI
      (Haystack : Bounded_Text;
@@ -189,4 +189,4 @@ package body Nheo.SQL is
       end if;
    end Resolve_Pg_Type;
 
-end Nheo.SQL;
+end Nhe_O.SQL;

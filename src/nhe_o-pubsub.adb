@@ -1,6 +1,6 @@
 pragma SPARK_Mode (On);
 
-package body Nheo.PubSub is
+package body Nhe_O.PubSub is
 
    function Matches_Channel
      (Pattern : Bounded_Ident;
@@ -126,4 +126,4 @@ package body Nheo.PubSub is
       Found := True;
    end Poll_Message;
 
-end Nheo.PubSub;
+end Nhe_O.PubSub;

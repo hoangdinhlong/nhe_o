@@ -1,9 +1,9 @@
 --  Formally verified PostgreSQL JSON and JSONB Engine (BR-003)
 pragma SPARK_Mode (On);
 
-with Nheo.Types; use Nheo.Types;
+with Nhe_O.Types; use Nhe_O.Types;
 
-package Nheo.JSON is
+package Nhe_O.JSON is
 
    Max_JSON_Fields : constant := 16;
    subtype Field_Count is Natural range 0 .. Max_JSON_Fields;
@@ -62,4 +62,4 @@ package Nheo.JSON is
    function Contains
      (Left, Right : JSONB_Document) return Boolean;
 
-end Nheo.JSON;
+end Nhe_O.JSON;

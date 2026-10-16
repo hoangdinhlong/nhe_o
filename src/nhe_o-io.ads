@@ -1,21 +1,21 @@
 --  Formal SPARK Specification for Physical Disk, WAL & Console I/O Boundary (BR-001)
 --  Note: This specification is in SPARK_Mode (On); only the implementation body
---  (nheo-io.adb) uses SPARK_Mode (Off) to invoke OS/Ada I/O operations.
+--  (nhe_o-io.adb) uses SPARK_Mode (Off) to invoke OS/Ada I/O operations.
 pragma SPARK_Mode (On);
 
 with Interfaces;
-with Nheo.Types; use Nheo.Types;
+with Nhe_O.Types; use Nhe_O.Types;
 
-package Nheo.IO is
+package Nhe_O.IO is
 
    subtype Byte is Interfaces.Unsigned_8;
 
-   subtype Page_Offset is Positive range 1 .. Nheo.Page_Size;
+   subtype Page_Offset is Positive range 1 .. Nhe_O.Page_Size;
    type Page_Buffer is array (Page_Offset) of Byte;
 
    --  WAL Frame: 24-byte header (Magic + Tx_Id + Page_Id + CRC32) + 4096-byte payload
    WAL_Header_Size : constant := 24;
-   WAL_Frame_Size  : constant := WAL_Header_Size + Nheo.Page_Size;
+   WAL_Frame_Size  : constant := WAL_Header_Size + Nhe_O.Page_Size;
    subtype WAL_Frame_Offset is Positive range 1 .. WAL_Frame_Size;
    type WAL_Frame_Buffer is array (WAL_Frame_Offset) of Byte;
 
@@ -52,4 +52,4 @@ package Nheo.IO is
 
    procedure Print_Blank_Line;
 
-end Nheo.IO;
+end Nhe_O.IO;

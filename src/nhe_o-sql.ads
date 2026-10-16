@@ -1,9 +1,9 @@
 --  Formally verified PostgreSQL SQL Dialect Classifier and Feature Analyzer
 pragma SPARK_Mode (On);
 
-with Nheo.Types; use Nheo.Types;
+with Nhe_O.Types; use Nhe_O.Types;
 
-package Nheo.SQL is
+package Nhe_O.SQL is
 
    type SQL_Statement_Kind is (
       Stmt_Unknown,
@@ -43,4 +43,4 @@ package Nheo.SQL is
       Resolved     :    out Pg_Data_Type;
       Valid        :    out Boolean);
 
-end Nheo.SQL;
+end Nhe_O.SQL;

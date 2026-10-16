@@ -1,6 +1,6 @@
 pragma SPARK_Mode (On);
 
-package body Nheo.Types is
+package body Nhe_O.Types is
 
    function Make_Ident (S : String) return Bounded_Ident is
       Res : Bounded_Ident;
@@ -95,4 +95,4 @@ package body Nheo.Types is
       end case;
    end Type_Name;
 
-end Nheo.Types;
+end Nhe_O.Types;

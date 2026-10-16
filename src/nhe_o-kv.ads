@@ -2,9 +2,9 @@
 pragma SPARK_Mode (On);
 
 with Interfaces; use Interfaces;
-with Nheo.Types; use Nheo.Types;
+with Nhe_O.Types; use Nhe_O.Types;
 
-package Nheo.KV is
+package Nhe_O.KV is
 
    Max_KV_Capacity : constant := 64;
    subtype KV_Slot_Index is Positive range 1 .. Max_KV_Capacity;
@@ -92,4 +92,4 @@ package Nheo.KV is
       Status    :    out Engine_Status)
      with Pre => Key.Length > 0;
 
-end Nheo.KV;
+end Nhe_O.KV;

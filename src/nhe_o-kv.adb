@@ -1,6 +1,6 @@
 pragma SPARK_Mode (On);
 
-package body Nheo.KV is
+package body Nhe_O.KV is
 
    function Exists
      (Store : KV_Store;
@@ -228,4 +228,4 @@ package body Nheo.KV is
       Status  := Status_Ok;
    end Incr_By;
 
-end Nheo.KV;
+end Nhe_O.KV;

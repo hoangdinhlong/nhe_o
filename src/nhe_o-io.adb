@@ -9,7 +9,7 @@ with Ada.Streams;
 with Ada.Streams.Stream_IO;
 with Ada.Text_IO;
 
-package body Nheo.IO is
+package body Nhe_O.IO is
 
    package Page_DIO is new Ada.Direct_IO (Element_Type => Page_Buffer);
    use type Page_DIO.Count;
@@ -145,4 +145,4 @@ package body Nheo.IO is
       Ada.Text_IO.New_Line;
    end Print_Blank_Line;
 
-end Nheo.IO;
+end Nhe_O.IO;

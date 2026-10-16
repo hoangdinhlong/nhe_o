@@ -1,6 +1,6 @@
 pragma SPARK_Mode (On);
 
-package body Nheo.JSON is
+package body Nhe_O.JSON is
 
    function Is_Valid_JSON (Raw : Bounded_Text) return Boolean is
       Brace_Depth   : Integer := 0;
@@ -164,4 +164,4 @@ package body Nheo.JSON is
       return True;
    end Contains;
 
-end Nheo.JSON;
+end Nhe_O.JSON;

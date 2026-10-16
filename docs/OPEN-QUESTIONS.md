@@ -27,15 +27,15 @@ Status: `Open` · `Answered → <where the answer now lives>` · `No longer rele
 ---
 
 ### Q-001: What should the maximum inline vs. TOAST-overflow vector dimension (`Max_Vector_Dim`) be for 4KB slotted pages?
-* **Detail**: Currently `Nheo.Vector` defines `Max_Vector_Dim := 256` (1024 bytes of IEEE-754 32-bit floats) so multiple vectors fit directly inside a single 4096-byte slotted page without page-overflow chains. Modern LLM embeddings often use 768, 1536, or 3072 dimensions (requiring 3KB–12KB per vector). Should NheO increase the page size to 16KB or implement a PostgreSQL-style TOAST overflow page table for high-dimensional vectors?
-* **Impact**: Shapes the on-disk layout of `Nheo.Transaction` slotted pages and `Nheo.Vector` storage bounds in Epic 02.
+* **Detail**: Currently `Nhe_O.Vector` defines `Max_Vector_Dim := 256` (1024 bytes of IEEE-754 32-bit floats) so multiple vectors fit directly inside a single 4096-byte slotted page without page-overflow chains. Modern LLM embeddings often use 768, 1536, or 3072 dimensions (requiring 3KB–12KB per vector). Should `Nhe_O` increase the page size to 16KB or implement a PostgreSQL-style TOAST overflow page table for high-dimensional vectors?
+* **Impact**: Shapes the on-disk layout of `Nhe_O.Transaction` slotted pages and `Nhe_O.Vector` storage bounds in Epic 02.
 * **Waiting on**: Benchmark comparison between 16KB pages and 4KB TOAST overflow chains with owner (Long).
 * **Opened**: 2026-10-16
 * **Status**: Open
 
 ### Q-002: Should Pub/Sub channels optionally persist messages to the WAL for transactional `LISTEN` / `NOTIFY` replay?
-* **Detail**: `Nheo.PubSub` currently provides low-latency in-memory bounded ring buffers (like Redis `PUBLISH`/`SUBSCRIBE`). PostgreSQL `NOTIFY` ties notification emission to transaction commit. Should NheO support a `DURABLE` channel flag that only dispatches messages when the publishing transaction commits to the WAL?
-* **Impact**: Determines whether `Nheo.PubSub` integrates directly with `Nheo.Transaction.Commit_Tx` in Epic 02.
+* **Detail**: `Nhe_O.PubSub` currently provides low-latency in-memory bounded ring buffers (like Redis `PUBLISH`/`SUBSCRIBE`). PostgreSQL `NOTIFY` ties notification emission to transaction commit. Should `Nhe_O` support a `DURABLE` channel flag that only dispatches messages when the publishing transaction commits to the WAL?
+* **Impact**: Determines whether `Nhe_O.PubSub` integrates directly with `Nhe_O.Transaction.Commit_Tx` in Epic 02.
 * **Waiting on**: Owner decision (Long) on transactional notification semantics vs. pure fire-and-forget Redis Pub/Sub.
 * **Opened**: 2026-10-16
 * **Status**: Open

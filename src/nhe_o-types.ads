@@ -1,9 +1,9 @@
---  PostgreSQL-compatible data types and bounded primitives for NheO
+--  PostgreSQL-compatible data types and bounded primitives for Nhe_O
 pragma SPARK_Mode (On);
 
 with Interfaces;
 
-package Nheo.Types is
+package Nhe_O.Types is
 
    --  PostgreSQL Data Type catalog
    type Pg_Data_Type is (
@@ -77,4 +77,4 @@ package Nheo.Types is
 
    function Type_Name (T : Pg_Data_Type) return Bounded_Ident;
 
-end Nheo.Types;
+end Nhe_O.Types;

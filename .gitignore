@@ -8,4 +8,5 @@ gnatprove/
 *.o
 b~*
 *.nheo
+*.nhe_o
 *.wal

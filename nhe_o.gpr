@@ -1,8 +1,8 @@
-project NheO is
+project Nhe_O is
    for Source_Dirs use ("src");
    for Object_Dir use "obj";
    for Exec_Dir use "bin";
-   for Main use ("nheo_main.adb");
+   for Main use ("nhe_o_main.adb");
 
    package Compiler is
       for Default_Switches ("Ada") use (
@@ -16,4 +16,4 @@ project NheO is
    package Binder is
       for Default_Switches ("Ada") use ("-E");
    end Binder;
-end NheO;
+end Nhe_O;

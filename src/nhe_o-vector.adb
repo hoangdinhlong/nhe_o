@@ -1,6 +1,6 @@
 pragma SPARK_Mode (On);
 
-package body Nheo.Vector is
+package body Nhe_O.Vector is
 
    function Make_Vector_3D
      (X, Y, Z : Vector_Component) return Vector_Value
@@ -119,4 +119,4 @@ package body Nheo.Vector is
       end if;
    end Cosine_Distance;
 
-end Nheo.Vector;
+end Nhe_O.Vector;
