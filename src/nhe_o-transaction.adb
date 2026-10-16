@@ -159,6 +159,32 @@ package body Nhe_O.Transaction is
       return Stored_CRC = Calculated_CRC;
    end Verify_WAL_Frame;
 
+   procedure Decode_WAL_Frame
+     (Frame   : in     WAL_Frame_Buffer;
+      Tx      :    out Valid_Tx_Id;
+      Page_Id :    out Valid_Page_Id;
+      Page    :    out Page_Buffer)
+   is
+      Raw_Tx   : constant Unsigned_32 := Get_U32_BE (Frame, 5);
+      Raw_Page : constant Unsigned_32 := Get_U32_BE (Frame, 9);
+   begin
+      if Raw_Tx in 1 .. Unsigned_32 (Max_Tx_Id) then
+         Tx := Valid_Tx_Id (Raw_Tx);
+      else
+         Tx := 1;
+      end if;
+
+      if Raw_Page <= Unsigned_32 (Max_Page_Id) then
+         Page_Id := Valid_Page_Id (Raw_Page);
+      else
+         Page_Id := 0;
+      end if;
+
+      for I in Page_Offset loop
+         Page (I) := Frame (WAL_Header_Size + I);
+      end loop;
+   end Decode_WAL_Frame;
+
    procedure Begin_Tx
      (Next_Tx : in out Valid_Tx_Id;
       Ctx     :    out Transaction_Context)

@@ -3,12 +3,44 @@ pragma SPARK_Mode (On);
 package body Nhe_O.JSON is
 
    function Is_Valid_JSON (Raw : Bounded_Text) return Boolean is
-      Stack        : String (1 .. Max_Text_Len) := [others => ' '];
-      Depth        : Natural range 0 .. Max_Text_Len := 0;
-      In_Quotes    : Boolean := False;
-      Escaped      : Boolean := False;
-      Root_Started : Boolean := False;
-      Root_Closed  : Boolean := False;
+      type Expect_State is
+        (St_Root,
+         St_Obj_Key_Or_End,
+         St_Obj_Key,
+         St_Obj_Colon,
+         St_Arr_Val_Or_End,
+         St_Val,
+         St_After_Val);
+
+      type Lex_Mode is
+        (Lex_None,
+         Lex_String,
+         Lex_Num_After_Minus,
+         Lex_Num_Zero,
+         Lex_Num_Need_Digit,
+         Lex_Num_Has_Digit,
+         Lex_Num_Exp_Sign,
+         Lex_True_R,
+         Lex_True_U,
+         Lex_True_E,
+         Lex_False_A,
+         Lex_False_L,
+         Lex_False_S,
+         Lex_False_E,
+         Lex_Null_U,
+         Lex_Null_L1,
+         Lex_Null_L2);
+
+      Stack         : String (1 .. Max_Text_Len) := [others => ' '];
+      Depth         : Natural range 0 .. Max_Text_Len := 0;
+      State         : Expect_State := St_Root;
+      Lex           : Lex_Mode     := Lex_None;
+      Escaped       : Boolean      := False;
+      Hex_Needed    : Natural range 0 .. 4 := 0;
+      String_Is_Key : Boolean      := False;
+      Num_Has_Dot   : Boolean      := False;
+      Num_Has_Exp   : Boolean      := False;
+      Consumed      : Boolean;
    begin
       if Raw.Length < 2 then
          return False;
@@ -23,60 +55,237 @@ package body Nhe_O.JSON is
               (C = ' ' or else C = ASCII.HT
                or else C = ASCII.LF or else C = ASCII.CR);
          begin
-            if In_Quotes then
-               if Escaped then
-                  Escaped := False;
-               elsif C = '\' then
-                  Escaped := True;
-               elsif C = '"' then
-                  In_Quotes := False;
-               end if;
-            elsif not Is_WS then
-               if Root_Closed then
-                  --  Reject trailing non-whitespace tokens or concatenated roots (e.g. `{}{}`)
+            Consumed := True;
+
+            --  1. Handle active lexical token modes first
+            if Lex = Lex_String then
+               if Character'Pos (C) < 32 then
                   return False;
-               elsif not Root_Started then
-                  if C /= '{' and then C /= '[' then
-                     return False;
-                  end if;
-                  Root_Started := True;
-                  Depth        := 1;
-                  Stack (1)    := C;
-               elsif C = '"' then
-                  In_Quotes := True;
-               elsif C = '{' or else C = '[' then
-                  if Depth < Max_Text_Len then
-                     Depth         := Depth + 1;
-                     Stack (Depth) := C;
+               elsif Hex_Needed > 0 then
+                  if C in '0' .. '9' | 'a' .. 'f' | 'A' .. 'F' then
+                     Hex_Needed := Hex_Needed - 1;
                   else
                      return False;
                   end if;
-               elsif C = '}' then
-                  if Depth = 0 or else Stack (Depth) /= '{' then
+               elsif Escaped then
+                  if C = 'u' then
+                     Escaped    := False;
+                     Hex_Needed := 4;
+                  elsif C in '"' | '\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' then
+                     Escaped := False;
+                  else
                      return False;
                   end if;
-                  Depth := Depth - 1;
-                  if Depth = 0 then
-                     Root_Closed := True;
-                  end if;
-               elsif C = ']' then
-                  if Depth = 0 or else Stack (Depth) /= '[' then
-                     return False;
-                  end if;
-                  Depth := Depth - 1;
-                  if Depth = 0 then
-                     Root_Closed := True;
-                  end if;
+               elsif C = '\' then
+                  Escaped := True;
+               elsif C = '"' then
+                  Lex   := Lex_None;
+                  State := (if String_Is_Key then St_Obj_Colon else St_After_Val);
                end if;
+            elsif Lex = Lex_True_R then
+               if C = 'r' then Lex := Lex_True_U; else return False; end if;
+            elsif Lex = Lex_True_U then
+               if C = 'u' then Lex := Lex_True_E; else return False; end if;
+            elsif Lex = Lex_True_E then
+               if C = 'e' then Lex := Lex_None; State := St_After_Val; else return False; end if;
+            elsif Lex = Lex_False_A then
+               if C = 'a' then Lex := Lex_False_L; else return False; end if;
+            elsif Lex = Lex_False_L then
+               if C = 'l' then Lex := Lex_False_S; else return False; end if;
+            elsif Lex = Lex_False_S then
+               if C = 's' then Lex := Lex_False_E; else return False; end if;
+            elsif Lex = Lex_False_E then
+               if C = 'e' then Lex := Lex_None; State := St_After_Val; else return False; end if;
+            elsif Lex = Lex_Null_U then
+               if C = 'u' then Lex := Lex_Null_L1; else return False; end if;
+            elsif Lex = Lex_Null_L1 then
+               if C = 'l' then Lex := Lex_Null_L2; else return False; end if;
+            elsif Lex = Lex_Null_L2 then
+               if C = 'l' then Lex := Lex_None; State := St_After_Val; else return False; end if;
+            elsif Lex = Lex_Num_After_Minus then
+               if C = '0' then
+                  Lex := Lex_Num_Zero;
+               elsif C in '1' .. '9' then
+                  Lex := Lex_Num_Has_Digit;
+               else
+                  return False;
+               end if;
+            elsif Lex = Lex_Num_Zero then
+               if C in '0' .. '9' then
+                  return False;
+               elsif C = '.' then
+                  Num_Has_Dot := True;
+                  Lex         := Lex_Num_Need_Digit;
+               elsif C = 'e' or else C = 'E' then
+                  Num_Has_Exp := True;
+                  Lex         := Lex_Num_Exp_Sign;
+               else
+                  Lex      := Lex_None;
+                  State    := St_After_Val;
+                  Consumed := False;
+               end if;
+            elsif Lex = Lex_Num_Need_Digit then
+               if C in '0' .. '9' then
+                  Lex := Lex_Num_Has_Digit;
+               else
+                  return False;
+               end if;
+            elsif Lex = Lex_Num_Exp_Sign then
+               if C = '+' or else C = '-' then
+                  Lex := Lex_Num_Need_Digit;
+               elsif C in '0' .. '9' then
+                  Lex := Lex_Num_Has_Digit;
+               else
+                  return False;
+               end if;
+            elsif Lex = Lex_Num_Has_Digit then
+               if C in '0' .. '9' then
+                  null;
+               elsif C = '.' and then not Num_Has_Dot and then not Num_Has_Exp then
+                  Num_Has_Dot := True;
+                  Lex         := Lex_Num_Need_Digit;
+               elsif (C = 'e' or else C = 'E') and then not Num_Has_Exp then
+                  Num_Has_Exp := True;
+                  Lex         := Lex_Num_Exp_Sign;
+               else
+                  Lex      := Lex_None;
+                  State    := St_After_Val;
+                  Consumed := False;
+               end if;
+            else
+               Consumed := False;
+            end if;
+
+            --  2. Outside lexical tokens: skip whitespace and advance grammar state
+            if not Consumed and then not Is_WS then
+               case State is
+                  when St_Root =>
+                     if C = '{' then
+                        Depth     := 1;
+                        Stack (1) := '{';
+                        State     := St_Obj_Key_Or_End;
+                     elsif C = '[' then
+                        Depth     := 1;
+                        Stack (1) := '[';
+                        State     := St_Arr_Val_Or_End;
+                     else
+                        return False;
+                     end if;
+
+                  when St_Obj_Key_Or_End =>
+                     if C = '}' then
+                        if Depth = 0 or else Stack (Depth) /= '{' then
+                           return False;
+                        end if;
+                        Depth := Depth - 1;
+                        State := St_After_Val;
+                     elsif C = '"' then
+                        String_Is_Key := True;
+                        Escaped       := False;
+                        Hex_Needed    := 0;
+                        Lex           := Lex_String;
+                     else
+                        return False;
+                     end if;
+
+                  when St_Obj_Key =>
+                     if C = '"' then
+                        String_Is_Key := True;
+                        Escaped       := False;
+                        Hex_Needed    := 0;
+                        Lex           := Lex_String;
+                     else
+                        return False;
+                     end if;
+
+                  when St_Obj_Colon =>
+                     if C = ':' then
+                        State := St_Val;
+                     else
+                        return False;
+                     end if;
+
+                  when St_Arr_Val_Or_End | St_Val =>
+                     if State = St_Arr_Val_Or_End and then C = ']' then
+                        if Depth = 0 or else Stack (Depth) /= '[' then
+                           return False;
+                        end if;
+                        Depth := Depth - 1;
+                        State := St_After_Val;
+                     elsif C = '"' then
+                        String_Is_Key := False;
+                        Escaped       := False;
+                        Hex_Needed    := 0;
+                        Lex           := Lex_String;
+                     elsif C = '{' then
+                        if Depth = Max_Text_Len then
+                           return False;
+                        end if;
+                        Depth         := Depth + 1;
+                        Stack (Depth) := '{';
+                        State         := St_Obj_Key_Or_End;
+                     elsif C = '[' then
+                        if Depth = Max_Text_Len then
+                           return False;
+                        end if;
+                        Depth         := Depth + 1;
+                        Stack (Depth) := '[';
+                        State         := St_Arr_Val_Or_End;
+                     elsif C = '-' then
+                        Num_Has_Dot := False;
+                        Num_Has_Exp := False;
+                        Lex         := Lex_Num_After_Minus;
+                     elsif C = '0' then
+                        Num_Has_Dot := False;
+                        Num_Has_Exp := False;
+                        Lex         := Lex_Num_Zero;
+                     elsif C in '1' .. '9' then
+                        Num_Has_Dot := False;
+                        Num_Has_Exp := False;
+                        Lex         := Lex_Num_Has_Digit;
+                     elsif C = 't' then
+                        Lex := Lex_True_R;
+                     elsif C = 'f' then
+                        Lex := Lex_False_A;
+                     elsif C = 'n' then
+                        Lex := Lex_Null_U;
+                     else
+                        return False;
+                     end if;
+
+                  when St_After_Val =>
+                     if Depth = 0 then
+                        --  Root container already closed: reject trailing tokens or `{}{}`
+                        return False;
+                     elsif C = ',' then
+                        if Stack (Depth) = '{' then
+                           State := St_Obj_Key;
+                        else
+                           State := St_Val;
+                        end if;
+                     elsif C = '}' then
+                        if Stack (Depth) /= '{' then
+                           return False;
+                        end if;
+                        Depth := Depth - 1;
+                     elsif C = ']' then
+                        if Stack (Depth) /= '[' then
+                           return False;
+                        end if;
+                        Depth := Depth - 1;
+                     else
+                        return False;
+                     end if;
+               end case;
             end if;
          end;
       end loop;
 
-      return Root_Started
-        and then Root_Closed
+      return State = St_After_Val
+        and then Lex = Lex_None
         and then Depth = 0
-        and then not In_Quotes
-        and then not Escaped;
+        and then not Escaped
+        and then Hex_Needed = 0;
    end Is_Valid_JSON;
 
    procedure Put_Field

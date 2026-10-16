@@ -56,6 +56,106 @@ package body Nhe_O.KV is
       end if;
    end Select_Target_Slot;
 
+   function Format_Int64 (V : Integer_64) return Bounded_Text is
+      Rev  : String (1 .. 20) := [others => '0'];
+      D_Ln : Natural range 0 .. 20 := 0;
+      Mag  : Unsigned_64;
+      Neg  : Boolean := False;
+      Res  : Bounded_Text;
+      Pos  : Natural range 0 .. 21 := 0;
+   begin
+      if V = 0 then
+         return Make_Text ("0");
+      elsif V > 0 then
+         Mag := Unsigned_64 (V);
+      elsif V = Integer_64'First then
+         Mag := Unsigned_64 (Integer_64'Last) + 1;
+         Neg := True;
+      else
+         Mag := Unsigned_64 (-V);
+         Neg := True;
+      end if;
+
+      for Step in 1 .. 20 loop
+         pragma Loop_Invariant (D_Ln < Step);
+         exit when Mag = 0;
+         D_Ln       := D_Ln + 1;
+         Rev (D_Ln) := Character'Val (Character'Pos ('0') + Natural (Mag mod 10));
+         Mag        := Mag / 10;
+      end loop;
+
+      if Neg then
+         Pos            := 1;
+         Res.Data (Pos) := '-';
+      end if;
+
+      for I in 1 .. D_Ln loop
+         pragma Loop_Invariant (Pos = (if Neg then I else I - 1));
+         Pos            := Pos + 1;
+         Res.Data (Pos) := Rev (D_Ln - I + 1);
+      end loop;
+
+      Res.Length := Pos;
+      return Res;
+   end Format_Int64;
+
+   procedure Try_Parse_Int64
+     (Text   : in     Bounded_Text;
+      Parsed :    out Integer_64;
+      Is_Int :    out Boolean)
+   is
+      Start_Idx : Positive := 1;
+      Neg       : Boolean  := False;
+      Limit     : Unsigned_64;
+      Acc       : Unsigned_64 := 0;
+      Digit     : Unsigned_64;
+   begin
+      Parsed := 0;
+      Is_Int := False;
+
+      if Text.Length = 0 or else Text.Length > 20 then
+         return;
+      end if;
+
+      if Text.Data (1) = '-' then
+         Neg       := True;
+         Start_Idx := 2;
+      elsif Text.Data (1) = '+' then
+         Start_Idx := 2;
+      end if;
+
+      if Start_Idx > Text.Length then
+         return;
+      end if;
+
+      Limit :=
+        (if Neg then Unsigned_64 (Integer_64'Last) + 1
+         else Unsigned_64 (Integer_64'Last));
+
+      for I in Start_Idx .. Text.Length loop
+         pragma Loop_Invariant (I in Start_Idx .. Text.Length and Acc <= Limit);
+         if Text.Data (I) not in '0' .. '9' then
+            return;
+         end if;
+         Digit := Unsigned_64 (Character'Pos (Text.Data (I)) - Character'Pos ('0'));
+         if Acc > (Limit - Digit) / 10 then
+            return;
+         end if;
+         Acc := Acc * 10 + Digit;
+      end loop;
+
+      if Neg then
+         if Acc = Unsigned_64 (Integer_64'Last) + 1 then
+            Parsed := Integer_64'First;
+         else
+            Parsed := -Integer_64 (Acc);
+         end if;
+      else
+         Parsed := Integer_64 (Acc);
+      end if;
+      Is_Int := True;
+   end Try_Parse_Int64;
+
    procedure Set
      (Store   : in out KV_Store;
       Key     : in     Bounded_Ident;
@@ -64,7 +164,9 @@ package body Nhe_O.KV is
       Has_TTL : in     Boolean       := False;
       TTL_Sec : in     Epoch_Seconds := 0)
    is
-      Target : KV_Slot_Index;
+      Target     : KV_Slot_Index;
+      Parsed_Int : Integer_64;
+      Numeric_Ok : Boolean;
    begin
       --  Clear any duplicate slots for Key first so Exists is deterministic
       for I in KV_Slot_Index loop
@@ -73,12 +175,13 @@ package body Nhe_O.KV is
          end if;
       end loop;
 
+      Try_Parse_Int64 (Val, Parsed_Int, Numeric_Ok);
       Target := Select_Target_Slot (Store, Key, Now);
       Store.Slots (Target) := (
          Key         => Key,
          Val         => Val,
-         Int_Val     => 0,
-         Is_Numeric  => False,
+         Int_Val     => (if Numeric_Ok then Parsed_Int else 0),
+         Is_Numeric  => Numeric_Ok,
          Has_TTL     => Has_TTL,
          Expires_At  => (if Has_TTL then Now + TTL_Sec else 0),
          Last_Access => Now,
@@ -202,9 +305,10 @@ package body Nhe_O.KV is
                   Status := Status_Capacity_Exceeded;
                   return;
                end if;
-               Store.Slots (I).Int_Val     := Store.Slots (I).Int_Val + Delta_Val;
+               New_Val                     := Store.Slots (I).Int_Val + Delta_Val;
+               Store.Slots (I).Int_Val     := New_Val;
+               Store.Slots (I).Val         := Format_Int64 (New_Val);
                Store.Slots (I).Last_Access := Now;
-               New_Val := Store.Slots (I).Int_Val;
                Status  := Status_Ok;
                return;
             else
@@ -216,7 +320,7 @@ package body Nhe_O.KV is
       Target := Select_Target_Slot (Store, Key, Now);
       Store.Slots (Target) := (
          Key         => Key,
-         Val         => Make_Text ("<int64>"),
+         Val         => Format_Int64 (Delta_Val),
          Int_Val     => Delta_Val,
          Is_Numeric  => True,
          Has_TTL     => False,

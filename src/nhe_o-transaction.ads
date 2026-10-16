@@ -48,6 +48,14 @@ package Nhe_O.Transaction is
    --  Verify the magic header and CRC32 checksum of a WAL frame
    function Verify_WAL_Frame (Frame : WAL_Frame_Buffer) return Boolean;
 
+   --  Extract Tx_Id, Page_Id, and 4096-byte Page payload from a verified WAL frame
+   procedure Decode_WAL_Frame
+     (Frame   : in     WAL_Frame_Buffer;
+      Tx      :    out Valid_Tx_Id;
+      Page_Id :    out Valid_Page_Id;
+      Page    :    out Page_Buffer)
+     with Pre => Verify_WAL_Frame (Frame);
+
    --  Begin an ACID transaction with a monotonic transaction ID
    procedure Begin_Tx
      (Next_Tx : in out Valid_Tx_Id;

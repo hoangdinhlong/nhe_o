@@ -9,7 +9,7 @@ Status legend: ☐ todo · ◐ in progress · ☑ done
 | # | Task | Status | Tests |
 |---|------|--------|-------|
 | 1 | Adopt Monion `project-docs` R8 template and replace all placeholders | ☑ | `SELF-AUDIT.md` A1–A3, B7 passed |
-| 2 | Author `VISION.md`, `ARCHITECTURE.md`, `DECISIONS.md` (`ADR-001`..`ADR-004`), and `business-rules.md` (`BR-001`..`BR-005`) | ☑ | Manual review & `SELF-AUDIT.md` |
+| 2 | Author `VISION.md`, `ARCHITECTURE.md`, `DECISIONS.md` (`ADR-001`..`ADR-002`), and `business-rules.md` (`BR-001`..`BR-005`) | ☑ | Manual review & `SELF-AUDIT.md` |
 | 3 | Implement PostgreSQL type system in SPARK (`Nhe_O.Types`) | ☑ | Compiled (`-gnat2022 -gnatwa -gnata`) & runtime verified |
 | 4 | Implement Vector similarity engine (`<->`, `<=>`, `<#>`) in SPARK (`Nhe_O.Vector`) | ☑ | Compiled & contract assertions verified |
 | 5 | Implement PostgreSQL JSON/JSONB validator and operators (`->`, `->>`, `@>`, `?`) in SPARK (`Nhe_O.JSON`) | ☑ | Compiled & contract assertions verified |

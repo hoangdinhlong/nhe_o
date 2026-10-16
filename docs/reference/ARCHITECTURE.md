@@ -88,7 +88,7 @@ How we build the vision in `VISION.md`. This is the **map** for design decisions
    - Zero files in `src/` may specify `pragma SPARK_Mode (Off);`.
 2. **Zero Unbounded Allocation in Verified Units**:
    - All strings, byte pages, vectors, JSON tokens, KV tables, and Pub/Sub queues use statically bounded arrays and subtypes so `GNATprove` can prove 100% Absence of Run-Time Errors (AoRTE).
-3. **Professional Ada / Alire / GNAT Naming (`ADR-004`)**:
+3. **Professional Ada / Alire / GNAT Naming**:
    - Alire crate and GPR project file use lowercase `snake_case`: `nhe_o` (`nhe_o.gpr`).
    - Hierarchical Ada identifiers use `Mixed_Case_With_Underscores`: `Nhe_O.<Module>`, mapped to GNAT krunched filenames `src/nhe_o-<module>.ads` and `src/nhe_o-<module>.adb` (`_` inside identifier, `-` for child package hierarchy).
 

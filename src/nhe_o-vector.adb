@@ -69,14 +69,29 @@ package body Nhe_O.Vector is
    begin
       if X <= 0.0 then
          return 0.0;
+      elsif X >= 1.0 then
+         Guess := (if X > 2.0 then X * 0.5 else 1.0);
+         for Step in 1 .. 80 loop
+            pragma Loop_Invariant (Guess >= 1.0);
+            Guess := 0.5 * Guess + 0.5 * (X / Guess);
+            if Guess < 1.0 then
+               Guess := 1.0;
+            end if;
+         end loop;
+         return Guess;
+      else
+         Guess := 1.0;
+         for Step in 1 .. 80 loop
+            pragma Loop_Invariant (Guess >= X and then Guess <= 1.0);
+            Guess := 0.5 * Guess + 0.5 * (X / Guess);
+            if Guess < X then
+               Guess := X;
+            elsif Guess > 1.0 then
+               Guess := 1.0;
+            end if;
+         end loop;
+         return Guess;
       end if;
-      Guess := (if X > 1.0 then X * 0.5 else 1.0);
-      for Step in 1 .. 64 loop
-         pragma Loop_Invariant (Guess >= 0.0);
-         exit when Guess <= 1.0e-18;
-         Guess := 0.5 * (Guess + (X / Guess));
-      end loop;
-      return Guess;
    end Sqrt_Bounded;
 
    function L2_Distance
@@ -96,11 +111,11 @@ package body Nhe_O.Vector is
       Sim    : Float;
       Dist   : Float;
    begin
-      if Norm_A <= 1.0e-12 or else Norm_B <= 1.0e-12 then
+      if Norm_A <= 1.0e-18 or else Norm_B <= 1.0e-18 then
          return 1.0;
       end if;
       Denom := Norm_A * Norm_B;
-      if Denom <= 1.0e-12 then
+      if Denom <= 1.0e-36 then
          return 1.0;
       end if;
       Sim := Dot / Denom;
