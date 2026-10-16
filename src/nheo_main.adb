@@ -1,0 +1,180 @@
+--  Formally Verified Entrypoint for NheO Embedded DBMS (SPARK_Mode => On)
+pragma SPARK_Mode (On);
+
+with Interfaces;       use Interfaces;
+with Nheo;
+with Nheo.Types;       use Nheo.Types;
+with Nheo.Vector;      use Nheo.Vector;
+with Nheo.JSON;        use Nheo.JSON;
+with Nheo.IO;          use Nheo.IO;
+with Nheo.Transaction; use Nheo.Transaction;
+with Nheo.KV;          use Nheo.KV;
+with Nheo.PubSub;      use Nheo.PubSub;
+with Nheo.SQL;         use Nheo.SQL;
+
+procedure Nheo_Main is
+
+   --  1. PostgreSQL SQL & Type variables
+   SQL_Query : constant Bounded_Text := Make_Text (
+     "SELECT id, meta->>'title', embedding <-> $1::vector AS dist " &
+     "FROM documents WHERE meta @> '{""lang"":""vi""}'::jsonb ORDER BY dist LIMIT 5;"
+   );
+   SQL_Desc   : Parsed_SQL_Descriptor;
+   SQL_Status : Engine_Status;
+   Resolved_T : Pg_Data_Type;
+   Type_Valid : Boolean;
+
+   --  2. Vector Database variables
+   Vec_A  : constant Vector_Value := Make_Vector_3D (1.0, 0.0, 0.0);
+   Vec_B  : constant Vector_Value := Make_Vector_3D (1.0, 0.0, 0.0);
+   Vec_C  : constant Vector_Value := Make_Vector_3D (0.0, 3.0, 4.0);
+   L2_AB  : Non_Negative_Float;
+   L2_AC  : Non_Negative_Float;
+   Cos_AB : Float;
+   NIP_AC : Float;
+
+   --  3. PostgreSQL JSON / JSONB variables
+   Raw_JSON   : constant Bounded_Text := Make_Text ("{""engine"":""NheO"",""verified"":true}");
+   Doc_Main   : JSONB_Document;
+   Doc_Filter : JSONB_Document;
+   JSON_Stat  : Engine_Status;
+   Field_Hit  : Boolean;
+   Field_Val  : Bounded_Text;
+
+   --  4. ACID Transaction, MVCC & WAL Disk Persistence variables
+   Next_Tx    : Valid_Tx_Id := 1;
+   Tx_1       : Transaction_Context;
+   Tuple_1    : MVCC_Tuple_Header;
+   Page_Out   : constant Page_Buffer := [1 => 16#4E#, 2 => 16#48#, 3 => 16#45#, 4 => 16#4F#, others => 0];
+   Page_In    : Page_Buffer := [others => 0];
+   DB_File    : constant Bounded_Text := Make_Text ("/tmp/nheo_verify.nheo");
+   WAL_File   : constant Bounded_Text := Make_Text ("/tmp/nheo_verify.nheo.wal");
+   Tx_Status  : Engine_Status;
+   Read_Ok    : Boolean;
+   CRC_Before : Unsigned_32;
+   CRC_After  : Unsigned_32;
+
+   --  5. Redis-Compatible Key-Value Cache variables
+   Cache      : KV_Store;
+   KV_Val     : Bounded_Text;
+   KV_Status  : Engine_Status;
+   Counter_V  : Integer_64;
+
+   --  6. Pub/Sub Broker variables
+   Broker     : PubSub_Broker;
+   Sub_Exact  : Subscriber_Id;
+   Sub_Wild   : Subscriber_Id;
+   Sub_Stat   : Engine_Status;
+   Deliv_Cnt  : Subscriber_Count;
+   Msg_Out    : PubSub_Message;
+   Msg_Found  : Boolean;
+
+begin
+   Print_Line ("=====================================================================");
+   Print_Line ("  NheO Embedded Multi-Model Database Engine (Ada 2022 / SPARK 2022)");
+   Print_Line ("  Version: " & Nheo.Version & " | Core Logic: SPARK_Mode(On) | I/O: Ada");
+   Print_Line ("=====================================================================");
+   Print_Blank_Line;
+
+   --  1. Verify PostgreSQL SQL Syntax & Data Type Catalog
+   Print_Line ("[1/6] Verifying PostgreSQL SQL Dialect & Data Types (Nheo.SQL / Nheo.Types)...");
+   Analyze_SQL (SQL_Query, SQL_Desc, SQL_Status);
+   pragma Assert (SQL_Status = Status_Ok);
+   pragma Assert (SQL_Desc.Kind = Stmt_Select);
+   pragma Assert (SQL_Desc.Has_Positional_Param);
+   pragma Assert (SQL_Desc.Has_Pg_Type_Cast);
+   pragma Assert (SQL_Desc.Has_Vector_Operator);
+   pragma Assert (SQL_Desc.Has_JSONB_Operator);
+
+   Resolve_Pg_Type (Make_Ident ("JSONB"), Resolved_T, Type_Valid);
+   pragma Assert (Type_Valid and then Resolved_T = Pg_JSONB);
+   Resolve_Pg_Type (Make_Ident ("VECTOR"), Resolved_T, Type_Valid);
+   pragma Assert (Type_Valid and then Resolved_T = Pg_Vector);
+   Print_Line ("  => Passed: PostgreSQL SELECT with $1::vector, <->, ->>, and @> parsed.");
+
+   --  2. Verify Vector Database Engine (`<->`, `<=>`, `<#>`)
+   Print_Line ("[2/6] Verifying Vector Similarity Engine (Nheo.Vector)...");
+   L2_AB  := L2_Distance (Vec_A, Vec_B);
+   L2_AC  := L2_Distance_Squared (Vec_A, Vec_C);
+   Cos_AB := Cosine_Distance (Vec_A, Vec_B);
+   NIP_AC := Negative_Inner_Product (Vec_A, Vec_C);
+   pragma Assert (L2_AB < 0.001);
+   pragma Assert (abs (L2_AC - 26.0) < 0.001);
+   pragma Assert (Cos_AB < 0.01);
+   pragma Assert (abs (NIP_AC - 0.0) < 0.001);
+   Print_Line ("  => Passed: L2 (<->), Cosine (<=>), and Inner Product (<#>) invariants hold.");
+
+   --  3. Verify PostgreSQL JSON / JSONB Engine (`->`, `->>`, `@>`, `?`)
+   Print_Line ("[3/6] Verifying PostgreSQL JSON/JSONB Engine (Nheo.JSON)...");
+   pragma Assert (Is_Valid_JSON (Raw_JSON));
+   Put_Field (Doc_Main, Make_Ident ("engine"), Make_Text ("NheO"), JSONB_String, JSON_Stat);
+   pragma Assert (JSON_Stat = Status_Ok);
+   Put_Field (Doc_Main, Make_Ident ("lang"), Make_Text ("vi"), JSONB_String, JSON_Stat);
+   pragma Assert (JSON_Stat = Status_Ok);
+
+   Put_Field (Doc_Filter, Make_Ident ("lang"), Make_Text ("vi"), JSONB_String, JSON_Stat);
+   pragma Assert (JSON_Stat = Status_Ok);
+
+   pragma Assert (Has_Key (Doc_Main, Make_Ident ("engine")));
+   Get_Field_Text (Doc_Main, Make_Ident ("engine"), Field_Hit, Field_Val);
+   pragma Assert (Field_Hit and then Equal_Text (Field_Val, Make_Text ("NheO")));
+   pragma Assert (Contains (Doc_Main, Doc_Filter));
+   Print_Line ("  => Passed: JSON syntax check and JSONB `?`, `->>`, `@>` operators verified.");
+
+   --  4. Verify ACID MVCC Visibility & Disk WAL/Page Persistence
+   Print_Line ("[4/6] Verifying ACID Transactions, MVCC & Disk WAL I/O (Nheo.Transaction / Nheo.IO)...");
+   Begin_Tx (Next_Tx, Tx_1);
+   Tuple_1 := (Xmin => Tx_1.Id, Xmax => 0);
+   pragma Assert (Is_Tuple_Visible (Tuple_1, Tx_1.Snapshot));
+
+   CRC_Before := Compute_CRC32 (Page_Out);
+   Commit_Tx (Tx_1, DB_File, WAL_File, 0, Page_Out, Tx_Status);
+   pragma Assert (Tx_Status = Status_Ok and then Tx_1.State = Tx_Committed);
+
+   Read_Page (DB_File, 0, Page_In, Read_Ok);
+   CRC_After := Compute_CRC32 (Page_In);
+   pragma Assert (Read_Ok and then CRC_Before = CRC_After);
+
+   Delete_File_If_Exists (DB_File);
+   Delete_File_If_Exists (WAL_File);
+   Print_Line ("  => Passed: MVCC snapshot visibility, WAL frame append, and 4KB page CRC32 verified.");
+
+   --  5. Verify Redis-Compatible Key-Value Cache & TTL Expiration
+   Print_Line ("[5/6] Verifying Redis-Compatible Key-Value Cache & TTL (Nheo.KV)...");
+   Set (Cache, Make_Ident ("session:42"), Make_Text ("user_long"), Now => 1000, Has_TTL => True, TTL_Sec => 60);
+   pragma Assert (Exists (Cache, Make_Ident ("session:42"), Now => 1030));
+   pragma Assert (Remaining_TTL (Cache, Make_Ident ("session:42"), Now => 1030) = 30);
+
+   Get (Cache, Make_Ident ("session:42"), Now => 1030, Val => KV_Val, Status => KV_Status);
+   pragma Assert (KV_Status = Status_Ok and then Equal_Text (KV_Val, Make_Text ("user_long")));
+
+   --  Verify expiration at Now = 1061 (BR-004)
+   Get (Cache, Make_Ident ("session:42"), Now => 1061, Val => KV_Val, Status => KV_Status);
+   pragma Assert (KV_Status = Status_Expired);
+   pragma Assert (not Exists (Cache, Make_Ident ("session:42"), Now => 1061));
+
+   Incr_By (Cache, Make_Ident ("metrics:hits"), 5, Now => 1062, New_Val => Counter_V, Status => KV_Status);
+   pragma Assert (KV_Status = Status_Ok and then Counter_V = 5);
+   Incr_By (Cache, Make_Ident ("metrics:hits"), 10, Now => 1063, New_Val => Counter_V, Status => KV_Status);
+   pragma Assert (KV_Status = Status_Ok and then Counter_V = 15);
+   Print_Line ("  => Passed: Redis SETEX, GET, TTL lazy expiration, and atomic INCRBY verified.");
+
+   --  6. Verify Pub/Sub Channel & Wildcard Pattern Broker
+   Print_Line ("[6/6] Verifying Ring-Buffer Pub/Sub Broker (Nheo.PubSub)...");
+   Subscribe (Broker, Make_Ident ("cache.invalidation"), Sub_Exact, Sub_Stat);
+   pragma Assert (Sub_Stat = Status_Ok);
+   Subscribe (Broker, Make_Ident ("cache.*"), Sub_Wild, Sub_Stat);
+   pragma Assert (Sub_Stat = Status_Ok);
+
+   Publish (Broker, Make_Ident ("cache.invalidation"), Make_Text ("key=session:42"), Deliv_Cnt);
+   pragma Assert (Deliv_Cnt = 2);
+
+   Poll_Message (Broker, Sub_Exact, Msg_Out, Msg_Found);
+   pragma Assert (Msg_Found and then Equal_Text (Msg_Out.Payload, Make_Text ("key=session:42")));
+   Poll_Message (Broker, Sub_Wild, Msg_Out, Msg_Found);
+   pragma Assert (Msg_Found and then Equal_Text (Msg_Out.Payload, Make_Text ("key=session:42")));
+   Print_Line ("  => Passed: Exact and wildcard (`cache.*`) Pub/Sub delivery verified.");
+
+   Print_Blank_Line;
+   Print_Line ("ALL NheO SPARK/Ada Verification Suites Passed Successfully.");
+end Nheo_Main;
