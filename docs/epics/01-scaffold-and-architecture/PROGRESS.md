@@ -9,7 +9,7 @@ Status legend: ☐ todo · ◐ in progress · ☑ done
 | # | Task | Status | Tests |
 |---|------|--------|-------|
 | 1 | Adopt Monion `project-docs` R8 template and replace all placeholders | ☑ | `SELF-AUDIT.md` A1–A3, B7 passed |
-| 2 | Author `VISION.md`, `ARCHITECTURE.md`, `DECISIONS.md` (`ADR-001`..`ADR-005`), and `business-rules.md` (`BR-001`..`BR-005`) | ☑ | Manual review & `SELF-AUDIT.md` |
+| 2 | Author `VISION.md`, `ARCHITECTURE.md`, `DECISIONS.md` (`ADR-001`..`ADR-004`), and `business-rules.md` (`BR-001`..`BR-005`) | ☑ | Manual review & `SELF-AUDIT.md` |
 | 3 | Implement PostgreSQL type system in SPARK (`Nhe_O.Types`) | ☑ | Compiled (`-gnat2022 -gnatwa -gnata`) & runtime verified |
 | 4 | Implement Vector similarity engine (`<->`, `<=>`, `<#>`) in SPARK (`Nhe_O.Vector`) | ☑ | Compiled & contract assertions verified |
 | 5 | Implement PostgreSQL JSON/JSONB validator and operators (`->`, `->>`, `@>`, `?`) in SPARK (`Nhe_O.JSON`) | ☑ | Compiled & contract assertions verified |
@@ -21,7 +21,7 @@ Status legend: ☐ todo · ◐ in progress · ☑ done
 | 11 | Initialize Git repository, standardize Ada/Alire naming (`nhe_o` / `Nhe_O`), and push to private GitHub repo (`hoangdinhlong/nhe_o`) | ☑ | `git push` & `gh repo view` verified |
 
 ## Notes / sequencing
-- Per `BR-001` and `ADR-005`, 100% of `.ads` and `.adb` files in `src/` (all 18 files, including `src/nhe_o-io.adb` and `src/nhe_o_main.adb`) must maintain `pragma SPARK_Mode (On);`.
+- Per `BR-001` and `ADR-002`, 100% of `.ads` and `.adb` files in `src/` (all 18 files, including `src/nhe_o-io.adb` and `src/nhe_o_main.adb`) must maintain `pragma SPARK_Mode (On);`.
 - Zero files in `src/` may use `pragma SPARK_Mode (Off);`.
 
 ## Open questions

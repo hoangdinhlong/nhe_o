@@ -73,6 +73,41 @@ package body Nhe_O.SQL is
       return True;
    end Starts_With_Keyword;
 
+   function Has_Positional_Parameter (Query : Bounded_Text) return Boolean is
+   begin
+      if Query.Length < 2 then
+         return False;
+      end if;
+      for I in 1 .. Query.Length - 1 loop
+         pragma Loop_Invariant (I in 1 .. Query.Length - 1);
+         if Query.Data (I) = '$'
+           and then Query.Data (I + 1) in '1' .. '9'
+         then
+            return True;
+         end if;
+      end loop;
+      return False;
+   end Has_Positional_Parameter;
+
+   --  Match standalone JSON/JSONB `->` or `->>` without matching `<->` (L2 vector) or `-->`
+   function Has_JSONB_Arrow (Query : Bounded_Text) return Boolean is
+   begin
+      if Query.Length < 2 then
+         return False;
+      end if;
+      for I in 1 .. Query.Length - 1 loop
+         pragma Loop_Invariant (I in 1 .. Query.Length - 1);
+         if Query.Data (I) = '-' and then Query.Data (I + 1) = '>' then
+            if I = 1
+              or else (Query.Data (I - 1) /= '<' and then Query.Data (I - 1) /= '-')
+            then
+               return True;
+            end if;
+         end if;
+      end loop;
+      return False;
+   end Has_JSONB_Arrow;
+
    procedure Analyze_SQL
      (Query  : in     Bounded_Text;
       Result :    out Parsed_SQL_Descriptor;
@@ -111,19 +146,18 @@ package body Nhe_O.SQL is
       end if;
 
       --  Detect PostgreSQL-specific operators and features
-      Result.Has_Positional_Param :=
-        Contains_Substring_CI (Query, "$1") or else Contains_Substring_CI (Query, "$2");
-      Result.Has_Pg_Type_Cast := Contains_Substring_CI (Query, "::");
-      Result.Has_Vector_Operator :=
+      Result.Has_Positional_Param := Has_Positional_Parameter (Query);
+      Result.Has_Pg_Type_Cast     := Contains_Substring_CI (Query, "::");
+      Result.Has_Vector_Operator  :=
         Contains_Substring_CI (Query, "<->")
         or else Contains_Substring_CI (Query, "<=>")
         or else Contains_Substring_CI (Query, "<#>");
-      Result.Has_JSONB_Operator :=
-        Contains_Substring_CI (Query, "->>")
-        or else Contains_Substring_CI (Query, "->")
-        or else Contains_Substring_CI (Query, "@>");
-      Result.Has_Upsert_Conflict := Contains_Substring_CI (Query, "ON CONFLICT");
-      Result.Has_Returning       := Contains_Substring_CI (Query, "RETURNING");
+      Result.Has_JSONB_Operator   :=
+        Has_JSONB_Arrow (Query)
+        or else Contains_Substring_CI (Query, "@>")
+        or else Contains_Substring_CI (Query, " ? ");
+      Result.Has_Upsert_Conflict  := Contains_Substring_CI (Query, "ON CONFLICT");
+      Result.Has_Returning        := Contains_Substring_CI (Query, "RETURNING");
 
       Status := Status_Ok;
    end Analyze_SQL;

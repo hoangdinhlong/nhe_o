@@ -3,71 +3,80 @@ pragma SPARK_Mode (On);
 package body Nhe_O.JSON is
 
    function Is_Valid_JSON (Raw : Bounded_Text) return Boolean is
-      Brace_Depth   : Integer := 0;
-      Bracket_Depth : Integer := 0;
-      In_Quotes     : Boolean := False;
-      Escaped       : Boolean := False;
-      First_Non_WS  : Character := ' ';
-      Last_Non_WS   : Character := ' ';
+      Stack        : String (1 .. Max_Text_Len) := [others => ' '];
+      Depth        : Natural range 0 .. Max_Text_Len := 0;
+      In_Quotes    : Boolean := False;
+      Escaped      : Boolean := False;
+      Root_Started : Boolean := False;
+      Root_Closed  : Boolean := False;
    begin
       if Raw.Length < 2 then
          return False;
       end if;
 
       for I in 1 .. Raw.Length loop
-         pragma Loop_Invariant (I in 1 .. Raw.Length);
+         pragma Loop_Invariant
+           (I in 1 .. Raw.Length and then Depth <= Max_Text_Len);
          declare
-            C : constant Character := Raw.Data (I);
+            C     : constant Character := Raw.Data (I);
+            Is_WS : constant Boolean   :=
+              (C = ' ' or else C = ASCII.HT
+               or else C = ASCII.LF or else C = ASCII.CR);
          begin
-            if not In_Quotes and then C /= ' ' and then C /= ASCII.HT
-              and then C /= ASCII.LF and then C /= ASCII.CR
-            then
-               if First_Non_WS = ' ' then
-                  First_Non_WS := C;
+            if In_Quotes then
+               if Escaped then
+                  Escaped := False;
+               elsif C = '\' then
+                  Escaped := True;
+               elsif C = '"' then
+                  In_Quotes := False;
                end if;
-               Last_Non_WS := C;
-            end if;
-
-            if Escaped then
-               Escaped := False;
-            elsif C = '\' and then In_Quotes then
-               Escaped := True;
-            elsif C = '"' then
-               In_Quotes := not In_Quotes;
-            elsif not In_Quotes then
-               if C = '{' then
-                  if Brace_Depth < Max_Text_Len then
-                     Brace_Depth := Brace_Depth + 1;
+            elsif not Is_WS then
+               if Root_Closed then
+                  --  Reject trailing non-whitespace tokens or concatenated roots (e.g. `{}{}`)
+                  return False;
+               elsif not Root_Started then
+                  if C /= '{' and then C /= '[' then
+                     return False;
+                  end if;
+                  Root_Started := True;
+                  Depth        := 1;
+                  Stack (1)    := C;
+               elsif C = '"' then
+                  In_Quotes := True;
+               elsif C = '{' or else C = '[' then
+                  if Depth < Max_Text_Len then
+                     Depth         := Depth + 1;
+                     Stack (Depth) := C;
                   else
                      return False;
                   end if;
                elsif C = '}' then
-                  Brace_Depth := Brace_Depth - 1;
-                  if Brace_Depth < 0 then
+                  if Depth = 0 or else Stack (Depth) /= '{' then
                      return False;
                   end if;
-               elsif C = '[' then
-                  if Bracket_Depth < Max_Text_Len then
-                     Bracket_Depth := Bracket_Depth + 1;
-                  else
-                     return False;
+                  Depth := Depth - 1;
+                  if Depth = 0 then
+                     Root_Closed := True;
                   end if;
                elsif C = ']' then
-                  Bracket_Depth := Bracket_Depth - 1;
-                  if Bracket_Depth < 0 then
+                  if Depth = 0 or else Stack (Depth) /= '[' then
                      return False;
+                  end if;
+                  Depth := Depth - 1;
+                  if Depth = 0 then
+                     Root_Closed := True;
                   end if;
                end if;
             end if;
          end;
       end loop;
 
-      if In_Quotes or else Escaped or else Brace_Depth /= 0 or else Bracket_Depth /= 0 then
-         return False;
-      end if;
-
-      return (First_Non_WS = '{' and then Last_Non_WS = '}')
-        or else (First_Non_WS = '[' and then Last_Non_WS = ']');
+      return Root_Started
+        and then Root_Closed
+        and then Depth = 0
+        and then not In_Quotes
+        and then not Escaped;
    end Is_Valid_JSON;
 
    procedure Put_Field
@@ -116,24 +125,38 @@ package body Nhe_O.JSON is
       return False;
    end Has_Key;
 
-   procedure Get_Field_Text
+   procedure Get_Field
      (Doc   : in     JSONB_Document;
       Key   : in     Bounded_Ident;
       Found :    out Boolean;
-      Val   :    out Bounded_Text)
+      Val   :    out Bounded_Text;
+      Kind  :    out JSONB_Value_Kind)
    is
    begin
       Val   := (Length => 0, Data => [others => ' ']);
+      Kind  := JSONB_Null;
       Found := False;
       for I in 1 .. Doc.Count loop
          pragma Loop_Invariant
            (I in 1 .. Doc.Count and not Found);
          if Doc.Fields (I).Active and then Equal_Ident (Doc.Fields (I).Key, Key) then
             Val   := Doc.Fields (I).Val;
+            Kind  := Doc.Fields (I).Kind;
             Found := True;
             return;
          end if;
       end loop;
+   end Get_Field;
+
+   procedure Get_Field_Text
+     (Doc   : in     JSONB_Document;
+      Key   : in     Bounded_Ident;
+      Found :    out Boolean;
+      Val   :    out Bounded_Text)
+   is
+      Ignored_Kind : JSONB_Value_Kind;
+   begin
+      Get_Field (Doc, Key, Found, Val, Ignored_Kind);
    end Get_Field_Text;
 
    function Contains

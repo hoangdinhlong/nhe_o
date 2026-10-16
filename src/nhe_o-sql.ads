@@ -24,7 +24,7 @@ package Nhe_O.SQL is
       Has_Positional_Param : Boolean            := False; --  e.g. $1, $2
       Has_Pg_Type_Cast     : Boolean            := False; --  e.g. ::jsonb, ::vector
       Has_Vector_Operator  : Boolean            := False; --  <->, <=>, <#>
-      Has_JSONB_Operator   : Boolean            := False; --  ->, ->>, @>
+      Has_JSONB_Operator   : Boolean            := False; --  ->, ->>, @>, ?
       Has_Upsert_Conflict  : Boolean            := False; --  ON CONFLICT
       Has_Returning        : Boolean            := False; --  RETURNING
    end record;

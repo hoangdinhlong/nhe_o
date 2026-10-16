@@ -20,6 +20,7 @@ package body Nhe_O.IO is
    O_RDWR     : constant int      := 8#2#;
    O_CREAT    : constant int      := 8#100#;
    O_APPEND   : constant int      := 8#2000#;
+   O_CLOEXEC  : constant int      := 8#2000000#;
    Mode_0600  : constant unsigned := 8#600#;
 
    --  Contract-bound POSIX kernel syscall bindings (never raise Ada exceptions)
@@ -44,7 +45,7 @@ package body Nhe_O.IO is
 
    function Posix_Pread
      (Fd     : int;
-      Buf    : out Page_Buffer;
+      Buf    : in out Page_Buffer;
       Count  : size_t;
       Offset : Off_T) return Ssize_T
      with Side_Effects,
@@ -60,6 +61,16 @@ package body Nhe_O.IO is
           Import        => True,
           Convention    => C,
           External_Name => "write";
+
+   function Posix_Pread_WAL
+     (Fd     : int;
+      Buf    : in out WAL_Frame_Buffer;
+      Count  : size_t;
+      Offset : Off_T) return Ssize_T
+     with Side_Effects,
+          Import        => True,
+          Convention    => C,
+          External_Name => "pread";
 
    function Posix_Fsync (Fd : int) return int
      with Side_Effects,
@@ -79,6 +90,17 @@ package body Nhe_O.IO is
           Convention    => C,
           External_Name => "unlink";
 
+   function Has_Embedded_NUL (Path : Bounded_Text) return Boolean is
+   begin
+      for I in 1 .. Path.Length loop
+         pragma Loop_Invariant (I in 1 .. Path.Length);
+         if Path.Data (I) = ASCII.NUL then
+            return True;
+         end if;
+      end loop;
+      return False;
+   end Has_Embedded_NUL;
+
    procedure To_C_Path
      (Path   : in     Bounded_Text;
       C_Path :    out C_Path_String)
@@ -86,6 +108,9 @@ package body Nhe_O.IO is
    begin
       C_Path := [others => ASCII.NUL];
       for I in 1 .. Path.Length loop
+         pragma Loop_Invariant
+           (I in 1 .. Path.Length
+            and then (for all J in 1 .. I - 1 => C_Path (J) = Path.Data (J)));
          C_Path (I) := Path.Data (I);
       end loop;
       C_Path (Path.Length + 1) := ASCII.NUL;
@@ -104,8 +129,13 @@ package body Nhe_O.IO is
       Sync_Rc : int;
       Close_R : int;
    begin
+      if Has_Embedded_NUL (File_Path) then
+         Success := False;
+         return;
+      end if;
+
       To_C_Path (File_Path, C_Path);
-      Fd := Posix_Open (C_Path, O_RDWR + O_CREAT, Mode_0600);
+      Fd := Posix_Open (C_Path, O_RDWR + O_CREAT + O_CLOEXEC, Mode_0600);
       if Fd < 0 then
          Success := False;
          return;
@@ -133,8 +163,13 @@ package body Nhe_O.IO is
       Close_R : int;
    begin
       Buffer := [others => 0];
+      if Has_Embedded_NUL (File_Path) then
+         Success := False;
+         return;
+      end if;
+
       To_C_Path (File_Path, C_Path);
-      Fd := Posix_Open (C_Path, O_RDONLY, 0);
+      Fd := Posix_Open (C_Path, O_RDONLY + O_CLOEXEC, 0);
       if Fd < 0 then
          Success := False;
          return;
@@ -162,8 +197,13 @@ package body Nhe_O.IO is
       Sync_Rc : int;
       Close_R : int;
    begin
+      if Has_Embedded_NUL (WAL_Path) then
+         Success := False;
+         return;
+      end if;
+
       To_C_Path (WAL_Path, C_Path);
-      Fd := Posix_Open (C_Path, O_WRONLY + O_CREAT + O_APPEND, Mode_0600);
+      Fd := Posix_Open (C_Path, O_WRONLY + O_CREAT + O_APPEND + O_CLOEXEC, Mode_0600);
       if Fd < 0 then
          Success := False;
          return;
@@ -178,6 +218,42 @@ package body Nhe_O.IO is
                  and then (Close_R = 0);
    end Append_WAL_Frame;
 
+   procedure Read_WAL_Frame
+     (WAL_Path  : in     Bounded_Text;
+      Frame_Idx : in     Valid_Page_Id;
+      Frame     :    out WAL_Frame_Buffer;
+      Success   :    out Boolean)
+   is
+      C_Path  : C_Path_String;
+      Fd      : int;
+      Offset  : constant Off_T := Off_T (Frame_Idx) * Off_T (WAL_Frame_Size);
+      N_Read  : Ssize_T;
+      Close_R : int;
+   begin
+      Frame := [others => 0];
+      if Has_Embedded_NUL (WAL_Path) then
+         Success := False;
+         return;
+      end if;
+
+      To_C_Path (WAL_Path, C_Path);
+      Fd := Posix_Open (C_Path, O_RDONLY + O_CLOEXEC, 0);
+      if Fd < 0 then
+         Success := False;
+         return;
+      end if;
+
+      N_Read  := Posix_Pread_WAL (Fd, Frame, size_t (WAL_Frame_Size), Offset);
+      Close_R := Posix_Close (Fd);
+
+      if N_Read = Ssize_T (WAL_Frame_Size) and then Close_R = 0 then
+         Success := True;
+      else
+         Frame   := [others => 0];
+         Success := False;
+      end if;
+   end Read_WAL_Frame;
+
    procedure Delete_File_If_Exists
      (File_Path : in Bounded_Text)
    is
@@ -185,6 +261,10 @@ package body Nhe_O.IO is
       Rc     : int;
       pragma Unreferenced (Rc);
    begin
+      if Has_Embedded_NUL (File_Path) then
+         return;
+      end if;
+
       To_C_Path (File_Path, C_Path);
       Rc := Posix_Unlink (C_Path);
    end Delete_File_If_Exists;

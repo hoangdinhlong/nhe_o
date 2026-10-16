@@ -7,6 +7,5 @@ gnatprove/
 *.ali
 *.o
 b~*
-*.nheo
 *.nhe_o
 *.wal

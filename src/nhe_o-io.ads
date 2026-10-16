@@ -30,11 +30,16 @@ package Nhe_O.IO is
    subtype C_Path_Index is Positive range 1 .. Max_C_Path_Length;
    subtype C_Path_String is String (C_Path_Index);
 
+   --  True iff Path contains an embedded ASCII.NUL character within 1 .. Path.Length
+   function Has_Embedded_NUL (Path : Bounded_Text) return Boolean;
+
    procedure To_C_Path
      (Path   : in     Bounded_Text;
       C_Path :    out C_Path_String)
-     with Pre  => Path.Length > 0,
-          Post => C_Path (Path.Length + 1) = ASCII.NUL;
+     with Pre  => Path.Length > 0 and then not Has_Embedded_NUL (Path),
+          Post => C_Path (Path.Length + 1) = ASCII.NUL
+                  and then (for all I in 1 .. Path.Length =>
+                              C_Path (I) = Path.Data (I));
 
    --  Write a 4096-byte slotted page to the database file at offset Page_Id * 4096
    procedure Write_Page
@@ -57,6 +62,14 @@ package Nhe_O.IO is
      (WAL_Path : in     Bounded_Text;
       Frame    : in     WAL_Frame_Buffer;
       Success  :    out Boolean)
+     with Pre => WAL_Path.Length > 0;
+
+   --  Read a WAL frame at 0-based index Frame_Idx from the Write-Ahead Log on disk
+   procedure Read_WAL_Frame
+     (WAL_Path  : in     Bounded_Text;
+      Frame_Idx : in     Valid_Page_Id;
+      Frame     :    out WAL_Frame_Buffer;
+      Success   :    out Boolean)
      with Pre => WAL_Path.Length > 0;
 
    --  Delete a database or WAL file if present on disk

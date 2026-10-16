@@ -18,9 +18,9 @@
 5. **Full ACID via MVCC & WAL**: Multi-Version Concurrency Control (`xmin`/`xmax` snapshot isolation) combined with CRC32-verified Write-Ahead Logging and hardware `fsync`.
 6. **Redis-Compatible Key-Value Cache**: Direct sub-microsecond `GET`, `SET`, `DEL`, `EXISTS`, `INCRBY`, `EXPIRE`, and `TTL` operations with deterministic TTL expiration and LRU cache eviction.
 7. **In-Process Pub/Sub Messaging**: Bounded ring-buffer broker supporting `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, and wildcard pattern subscriptions (`*`).
-8. **100% SPARK Verification Mandate (`BR-001` / `ADR-005`)**:
+8. **100% SPARK Verification Mandate (`BR-001` / `ADR-002`)**:
    - **100% of specifications, bodies, and entrypoints** (`Nhe_O`, `Nhe_O.Types`, `Nhe_O.Vector`, `Nhe_O.JSON`, `Nhe_O.Transaction`, `Nhe_O.KV`, `Nhe_O.PubSub`, `Nhe_O.SQL`, `Nhe_O.IO` spec & body, and `Nhe_O_Main`) operate under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)`.
-   - **Contract-Bound POSIX I/O (`src/nhe_o-io.adb`)**: Physical disk operations bypass exception-raising `Ada.Streams.Stream_IO` and bind directly in `SPARK_Mode (On)` to atomic POSIX kernel syscalls (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`, `unlink`) with formally verified NUL-terminated path construction (`To_C_Path`), bounded 64-bit page offset arithmetic (`Valid_Page_Id`), and explicit status verification.
+   - **Contract-Bound POSIX I/O (`src/nhe_o-io.adb`)**: Physical disk operations bypass exception-raising `Ada.Streams.Stream_IO` and bind directly in `SPARK_Mode (On)` to atomic POSIX kernel syscalls (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`, `unlink`) with formally verified NUL-terminated path construction (`To_C_Path`), embedded-NUL path rejection (`Has_Embedded_NUL`), bounded 64-bit page offset arithmetic (`Valid_Page_Id`), and explicit status verification.
 
 ---
 

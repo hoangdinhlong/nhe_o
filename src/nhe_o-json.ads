@@ -50,6 +50,15 @@ package Nhe_O.JSON is
      (Doc : JSONB_Document;
       Key : Bounded_Ident) return Boolean;
 
+   --  PostgreSQL `->` operator: Extract JSON object field with its JSONB value kind
+   procedure Get_Field
+     (Doc   : in     JSONB_Document;
+      Key   : in     Bounded_Ident;
+      Found :    out Boolean;
+      Val   :    out Bounded_Text;
+      Kind  :    out JSONB_Value_Kind)
+     with Post => (if Found then Has_Key (Doc, Key));
+
    --  PostgreSQL `->>` operator: Extract JSON object field as TEXT
    procedure Get_Field_Text
      (Doc   : in     JSONB_Document;

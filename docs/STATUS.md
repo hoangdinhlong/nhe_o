@@ -11,14 +11,14 @@ _Last updated: 2026-10-16_
 
 `nhe_o` (Ada root package `Nhe_O`, named after the owner's cat **"Nhé O"**) — A formally verified, disk-persistent, ACID-compliant embedded database engine written in Ada/SPARK featuring PostgreSQL syntax and data types, native Vector search, JSON/JSONB processing, Redis-compatible Key-Value caching, and Pub/Sub messaging.
 
-The project has completed **Epic 01 (Scaffold and Architecture)** and is ready for **Epic 02 (B+Tree Storage Indexing, HNSW Vector Graph & Query Executor)**. The documentation system is scaffolded from Monion's `project-docs` archetype (Revision R8), core architectural decisions (`ADR-001`..`ADR-005`) and domain invariants (`BR-001`..`BR-005`) are ratified, and the foundational Ada 2022 / SPARK 2022 codebase is implemented in **100% `pragma SPARK_Mode (On);`** across all 18 source files, compiled with zero warnings, runtime-verified with contract assertions (`-gnata`), and published to GitHub (`hoangdinhlong/nhe_o`).
+The project has completed **Epic 01 (Scaffold and Architecture)** and is ready for **Epic 02 (B+Tree Storage Indexing, HNSW Vector Graph & Query Executor)**. The documentation system is scaffolded from Monion's `project-docs` archetype (Revision R8), core architectural decisions (`ADR-001`..`ADR-004`) and domain invariants (`BR-001`..`BR-005`) are ratified, and the foundational Ada 2022 / SPARK 2022 codebase is implemented in **100% `pragma SPARK_Mode (On);`** across all 18 source files, compiled with zero warnings, runtime-verified with contract assertions (`-gnata`), and published to GitHub (`hoangdinhlong/nhe_o`).
 
 - ✅ Monion `project-docs` R8 template applied and customized.
 - ✅ System vision, 100% `SPARK_Mode (On)` architecture, and domain invariants documented (`VISION.md`, `ARCHITECTURE.md`, `business-rules.md`).
-- ✅ Architectural decisions recorded (`ADR-001`..`ADR-005`), including standard Ada/Alire/GNAT naming (`nhe_o` / `Nhe_O` / `src/nhe_o-*.ad[sb]`) and 100% `SPARK_Mode (On)` POSIX syscall I/O (`ADR-005`).
+- ✅ Architectural decisions recorded (`ADR-001`..`ADR-004`), including 100% `SPARK_Mode (On)` with contract-bound POSIX syscall I/O (`ADR-002`) and standard Ada/Alire/GNAT naming (`nhe_o` / `Nhe_O` / `src/nhe_o-*.ad[sb]`, `ADR-004`).
 - ✅ PostgreSQL Type System (`Nhe_O.Types`), SQL Dialect Parser (`Nhe_O.SQL`), Vector Engine (`Nhe_O.Vector` with `<->`, `<=>`, `<#>`), and JSON/JSONB Engine (`Nhe_O.JSON` with `->`, `->>`, `@>`, `?`) implemented in 100% SPARK (`SPARK_Mode => On`).
 - ✅ ACID MVCC Transaction Manager & CRC32 WAL/Slotted-Page Framer (`Nhe_O.Transaction`), Redis-style KV Cache with TTL & LRU eviction (`Nhe_O.KV`), and Ring-Buffer Pub/Sub Broker (`Nhe_O.PubSub`) implemented in 100% SPARK (`SPARK_Mode => On`).
-- ✅ Contract-bound POSIX I/O substrate (`Nhe_O.IO` spec and body `src/nhe_o-io.adb` both in `SPARK_Mode => On`) persisting 4KB pages (`pread`/`pwrite`) and WAL frames (`write`/`fsync`) to disk with zero `SPARK_Mode (Off)` in the repository.
+- ✅ Contract-bound POSIX I/O substrate (`Nhe_O.IO` spec and body `src/nhe_o-io.adb` both in `SPARK_Mode => On`) persisting 4KB pages (`pread`/`pwrite`) and WAL frames (`write`/`pread`/`fsync`) to disk with zero `SPARK_Mode (Off)` in the repository.
 - ⛔ Multi-page B+Tree table/index splits and HNSW graph persistence (planned for Epic 02).
 - ⛔ Full SQL Volcano/Vectorized execution pipeline joining relational, JSONB, and vector predicates (planned for Epic 02).
 
@@ -43,10 +43,9 @@ Epic 01 is complete. Next concrete tasks for upcoming Epic 02:
 
 See `DECISIONS.md`.
 - `ADR-001`: Adoption of Monion's `project-docs` R8 documentation framework.
-- `ADR-002`: Strict SPARK Verification Mandate (Updated by `ADR-005`).
+- `ADR-002`: 100% `SPARK_Mode (On)` Mandate Across All Source Files via Contract-Bound POSIX Syscall I/O.
 - `ADR-003`: Unified Multi-Model Engine (PostgreSQL SQL/JSONB/Vector + Redis KV & Pub/Sub over MVCC/WAL).
-- `ADR-004`: Professional Ada/Alire/GNAT Naming Convention (`nhe_o` / `Nhe_O` / `nhe_o-<module>.ad[sb]`).
-- `ADR-005`: 100% `SPARK_Mode (On)` Across All Source Files via Contract-Bound POSIX Syscall I/O.
+- `ADR-004`: Ada/Alire/GNAT Naming and File Krunching Convention (`nhe_o` / `Nhe_O` / `nhe_o-<module>.ad[sb]`).
 
 Pre-decision ideas live in `ideas/`. Questions still waiting on an answer live in
 `OPEN-QUESTIONS.md`.

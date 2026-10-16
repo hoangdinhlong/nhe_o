@@ -54,7 +54,7 @@ Developers are forced either to run a heavy fleet of external server daemons (Po
 
 ## 4. Principles
 
-1. **100% `SPARK_Mode (On)` Everywhere (`BR-001` / `ADR-005`)**: No specification or body in `src/` may disable `SPARK_Mode`. Physical disk I/O in `Nhe_O.IO` binds directly to exception-free POSIX syscalls (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`, `unlink`) under `SPARK_Mode (On)`.
+1. **100% `SPARK_Mode (On)` Everywhere (`BR-001` / `ADR-002`)**: No specification or body in `src/` may disable `SPARK_Mode`. Physical disk I/O in `Nhe_O.IO` binds directly to exception-free POSIX syscalls (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`, `unlink`) under `SPARK_Mode (On)`.
 2. **Bounded & Deterministic Memory**: Avoid unbounded heap allocations inside the verified engine. Use bounded structures, fixed-size slotted pages (4096 bytes), and explicit capacity contracts (`Pre` / `Post` / `Type_Invariant`).
 3. **PostgreSQL Ergonomics in an Embedded Package**: Users should write familiar PostgreSQL queries, JSONB expressions, and `pgvector` operators without managing a database server.
 4. **ACID Without Compromise**: Caching speed must never corrupt durable state; MVCC visibility and WAL checksum invariants are enforced by formal contracts.

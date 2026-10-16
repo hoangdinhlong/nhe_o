@@ -71,7 +71,7 @@ package body Nhe_O.Vector is
          return 0.0;
       end if;
       Guess := (if X > 1.0 then X * 0.5 else 1.0);
-      for Step in 1 .. 16 loop
+      for Step in 1 .. 64 loop
          pragma Loop_Invariant (Guess >= 0.0);
          exit when Guess <= 1.0e-18;
          Guess := 0.5 * (Guess + (X / Guess));

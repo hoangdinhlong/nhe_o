@@ -33,21 +33,58 @@ package body Nhe_O.Transaction is
         or Unsigned_32 (Buf (Offset + 3));
    end Get_U32_BE;
 
+   function Update_CRC32_Byte
+     (CRC : Unsigned_32;
+      B   : Byte) return Unsigned_32
+   is
+      C : Unsigned_32 := CRC xor Unsigned_32 (B);
+   begin
+      for Bit in 1 .. 8 loop
+         if (C and 1) /= 0 then
+            C := Shift_Right (C, 1) xor 16#EDB8_8320#;
+         else
+            C := Shift_Right (C, 1);
+         end if;
+      end loop;
+      return C;
+   end Update_CRC32_Byte;
+
+   function Update_CRC32_U32
+     (CRC : Unsigned_32;
+      Val : Unsigned_32) return Unsigned_32
+   is
+      C : Unsigned_32 := CRC;
+   begin
+      C := Update_CRC32_Byte (C, Byte (Shift_Right (Val, 24) and 16#FF#));
+      C := Update_CRC32_Byte (C, Byte (Shift_Right (Val, 16) and 16#FF#));
+      C := Update_CRC32_Byte (C, Byte (Shift_Right (Val, 8)  and 16#FF#));
+      C := Update_CRC32_Byte (C, Byte (Val and 16#FF#));
+      return C;
+   end Update_CRC32_U32;
+
    function Compute_CRC32 (Page : Page_Buffer) return Unsigned_32 is
       CRC : Unsigned_32 := 16#FFFF_FFFF#;
    begin
       for I in Page_Offset loop
-         CRC := CRC xor Unsigned_32 (Page (I));
-         for Bit in 1 .. 8 loop
-            if (CRC and 1) /= 0 then
-               CRC := Shift_Right (CRC, 1) xor 16#EDB8_8320#;
-            else
-               CRC := Shift_Right (CRC, 1);
-            end if;
-         end loop;
+         CRC := Update_CRC32_Byte (CRC, Page (I));
       end loop;
       return not CRC;
    end Compute_CRC32;
+
+   function Compute_WAL_CRC32
+     (Tx_U32   : Unsigned_32;
+      Page_U32 : Unsigned_32;
+      Page     : Page_Buffer) return Unsigned_32
+   is
+      CRC : Unsigned_32 := 16#FFFF_FFFF#;
+   begin
+      CRC := Update_CRC32_U32 (CRC, Tx_U32);
+      CRC := Update_CRC32_U32 (CRC, Page_U32);
+      for I in Page_Offset loop
+         CRC := Update_CRC32_Byte (CRC, Page (I));
+      end loop;
+      return not CRC;
+   end Compute_WAL_CRC32;
 
    procedure Encode_WAL_Frame
      (Tx       : in     Valid_Tx_Id;
@@ -56,10 +93,11 @@ package body Nhe_O.Transaction is
       Checksum :    out Unsigned_32;
       Frame    :    out WAL_Frame_Buffer)
    is
+      Bounded_Tx_Id   : constant Unsigned_32 := Unsigned_32 (Tx);
       Bounded_Page_Id : constant Unsigned_32 := Unsigned_32 (Page_Id);
    begin
-      Frame := [others => 0];
-      Checksum := Compute_CRC32 (Page);
+      Frame    := [others => 0];
+      Checksum := Compute_WAL_CRC32 (Bounded_Tx_Id, Bounded_Page_Id, Page);
 
       --  Bytes 1..4: Magic "NHEO"
       Frame (1) := Magic_0;
@@ -68,12 +106,12 @@ package body Nhe_O.Transaction is
       Frame (4) := Magic_3;
 
       --  Bytes 5..8: Tx_Id
-      Put_U32_BE (Frame, 5, Unsigned_32 (Tx));
+      Put_U32_BE (Frame, 5, Bounded_Tx_Id);
 
       --  Bytes 9..12: Page_Id
       Put_U32_BE (Frame, 9, Bounded_Page_Id);
 
-      --  Bytes 13..16: CRC32 Checksum
+      --  Bytes 13..16: CRC32 Checksum (covers Tx_Id + Page_Id + 4KB Page)
       Put_U32_BE (Frame, 13, Checksum);
 
       --  Bytes 25..4120: 4096-byte Slotted Page Payload
@@ -84,6 +122,8 @@ package body Nhe_O.Transaction is
 
    function Verify_WAL_Frame (Frame : WAL_Frame_Buffer) return Boolean is
       Extracted_Page : Page_Buffer := [others => 0];
+      Raw_Tx         : Unsigned_32;
+      Raw_Page       : Unsigned_32;
       Stored_CRC     : Unsigned_32;
       Calculated_CRC : Unsigned_32;
    begin
@@ -95,12 +135,27 @@ package body Nhe_O.Transaction is
          return False;
       end if;
 
+      Raw_Tx   := Get_U32_BE (Frame, 5);
+      Raw_Page := Get_U32_BE (Frame, 9);
+      if Raw_Tx = 0
+        or else Raw_Tx > Unsigned_32 (Max_Tx_Id)
+        or else Raw_Page > Unsigned_32 (Max_Page_Id)
+      then
+         return False;
+      end if;
+
+      for I in 17 .. WAL_Header_Size loop
+         if Frame (I) /= 0 then
+            return False;
+         end if;
+      end loop;
+
       Stored_CRC := Get_U32_BE (Frame, 13);
       for I in Page_Offset loop
          Extracted_Page (I) := Frame (WAL_Header_Size + I);
       end loop;
 
-      Calculated_CRC := Compute_CRC32 (Extracted_Page);
+      Calculated_CRC := Compute_WAL_CRC32 (Raw_Tx, Raw_Page, Extracted_Page);
       return Stored_CRC = Calculated_CRC;
    end Verify_WAL_Frame;
 

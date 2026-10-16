@@ -19,27 +19,37 @@ procedure Nhe_O_Main is
      "SELECT id, meta->>'title', embedding <-> $1::vector AS dist " &
      "FROM documents WHERE meta @> '{""lang"":""vi""}'::jsonb ORDER BY dist LIMIT 5;"
    );
+   SQL_Vec_Only : constant Bounded_Text := Make_Text (
+     "SELECT id FROM embeddings ORDER BY vec <-> $3 LIMIT 10;"
+   );
    SQL_Desc   : Parsed_SQL_Descriptor;
    SQL_Status : Engine_Status;
    Resolved_T : Pg_Data_Type;
    Type_Valid : Boolean;
 
    --  2. Vector Database variables
-   Vec_A  : constant Vector_Value := Make_Vector_3D (1.0, 0.0, 0.0);
-   Vec_B  : constant Vector_Value := Make_Vector_3D (1.0, 0.0, 0.0);
-   Vec_C  : constant Vector_Value := Make_Vector_3D (0.0, 3.0, 4.0);
-   L2_AB  : Non_Negative_Float;
-   L2_AC  : Non_Negative_Float;
-   Cos_AB : Float;
-   NIP_AC : Float;
+   Vec_A   : constant Vector_Value := Make_Vector_3D (1.0, 0.0, 0.0);
+   Vec_B   : constant Vector_Value := Make_Vector_3D (1.0, 0.0, 0.0);
+   Vec_C   : constant Vector_Value := Make_Vector_3D (0.0, 3.0, 4.0);
+   Vec_Max : constant Vector_Value := Make_Vector_3D (Max_Component, 0.0, 0.0);
+   Vec_Zero : constant Vector_Value := Make_Vector_3D (0.0, 0.0, 0.0);
+   L2_AB   : Non_Negative_Float;
+   L2_AC   : Non_Negative_Float;
+   L2_Max  : Non_Negative_Float;
+   Cos_AB  : Float;
+   Cos_Max : Float;
+   NIP_AC  : Float;
 
    --  3. PostgreSQL JSON / JSONB variables
-   Raw_JSON   : constant Bounded_Text := Make_Text ("{""engine"":""Nhe_O"",""verified"":true}");
-   Doc_Main   : JSONB_Document;
-   Doc_Filter : JSONB_Document;
-   JSON_Stat  : Engine_Status;
-   Field_Hit  : Boolean;
-   Field_Val  : Bounded_Text;
+   Raw_JSON     : constant Bounded_Text := Make_Text ("{""engine"":""Nhe_O"",""verified"":true}");
+   Bad_JSON_1   : constant Bounded_Text := Make_Text ("{[}]{}");
+   Bad_JSON_2   : constant Bounded_Text := Make_Text ("{""a"":1}{""b"":2}");
+   Doc_Main     : JSONB_Document;
+   Doc_Filter   : JSONB_Document;
+   JSON_Stat    : Engine_Status;
+   Field_Hit    : Boolean;
+   Field_Val    : Bounded_Text;
+   Field_Kind   : JSONB_Value_Kind;
 
    --  4. ACID Transaction, MVCC & WAL Disk Persistence variables
    Next_Tx    : Valid_Tx_Id := 1;
@@ -47,10 +57,14 @@ procedure Nhe_O_Main is
    Tuple_1    : MVCC_Tuple_Header;
    Page_Out   : constant Page_Buffer := [1 => 16#4E#, 2 => 16#48#, 3 => 16#45#, 4 => 16#4F#, others => 0];
    Page_In    : Page_Buffer := [others => 0];
+   WAL_In     : WAL_Frame_Buffer := [others => 0];
    DB_File    : constant Bounded_Text := Make_Text ("/tmp/nhe_o_verify.nhe_o");
    WAL_File   : constant Bounded_Text := Make_Text ("/tmp/nhe_o_verify.nhe_o.wal");
+   NUL_Path   : Bounded_Text := Make_Text ("/tmp/nhe_o_bad");
    Tx_Status  : Engine_Status;
    Read_Ok    : Boolean;
+   WAL_Read_Ok : Boolean;
+   NUL_Write_Ok : Boolean;
    CRC_Before : Unsigned_32;
    CRC_After  : Unsigned_32;
 
@@ -58,6 +72,7 @@ procedure Nhe_O_Main is
    Cache      : KV_Store;
    KV_Val     : Bounded_Text;
    KV_Status  : Engine_Status;
+   KV_Removed : Boolean;
    Counter_V  : Integer_64;
 
    --  6. Pub/Sub Broker variables
@@ -86,6 +101,14 @@ begin
    pragma Assert (SQL_Desc.Has_Vector_Operator);
    pragma Assert (SQL_Desc.Has_JSONB_Operator);
 
+   --  Verify pure vector query `<->` does NOT falsely set Has_JSONB_Operator
+   Analyze_SQL (SQL_Vec_Only, SQL_Desc, SQL_Status);
+   pragma Assert (SQL_Status = Status_Ok);
+   pragma Assert (SQL_Desc.Kind = Stmt_Select);
+   pragma Assert (SQL_Desc.Has_Positional_Param);
+   pragma Assert (SQL_Desc.Has_Vector_Operator);
+   pragma Assert (not SQL_Desc.Has_JSONB_Operator);
+
    Resolve_Pg_Type (Make_Ident ("JSONB"), Resolved_T, Type_Valid);
    pragma Assert (Type_Valid and then Resolved_T = Pg_JSONB);
    Resolve_Pg_Type (Make_Ident ("VECTOR"), Resolved_T, Type_Valid);
@@ -94,19 +117,25 @@ begin
 
    --  2. Verify Vector Database Engine (`<->`, `<=>`, `<#>`)
    Print_Line ("[2/6] Verifying Vector Similarity Engine (Nhe_O.Vector)...");
-   L2_AB  := L2_Distance (Vec_A, Vec_B);
-   L2_AC  := L2_Distance_Squared (Vec_A, Vec_C);
-   Cos_AB := Cosine_Distance (Vec_A, Vec_B);
-   NIP_AC := Negative_Inner_Product (Vec_A, Vec_C);
+   L2_AB   := L2_Distance (Vec_A, Vec_B);
+   L2_AC   := L2_Distance_Squared (Vec_A, Vec_C);
+   L2_Max  := L2_Distance (Vec_Max, Vec_Zero);
+   Cos_AB  := Cosine_Distance (Vec_A, Vec_B);
+   Cos_Max := Cosine_Distance (Vec_Max, Vec_Max);
+   NIP_AC  := Negative_Inner_Product (Vec_A, Vec_C);
    pragma Assert (L2_AB < 0.001);
    pragma Assert (abs (L2_AC - 26.0) < 0.001);
-   pragma Assert (Cos_AB < 0.01);
+   pragma Assert (abs (L2_Max - Max_Component) < 1.0);
+   pragma Assert (Cos_AB < 0.001);
+   pragma Assert (Cos_Max < 0.001);
    pragma Assert (abs (NIP_AC - 0.0) < 0.001);
    Print_Line ("  => Passed: L2 (<->), Cosine (<=>), and Inner Product (<#>) invariants hold.");
 
    --  3. Verify PostgreSQL JSON / JSONB Engine (`->`, `->>`, `@>`, `?`)
    Print_Line ("[3/6] Verifying PostgreSQL JSON/JSONB Engine (Nhe_O.JSON)...");
    pragma Assert (Is_Valid_JSON (Raw_JSON));
+   pragma Assert (not Is_Valid_JSON (Bad_JSON_1));
+   pragma Assert (not Is_Valid_JSON (Bad_JSON_2));
    Put_Field (Doc_Main, Make_Ident ("engine"), Make_Text ("Nhe_O"), JSONB_String, JSON_Stat);
    pragma Assert (JSON_Stat = Status_Ok);
    Put_Field (Doc_Main, Make_Ident ("lang"), Make_Text ("vi"), JSONB_String, JSON_Stat);
@@ -116,13 +145,18 @@ begin
    pragma Assert (JSON_Stat = Status_Ok);
 
    pragma Assert (Has_Key (Doc_Main, Make_Ident ("engine")));
+   Get_Field (Doc_Main, Make_Ident ("engine"), Field_Hit, Field_Val, Field_Kind);
+   pragma Assert (Field_Hit and then Field_Kind = JSONB_String);
    Get_Field_Text (Doc_Main, Make_Ident ("engine"), Field_Hit, Field_Val);
    pragma Assert (Field_Hit and then Equal_Text (Field_Val, Make_Text ("Nhe_O")));
    pragma Assert (Contains (Doc_Main, Doc_Filter));
-   Print_Line ("  => Passed: JSON syntax check and JSONB `?`, `->>`, `@>` operators verified.");
+   Print_Line ("  => Passed: JSON syntax check and JSONB `?`, `->`, `->>`, `@>` operators verified.");
 
    --  4. Verify ACID MVCC Visibility & Disk WAL/Page Persistence
    Print_Line ("[4/6] Verifying ACID Transactions, MVCC & Disk WAL I/O (Nhe_O.Transaction / Nhe_O.IO)...");
+   Delete_File_If_Exists (DB_File);
+   Delete_File_If_Exists (WAL_File);
+
    Begin_Tx (Next_Tx, Tx_1);
    Tuple_1 := (Xmin => Tx_1.Id, Xmax => 0);
    pragma Assert (Is_Tuple_Visible (Tuple_1, Tx_1.Snapshot));
@@ -134,6 +168,17 @@ begin
    Read_Page (DB_File, 0, Page_In, Read_Ok);
    CRC_After := Compute_CRC32 (Page_In);
    pragma Assert (Read_Ok and then CRC_Before = CRC_After);
+
+   --  Verify on-disk WAL frame header + payload integrity and tamper detection
+   Read_WAL_Frame (WAL_File, 0, WAL_In, WAL_Read_Ok);
+   pragma Assert (WAL_Read_Ok and then Verify_WAL_Frame (WAL_In));
+   WAL_In (9) := WAL_In (9) xor 16#01#; --  Flip bit in Page_Id header field
+   pragma Assert (not Verify_WAL_Frame (WAL_In));
+
+   --  Verify embedded NUL path rejection
+   NUL_Path.Data (6) := ASCII.NUL;
+   Write_Page (NUL_Path, 0, Page_Out, NUL_Write_Ok);
+   pragma Assert (not NUL_Write_Ok);
 
    Delete_File_If_Exists (DB_File);
    Delete_File_If_Exists (WAL_File);
@@ -157,7 +202,9 @@ begin
    pragma Assert (KV_Status = Status_Ok and then Counter_V = 5);
    Incr_By (Cache, Make_Ident ("metrics:hits"), 10, Now => 1063, New_Val => Counter_V, Status => KV_Status);
    pragma Assert (KV_Status = Status_Ok and then Counter_V = 15);
-   Print_Line ("  => Passed: Redis SETEX, GET, TTL lazy expiration, and atomic INCRBY verified.");
+   Del (Cache, Make_Ident ("metrics:hits"), KV_Removed);
+   pragma Assert (KV_Removed and then not Exists (Cache, Make_Ident ("metrics:hits"), Now => 1063));
+   Print_Line ("  => Passed: Redis SETEX, GET, DEL, TTL lazy expiration, and atomic INCRBY verified.");
 
    --  6. Verify Pub/Sub Channel & Wildcard Pattern Broker
    Print_Line ("[6/6] Verifying Ring-Buffer Pub/Sub Broker (Nhe_O.PubSub)...");
@@ -173,6 +220,8 @@ begin
    pragma Assert (Msg_Found and then Equal_Text (Msg_Out.Payload, Make_Text ("key=session:42")));
    Poll_Message (Broker, Sub_Wild, Msg_Out, Msg_Found);
    pragma Assert (Msg_Found and then Equal_Text (Msg_Out.Payload, Make_Text ("key=session:42")));
+   Unsubscribe (Broker, Sub_Exact);
+   Unsubscribe (Broker, Sub_Wild);
    Print_Line ("  => Passed: Exact and wildcard (`cache.*`) Pub/Sub delivery verified.");
 
    Print_Blank_Line;
