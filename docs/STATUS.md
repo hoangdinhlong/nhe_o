@@ -37,7 +37,9 @@ Epic 01 is complete. Next concrete tasks for upcoming Epic 02:
 
 ## Known issues / blockers
 
-- None. GNAT 16 (`gnatmake` using the compiler switches in `nhe_o.gpr`) compiles all 18 SPARK units cleanly with `-gnat2022 -gnatwa -gnata -gnatQ`.
+- No blockers. GNAT 16 (`gnatmake` using the compiler switches in `nhe_o.gpr`) compiles all 18 SPARK units cleanly with `-gnat2022 -gnatwa -gnata -gnatQ`.
+- Minimum compiler is GNAT 14. GNAT 14.2 (Ubuntu 24.04 `gnat-14`) also compiles cleanly with `-gnatwe`, and `bin/nhe_o_main` passes all 6 suites (checked 2026-10-16). GNAT 13, which is Ubuntu 24.04's default `gnat` and what plain `gprbuild` picks there, rejects the `Side_Effects` aspect in `src/nhe_o-io.adb` with 8 warnings. The build still links and the suites still pass, but the zero-warnings bar is not met.
+- `GNATprove` has not been run yet, so the AoRTE goal in `ARCHITECTURE.md` is still unproven. So far, contracts have only been checked at runtime (`-gnata`).
 
 ## Decisions
 

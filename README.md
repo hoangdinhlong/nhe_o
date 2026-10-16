@@ -46,7 +46,9 @@ Following professional Ada Quality & Style Guide (`Mixed_Case_With_Underscores` 
 
 ## Building & Running
 
-Requires GNAT (Ada 2022) and `gprbuild` or `gnatmake`:
+Requires **GNAT 14 or newer** (Ada 2022) and `gprbuild` or `gnatmake`. GNAT 13 does not recognize
+the `Side_Effects` aspect used in `src/nhe_o-io.adb` and emits 8 warnings. On Ubuntu 24.04, install
+`gnat-14` and call the versioned tools (`gnatmake-14 --GCC=gcc-14 --GNATBIND=gnatbind-14 --GNATLINK=gnatlink-14 ...`):
 
 ```bash
 mkdir -p obj bin
