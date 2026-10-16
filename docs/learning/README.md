@@ -27,7 +27,7 @@ interview prep, and friendly to anyone who clones the project to learn by doing.
 ## Index
 
 ### swe/
-- _(none yet)_
+- [`01-contract-bound-posix-syscalls-in-spark.md`](swe/01-contract-bound-posix-syscalls-in-spark.md) — Contract-Bound POSIX Syscalls in `SPARK_Mode (On)`: bypassing exception-raising Ada file streams to achieve 100% SPARK verification across disk page and WAL I/O (`ADR-002`).
 
 ### ai/
 - _(none yet)_
