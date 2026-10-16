@@ -1,4 +1,4 @@
-# AGENTS — How AI agents start and finish work in nhe_o (`Nhe_O`)
+# AGENTS — How AI agents start and finish work in Nhé O
 
 ## Working language
 

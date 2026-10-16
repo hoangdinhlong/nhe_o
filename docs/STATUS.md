@@ -1,4 +1,4 @@
-# STATUS — nhe_o (`Nhe_O`)
+# STATUS — Nhé O
 
 > **Start here.** Entry point for any session (per `../AGENTS.md`).
 > States where the project stands, the active epic, and the next task.
@@ -9,7 +9,7 @@ _Last updated: 2026-10-16_
 
 ## Where we are
 
-`nhe_o` (Ada root package `Nhe_O`, named after the owner's cat **"Nhé O"**) — A formally verified, disk-persistent, ACID-compliant embedded database engine written in Ada/SPARK featuring PostgreSQL syntax and data types, native Vector search, JSON/JSONB processing, Redis-compatible Key-Value caching, and Pub/Sub messaging.
+**Nhé O** (Alire crate `nhe_o`, Ada root package `Nhe_O`) — A formally verified, disk-persistent, ACID-compliant embedded database engine written in Ada/SPARK featuring PostgreSQL syntax and data types, native Vector search, JSON/JSONB processing, Redis-compatible Key-Value caching, and Pub/Sub messaging.
 
 The project has completed **Epic 01 (Scaffold and Architecture)** and is ready for **Epic 02 (B+Tree Storage Indexing, HNSW Vector Graph & Query Executor)**. The documentation system is scaffolded from Monion's `project-docs` archetype (Revision R8), core architectural decisions (`ADR-001`..`ADR-002`) and domain invariants (`BR-001`..`BR-005`) are ratified, and the foundational Ada 2022 / SPARK 2022 codebase is implemented in **100% `pragma SPARK_Mode (On);`** across all 18 source files, compiled with zero warnings, runtime-verified with contract assertions (`-gnata`), and published to GitHub (`hoangdinhlong/nhe_o`).
 

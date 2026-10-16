@@ -1,6 +1,6 @@
 # Core Business Rules (Catalog)
 
-Authoritative index of key domain rules, database invariants, and formal verification policies in `nhe_o` (`Nhe_O`).
+Authoritative index of key domain rules, database invariants, and formal verification policies in **Nhé O** (`nhe_o` / `Nhe_O`).
 
 ---
 

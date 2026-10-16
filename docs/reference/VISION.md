@@ -1,4 +1,4 @@
-# nhe_o (`Nhe_O`) — Vision
+# Nhé O — Vision
 
 > **A formally verified, disk-persistent, ACID-compliant embedded database engine written in Ada/SPARK featuring PostgreSQL syntax and data types, native Vector search, JSON/JSONB processing, Redis-compatible Key-Value caching, and Pub/Sub messaging.**
 
@@ -6,7 +6,7 @@ This document is the **north star**. Everything else (architecture, epics, decis
 serve the vision stated here. If a later decision contradicts this document, either update it or
 record why it is superseded in `../DECISIONS.md`.
 
-> **Note on intent.** `nhe_o` (Ada root package `Nhe_O`, named after the author's cat **"Nhé O"**)
+> **Note on intent.** **Nhé O** (Alire crate `nhe_o`, Ada root package `Nhe_O`)
 > unifies the zero-configuration embedded footprint of SQLite, the rich SQL grammar and data types
 > (`JSONB`, `VECTOR`) of PostgreSQL, and the ultra-fast Key-Value caching and Pub/Sub semantics of
 > Redis inside a single formally verified Ada/SPARK codebase. **100% of all specifications and
@@ -29,7 +29,7 @@ Developers are forced either to run a heavy fleet of external server daemons (Po
 
 ## 2. The product
 
-**`nhe_o`** (`Nhe_O`) is a single-binary, embeddable multi-model database management system written in **Ada 2022 and SPARK 2022**:
+**Nhé O** (crate `nhe_o`, Ada root package `Nhe_O`) is a single-binary, embeddable multi-model database management system written in **Ada 2022 and SPARK 2022**:
 - **SQLite-Style Embedded Footprint**: Runs directly in-process or as a lightweight local engine backed by a deterministic disk page file and Write-Ahead Log (WAL). Zero external servers required.
 - **PostgreSQL Syntax & Data Types**: Supports PostgreSQL-compatible SQL syntax (`$1` parameters, `::type` casts, `RETURNING`, `ON CONFLICT DO UPDATE`) and native PostgreSQL data types (`INT2`, `INT4`, `INT8`, `FLOAT4`, `FLOAT8`, `NUMERIC`, `BOOLEAN`, `TEXT`, `BYTEA`, `UUID`, `TIMESTAMPTZ`, `JSON`, `JSONB`, `VECTOR`).
 - **Native Vector Database**: First-class `VECTOR(d)` column and value type with formally verified L2 distance (`<->`), cosine distance (`<=>`), and negative inner product (`<#>`) operators.
@@ -63,5 +63,5 @@ Developers are forced either to run a heavy fleet of external server daemons (Po
 
 ## 5. Non-goals
 
-1. **Multi-Node Distributed Consensus (Raft/Paxos)**: `Nhe_O` is an embedded single-node/in-process database engine like SQLite, not a distributed cluster database.
+1. **Multi-Node Distributed Consensus (Raft/Paxos)**: Nhé O is an embedded single-node/in-process database engine like SQLite, not a distributed cluster database.
 2. **Unverified JIT / Dynamic Scripting Extensions**: Stored procedures in unverified dynamic languages (e.g., PL/Python, PL/V8) are out of scope to preserve the formal SPARK safety proof.

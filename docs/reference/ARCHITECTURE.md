@@ -1,4 +1,4 @@
-# nhe_o (`Nhe_O`) — Architecture
+# Nhé O — Architecture
 
 How we build the vision in `VISION.md`. This is the **map** for design decisions.
 
@@ -6,13 +6,13 @@ How we build the vision in `VISION.md`. This is the **map** for design decisions
 
 ## 1. System overview
 
-`nhe_o` (`Nhe_O`) is structured as a **100% `pragma SPARK_Mode (On);` architecture** (`ADR-002`):
+**Nhé O** (crate `nhe_o`, Ada root package `Nhe_O`) is structured as a **100% `pragma SPARK_Mode (On);` architecture** (`ADR-002`):
 1. **Formally Verified Multi-Model Core (`SPARK_Mode => On`)**: Contains 100% of the database logic — data types, SQL parser/planner, vector similarity engine, JSON/JSONB processor, ACID MVCC transaction manager, slotted-page & WAL framing logic, Redis-like Key-Value cache, and Pub/Sub broker.
 2. **Contract-Bound POSIX Syscall I/O Substrate (`SPARK_Mode => On` in both `.ads` and `.adb`)**: `Nhe_O.IO` (`src/nhe_o-io.ads` and `src/nhe_o-io.adb`) operates entirely in `SPARK_Mode (On)` by binding directly to exception-free POSIX kernel syscalls (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`, `unlink`) with formally verified NUL-terminated path construction (`To_C_Path`), bounded 64-bit page offset calculation (`Valid_Page_Id`), and explicit return-code verification.
 
 ```text
 +-----------------------------------------------------------------------------+
-|                Nhe_O Embedded DBMS — 100% pragma SPARK_Mode (On)            |
+|            Nhé O (`Nhe_O`) Embedded DBMS — 100% pragma SPARK_Mode (On)      |
 |                                                                             |
 |  +----------------------+ +-------------------+ +------------------------+  |
 |  |  PostgreSQL SQL &    | |   Redis-Compatible| |  Pub/Sub Event         |  |

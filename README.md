@@ -1,4 +1,4 @@
-# nhe_o (`Nhe_O`) — Formally Verified Multi-Model Embedded Database in Ada/SPARK
+# Nhé O — Formally Verified Multi-Model Embedded Database in Ada/SPARK
 
 > **SQLite's embedded simplicity + PostgreSQL's SQL syntax, Data Types, JSONB & `pgvector` + Redis's Key-Value Cache & Pub/Sub — 100% formally verified in SPARK (`pragma SPARK_Mode (On);`), including contract-bound POSIX physical I/O.**
 
@@ -6,7 +6,7 @@
 
 ## Overview
 
-**`nhe_o`** (Ada root package **`Nhe_O`**, named after the author's cat **"Nhé O"**) is an embedded, disk-persistent, fully ACID database management system written in **Ada 2022 and SPARK 2022**:
+**Nhé O** (Alire crate/repository `nhe_o`, Ada root package `Nhe_O`) is an embedded, disk-persistent, fully ACID database management system written in **Ada 2022 and SPARK 2022**:
 
 1. **Embedded & Persistent Like SQLite**: Runs in-process with zero external server daemons, storing data in 4096-byte slotted pages (`.nhe_o`) backed by an append-only, CRC32-checksummed Write-Ahead Log (`.wal`).
 2. **PostgreSQL Syntax & Data Types**: Native support for PostgreSQL types (`SMALLINT`/`INT2`, `INTEGER`/`INT4`, `BIGINT`/`INT8`, `REAL`/`FLOAT4`, `DOUBLE PRECISION`/`FLOAT8`, `NUMERIC`, `BOOLEAN`, `TEXT`, `BYTEA`, `UUID`, `TIMESTAMPTZ`, `JSON`, `JSONB`, `VECTOR(d)`) and PostgreSQL SQL idioms (`$1` parameters, `::type` casts, `ON CONFLICT DO UPDATE`, `RETURNING`, `LISTEN`/`NOTIFY`).
