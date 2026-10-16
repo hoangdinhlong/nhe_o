@@ -100,14 +100,16 @@ Select-String -Path AGENTS.md -Pattern '`docs/[A-Za-z0-9_./-]+`' -AllMatches |
     ForEach-Object { if (-not (Test-Path $_)) { Write-Warning "MISSING: $_" } }
 ```
 
-### B5 - SPARK_Mode boundary (BR-001: only `src/nhe_o-io.adb` may disable SPARK_Mode)
+### B5 - 100% SPARK_Mode (On) mandate (BR-001: zero `SPARK_Mode (Off)` in `src/`)
 
 ```bash
-grep -rnE 'pragma +SPARK_Mode *\( *Off *\)' src/ | grep -v '^src/nhe_o-io\.adb:' || true
+grep -rnE 'pragma +SPARK_Mode *\( *Off *\)' src/ || true
+for f in src/*.ads src/*.adb; do grep -qE 'pragma +SPARK_Mode *\( *On *\)' "$f" || echo "MISSING SPARK_Mode(On): $f"; done
 ```
 
 ```powershell
-Select-String -Path src/* -Pattern 'pragma\s+SPARK_Mode\s*\(\s*Off\s*\)' | Where-Object { $_.Filename -ne 'nhe_o-io.adb' }
+Select-String -Path src/* -Pattern 'pragma\s+SPARK_Mode\s*\(\s*Off\s*\)'
+Get-ChildItem src/*.ad* | Where-Object { -not (Select-String -Path $_.FullName -Pattern 'pragma\s+SPARK_Mode\s*\(\s*On\s*\)' -Quiet) } | ForEach-Object { Write-Warning "MISSING SPARK_Mode(On): $($_.Name)" }
 ```
 
 ### B7 - the template revision stamp

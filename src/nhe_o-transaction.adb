@@ -51,13 +51,12 @@ package body Nhe_O.Transaction is
 
    procedure Encode_WAL_Frame
      (Tx       : in     Valid_Tx_Id;
-      Page_Id  : in     Natural;
+      Page_Id  : in     Valid_Page_Id;
       Page     : in     Page_Buffer;
       Checksum :    out Unsigned_32;
       Frame    :    out WAL_Frame_Buffer)
    is
-      Bounded_Page_Id : constant Unsigned_32 :=
-        Unsigned_32 (Page_Id mod 1_000_000_000);
+      Bounded_Page_Id : constant Unsigned_32 := Unsigned_32 (Page_Id);
    begin
       Frame := [others => 0];
       Checksum := Compute_CRC32 (Page);
@@ -122,7 +121,7 @@ package body Nhe_O.Transaction is
      (Ctx      : in out Transaction_Context;
       DB_Path  : in     Bounded_Text;
       WAL_Path : in     Bounded_Text;
-      Page_Id  : in     Natural;
+      Page_Id  : in     Valid_Page_Id;
       Page     : in     Page_Buffer;
       Status   :    out Engine_Status)
    is

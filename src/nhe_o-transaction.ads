@@ -40,7 +40,7 @@ package Nhe_O.Transaction is
    --  Serialize a 4096-byte page + Tx_Id + Page_Id + CRC32 into a WAL frame
    procedure Encode_WAL_Frame
      (Tx       : in     Valid_Tx_Id;
-      Page_Id  : in     Natural;
+      Page_Id  : in     Valid_Page_Id;
       Page     : in     Page_Buffer;
       Checksum :    out Unsigned_32;
       Frame    :    out WAL_Frame_Buffer);
@@ -62,7 +62,7 @@ package Nhe_O.Transaction is
      (Ctx      : in out Transaction_Context;
       DB_Path  : in     Bounded_Text;
       WAL_Path : in     Bounded_Text;
-      Page_Id  : in     Natural;
+      Page_Id  : in     Valid_Page_Id;
       Page     : in     Page_Buffer;
       Status   :    out Engine_Status)
      with Pre  => Ctx.State = Tx_Active

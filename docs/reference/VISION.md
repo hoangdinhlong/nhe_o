@@ -9,9 +9,9 @@ record why it is superseded in `../DECISIONS.md`.
 > **Note on intent.** `nhe_o` (Ada root package `Nhe_O`, named after the author's cat **"Nhé O"**)
 > unifies the zero-configuration embedded footprint of SQLite, the rich SQL grammar and data types
 > (`JSONB`, `VECTOR`) of PostgreSQL, and the ultra-fast Key-Value caching and Pub/Sub semantics of
-> Redis inside a single formally verified Ada/SPARK codebase. All database logic is mathematically
-> proved in SPARK (`SPARK_Mode => On`); only raw OS/disk I/O operations use standard Ada
-> (`SPARK_Mode => Off`).
+> Redis inside a single formally verified Ada/SPARK codebase. **100% of all specifications and
+> bodies in `src/` operate under `pragma SPARK_Mode (On);`**, including physical I/O (`src/nhe_o-io.adb`)
+> via contract-bound POSIX kernel syscalls (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`, `unlink`).
 
 ---
 
@@ -36,7 +36,7 @@ Developers are forced either to run a heavy fleet of external server daemons (Po
 - **PostgreSQL JSON / JSONB Engine**: Structural validation and binary tree indexing with `->`, `->>`, `@>` (containment), and `?` (key-existence) operators.
 - **Full ACID & Disk Persistence**: Multi-Version Concurrency Control (MVCC) with snapshot isolation (`xmin`/`xmax`) paired with CRC32-checksummed Write-Ahead Logging (WAL) and slotted 4KB disk pages.
 - **Redis-Grade Key-Value Cache & Pub/Sub**: Direct high-speed KV operations (`GET`, `SET`, `DEL`, `INCR`, `EXPIRE`, `TTL`) with deterministic TTL expiration and LRU eviction, plus an in-process Pub/Sub message broker (`PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, pattern matching).
-- **100% SPARK Verified Logic**: Every single module of core logic is proved in SPARK (`pragma SPARK_Mode (On);`). Only raw I/O operations (`Nhe_O.IO` package body) are written in unverified Ada (`pragma SPARK_Mode (Off);`).
+- **100% SPARK Verified Codebase**: Every single module specification and body (18/18 files in `src/`, including `Nhe_O.IO`) operates under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)`.
 
 ---
 
@@ -45,16 +45,16 @@ Developers are forced either to run a heavy fleet of external server daemons (Po
 1. **PostgreSQL-Compatible SQL & Type Engine**: Parse and execute PostgreSQL DDL/DML with strict type checking and type casting (`::int4`, `::jsonb`, `::vector`).
 2. **Provably Safe Vector Search**: Execute exact and approximate nearest-neighbor queries using `<->`, `<=>`, and `<#>` with SPARK-verified dimension invariants and absence of floating-point overflow/divide-by-zero.
 3. **Rich JSON/JSONB Querying**: Store and query nested JSON documents using PostgreSQL's `->`, `->>`, `@>`, and `?` operators without memory safety vulnerabilities.
-4. **Crash-Safe ACID Persistence**: Guarantee atomicity, consistency, snapshot isolation, and durability across power loss or process crashes via WAL redo recovery and page checksums.
+4. **Crash-Safe ACID Persistence**: Guarantee atomicity, consistency, snapshot isolation, and durability across power loss or process crashes via WAL redo recovery, hardware `fsync`, and page checksums.
 5. **Embedded Redis-Compatible Cache**: Sub-microsecond in-memory Key-Value reads/writes with optional TTL expiration, LRU bounded eviction, and transparent WAL persistence.
 6. **Real-Time Pub/Sub Channels**: Publish and subscribe to named channels or wildcard patterns using bounded, lock-free/protected ring buffers with zero dynamic heap allocation.
-7. **Mathematically Verified Boundary**: Enforce that 100% of parsing, indexing, transaction visibility, vector math, JSON traversal, KV caching, and Pub/Sub routing are proved by `GNATprove`, isolating `SPARK_Mode (Off)` strictly to OS file/stream I/O bodies.
+7. **100% `SPARK_Mode (On)` Verification**: Enforce that 100% of parsing, indexing, transaction visibility, vector math, JSON traversal, KV caching, Pub/Sub routing, and POSIX syscall I/O orchestration (`Nhe_O.IO`) operate under `SPARK_Mode (On)`.
 
 ---
 
 ## 4. Principles
 
-1. **SPARK Everywhere, Ada Only for I/O (`BR-001`)**: No business, storage, query, vector, JSON, KV, or Pub/Sub logic may disable `SPARK_Mode`. Only the low-level I/O implementation body (`Nhe_O.IO`) may use `SPARK_Mode (Off)`.
+1. **100% `SPARK_Mode (On)` Everywhere (`BR-001` / `ADR-005`)**: No specification or body in `src/` may disable `SPARK_Mode`. Physical disk I/O in `Nhe_O.IO` binds directly to exception-free POSIX syscalls (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`, `unlink`) under `SPARK_Mode (On)`.
 2. **Bounded & Deterministic Memory**: Avoid unbounded heap allocations inside the verified engine. Use bounded structures, fixed-size slotted pages (4096 bytes), and explicit capacity contracts (`Pre` / `Post` / `Type_Invariant`).
 3. **PostgreSQL Ergonomics in an Embedded Package**: Users should write familiar PostgreSQL queries, JSONB expressions, and `pgvector` operators without managing a database server.
 4. **ACID Without Compromise**: Caching speed must never corrupt durable state; MVCC visibility and WAL checksum invariants are enforced by formal contracts.

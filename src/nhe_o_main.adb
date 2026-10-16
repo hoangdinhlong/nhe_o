@@ -72,7 +72,7 @@ procedure Nhe_O_Main is
 begin
    Print_Line ("=====================================================================");
    Print_Line ("  Nhe_O Embedded Multi-Model Database Engine (Ada 2022 / SPARK 2022)");
-   Print_Line ("  Version: " & Nhe_O.Version & " | Core Logic: SPARK_Mode(On) | I/O: Ada");
+   Print_Line ("  Version: " & Nhe_O.Version & " | 100% SPARK_Mode (On) — Core & POSIX I/O");
    Print_Line ("=====================================================================");
    Print_Blank_Line;
 

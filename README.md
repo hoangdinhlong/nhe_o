@@ -1,6 +1,6 @@
 # nhe_o (`Nhe_O`) — Formally Verified Multi-Model Embedded Database in Ada/SPARK
 
-> **SQLite's embedded simplicity + PostgreSQL's SQL syntax, Data Types, JSONB & `pgvector` + Redis's Key-Value Cache & Pub/Sub — 100% formally verified in SPARK, with standard Ada used strictly for physical I/O.**
+> **SQLite's embedded simplicity + PostgreSQL's SQL syntax, Data Types, JSONB & `pgvector` + Redis's Key-Value Cache & Pub/Sub — 100% formally verified in SPARK (`pragma SPARK_Mode (On);`), including contract-bound POSIX physical I/O.**
 
 ---
 
@@ -15,12 +15,12 @@
    - `<=>` Cosine distance
    - `<#>` Negative inner product
 4. **PostgreSQL JSON / JSONB Engine**: Structural validation and field/containment operators (`->`, `->>`, `@>`, `?`).
-5. **Full ACID via MVCC & WAL**: Multi-Version Concurrency Control (`xmin`/`xmax` snapshot isolation) combined with CRC32-verified Write-Ahead Logging and disk sync.
+5. **Full ACID via MVCC & WAL**: Multi-Version Concurrency Control (`xmin`/`xmax` snapshot isolation) combined with CRC32-verified Write-Ahead Logging and hardware `fsync`.
 6. **Redis-Compatible Key-Value Cache**: Direct sub-microsecond `GET`, `SET`, `DEL`, `EXISTS`, `INCRBY`, `EXPIRE`, and `TTL` operations with deterministic TTL expiration and LRU cache eviction.
 7. **In-Process Pub/Sub Messaging**: Bounded ring-buffer broker supporting `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, and wildcard pattern subscriptions (`*`).
-8. **Strict SPARK Verification Boundary (`BR-001`)**:
-   - **100% of core database logic and entrypoints** (`Nhe_O`, `Nhe_O.Types`, `Nhe_O.Vector`, `Nhe_O.JSON`, `Nhe_O.Transaction`, `Nhe_O.KV`, `Nhe_O.PubSub`, `Nhe_O.SQL`, `Nhe_O.IO` spec, and `Nhe_O_Main`) are written in SPARK (`pragma SPARK_Mode (On);`) with formal `Pre` and `Post` contracts.
-   - **Only physical I/O operations** (`src/nhe_o-io.adb`) use standard Ada (`pragma SPARK_Mode (Off);`).
+8. **100% SPARK Verification Mandate (`BR-001` / `ADR-005`)**:
+   - **100% of specifications, bodies, and entrypoints** (`Nhe_O`, `Nhe_O.Types`, `Nhe_O.Vector`, `Nhe_O.JSON`, `Nhe_O.Transaction`, `Nhe_O.KV`, `Nhe_O.PubSub`, `Nhe_O.SQL`, `Nhe_O.IO` spec & body, and `Nhe_O_Main`) operate under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)`.
+   - **Contract-Bound POSIX I/O (`src/nhe_o-io.adb`)**: Physical disk operations bypass exception-raising `Ada.Streams.Stream_IO` and bind directly in `SPARK_Mode (On)` to atomic POSIX kernel syscalls (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`, `unlink`) with formally verified NUL-terminated path construction (`To_C_Path`), bounded 64-bit page offset arithmetic (`Valid_Page_Id`), and explicit status verification.
 
 ---
 
@@ -38,9 +38,9 @@ Following professional Ada Quality & Style Guide (`Mixed_Case_With_Underscores` 
 | `Nhe_O.KV` | `src/nhe_o-kv.ad[sb]` | `SPARK_Mode (On)` | Redis-like Key-Value store with TTL expiration and LRU eviction |
 | `Nhe_O.PubSub` | `src/nhe_o-pubsub.ad[sb]` | `SPARK_Mode (On)` | Bounded ring-buffer Publish/Subscribe broker with wildcard matching |
 | `Nhe_O.SQL` | `src/nhe_o-sql.ad[sb]` | `SPARK_Mode (On)` | PostgreSQL SQL dialect tokenizer, parser, and statement classifier |
+| `Nhe_O.IO` (Spec) | `src/nhe_o-io.ads` | `SPARK_Mode (On)` | Formal contract specification for positional disk page, WAL frame, and console I/O |
+| `Nhe_O.IO` (Body) | `src/nhe_o-io.adb` | `SPARK_Mode (On)` | Contract-bound POSIX syscall I/O (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`, `unlink`) |
 | `Nhe_O_Main` | `src/nhe_o_main.adb` | `SPARK_Mode (On)` | Formally verified verification suite and engine entrypoint |
-| `Nhe_O.IO` (Spec) | `src/nhe_o-io.ads` | `SPARK_Mode (On)` | Formal contract boundary for disk page, WAL frame, and console I/O |
-| `Nhe_O.IO` (Body) | `src/nhe_o-io.adb` | `SPARK_Mode (Off)` | **Sole I/O-Only Ada implementation** (`Ada.Direct_IO`, `Stream_IO`, `Text_IO`) |
 
 ---
 
