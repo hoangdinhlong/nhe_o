@@ -51,6 +51,11 @@ Every **Feature Epic** (or group of feature epics) must be followed by a dedicat
 2. Remediate all Critical, High, Medium, and Low findings (functional edge cases, persistence gaps, contract strength, build hygiene, and doc drift).
 3. Resolve open questions (`docs/OPEN-QUESTIONS.md`) surfaced during the audit and re-verify `gnatprove` (`0 unproved` checks, `0 warnings`) before advancing to the next feature epic.
 
+## CPU parallelism for builds and formal proofs (`gnatprove` / `gprbuild`)
+
+- Before invoking `gnatprove` or heavy build/verification commands (directly or via a subagent), **inspect the current CPU core count and system load** (e.g., `nproc`, `uptime` / `/proc/loadavg`).
+- Set the thread count (`-j<N>`) appropriately for the available CPU capacity, and **always use at least 16 threads (`-j16` minimum; `-j0` or `-j24`..`-j32` on this 32-thread workstation when idle)**. Never throttle `gnatprove` to low thread counts like `-j2` or `-j4`, and explicitly enforce this rule in every subagent prompt.
+
 ## Core rule
 
 Reference docs are *not authoritative*. If work in a session contradicts a reference doc, the agent
