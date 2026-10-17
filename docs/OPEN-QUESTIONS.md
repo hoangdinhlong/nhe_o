@@ -31,11 +31,12 @@ Status: `Open` · `Answered → <where the answer now lives>` · `No longer rele
 * **Impact**: Shapes the on-disk layout of `Nhe_O.Transaction` slotted pages and `Nhe_O.Vector` storage bounds in Epic 02.
 * **Waiting on**: Benchmark comparison between 16KB pages and 4KB TOAST overflow chains with owner (Long).
 * **Opened**: 2026-10-16
-* **Status**: Open
+* **Status**: Answered → `ADR-003` (`docs/DECISIONS.md`), `BR-003` & `BR-006` (`docs/domain/business-rules.md`), and Epic 02 (`docs/epics/02-storage-indexing-and-rag-executor/PROGRESS.md`). Keep 4KB primary pages + TOAST overflow page chains, expand `Max_Vector_Dim` up to `4096`, and add `Int8`/Binary quantization for universal local LLM RAG.
 
 ### Q-002: Should Pub/Sub channels optionally persist messages to the WAL for transactional `LISTEN` / `NOTIFY` replay?
 * **Detail**: `Nhe_O.PubSub` currently provides low-latency in-memory bounded ring buffers (like Redis `PUBLISH`/`SUBSCRIBE`). PostgreSQL `NOTIFY` ties notification emission to transaction commit. Should Nhé O support a `DURABLE` channel flag that only dispatches messages when the publishing transaction commits to the WAL?
 * **Impact**: Determines whether `Nhe_O.PubSub` integrates directly with `Nhe_O.Transaction.Commit_Tx` in Epic 02.
 * **Waiting on**: Owner decision (Long) on transactional notification semantics vs. pure fire-and-forget Redis Pub/Sub.
 * **Opened**: 2026-10-16
-* **Status**: Open
+* **Status**: Answered → `ADR-004` (`docs/DECISIONS.md`), `BR-005` (`docs/domain/business-rules.md`), and Epic 02 (`docs/epics/02-storage-indexing-and-rag-executor/PROGRESS.md`). Support both default fast in-memory ring-buffer delivery (Redis) and optional `Durable` WAL-committed notification dispatch (PostgreSQL `LISTEN`/`NOTIFY`).
+

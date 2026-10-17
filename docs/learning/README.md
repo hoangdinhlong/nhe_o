@@ -28,9 +28,11 @@ interview prep, and friendly to anyone who clones the project to learn by doing.
 
 ### swe/
 - [`01-contract-bound-posix-syscalls-in-spark.md`](swe/01-contract-bound-posix-syscalls-in-spark.md) — Contract-Bound POSIX Syscalls in `SPARK_Mode (On)`: bypassing exception-raising Ada file streams to achieve 100% SPARK verification across disk page and WAL I/O (`ADR-002`).
+- [`02-transactional-pubsub-wal-commit-barrier.md`](swe/02-transactional-pubsub-wal-commit-barrier.md) — Dual-Mode Pub/Sub & The WAL Commit Barrier: combining Redis immediate in-memory streaming with PostgreSQL `LISTEN`/`NOTIFY` WAL-committed dispatch to prevent premature MVCC reads and phantom RAG indexing (`ADR-004`).
 
 ### ai/
-- _(none yet)_
+- [`01-toast-overflow-and-vector-quantization-for-local-llm-rag.md`](ai/01-toast-overflow-and-vector-quantization-for-local-llm-rag.md) — 4KB TOAST Overflow Pages & Vector Quantization (`Float32` / `Int8` / `Binary`) for Universal Local LLM RAG: scaling up to 4096-D embeddings and parent-document chunks while saving 4x–32x HNSW RAM alongside local LLMs (`ADR-003`).
+
 
 ## Writing a lesson
 

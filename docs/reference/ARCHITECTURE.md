@@ -54,15 +54,15 @@ How we build the vision in `VISION.md`. This is the **map** for design decisions
 
 - **`Nhe_O`** (`src/nhe_o.ads`): Root package defining engine constants, version identifiers, and global configuration bounds.
 - **`Nhe_O.Types`** (`src/nhe_o-types.ad[sb]`): PostgreSQL-compatible type taxonomy (`Pg_Int2`, `Pg_Int4`, `Pg_Int8`, `Pg_Float4`, `Pg_Float8`, `Pg_Numeric`, `Pg_Bool`, `Pg_Text`, `Pg_Bytea`, `Pg_UUID`, `Pg_Timestamptz`, `Pg_JSON`, `Pg_JSONB`, `Pg_Vector`), bounded byte/string buffers, status codes, and value comparison predicates.
-- **`Nhe_O.Vector`** (`src/nhe_o-vector.ad[sb]`): Fixed-bound vector representation (`Vector_Value`) and formally verified similarity operators matching PostgreSQL `pgvector`:
+- **`Nhe_O.Vector`** (`src/nhe_o-vector.ad[sb]`): Fixed-bound vector representation (`Vector_Value`, expanding up to `Max_Vector_Dim = 4096` per `ADR-003`) supporting `Float32`, Scalar (`Int8`), and Binary (`1-bit` Hamming) quantization alongside formally verified similarity operators matching PostgreSQL `pgvector`:
   - Euclidean / L2 distance (`<->` / `L2_Distance_Squared`)
   - Cosine distance (`<=>` / `Cosine_Distance`)
   - Negative inner product (`<#>` / `Negative_Inner_Product`)
   - Dimension compatibility preconditions (`Dim_A = Dim_B`) and bounded floating-point safety preventing overflow and division by zero.
 - **`Nhe_O.JSON`** (`src/nhe_o-json.ad[sb]`): PostgreSQL `JSON` and `JSONB` validation, key-value field extraction (`->` object field as JSON, `->>` object field as text), key-existence (`?`), and structural containment (`@>`), proven free of buffer overruns.
-- **`Nhe_O.Transaction`** (`src/nhe_o-transaction.ad[sb]`): ACID transaction lifecycle (`Begin_Tx`, `Commit_Tx`, `Rollback_Tx`), MVCC tuple headers (`Xmin`, `Xmax`), snapshot visibility predicate (`Is_Tuple_Visible`), 4096-byte slotted page serialization, and CRC32 WAL frame encoding/verification.
+- **`Nhe_O.Transaction`** (`src/nhe_o-transaction.ad[sb]`): ACID transaction lifecycle (`Begin_Tx`, `Commit_Tx`, `Rollback_Tx`), MVCC tuple headers (`Xmin`, `Xmax`), snapshot visibility predicate (`Is_Tuple_Visible`), 4096-byte primary slotted page serialization with PostgreSQL-style TOAST overflow page chains (`ADR-003` / `BR-006`), and CRC32 WAL frame encoding/verification.
 - **`Nhe_O.KV`** (`src/nhe_o-kv.ad[sb]`): Redis-compatible high-speed Key-Value store and cache engine supporting `Set`, `Get`, `Del`, `Exists`, `Incr_By`, `Expire`, and `TTL`. Enforces lazy and active TTL expiration and deterministic LRU eviction when the cache reaches capacity.
-- **`Nhe_O.PubSub`** (`src/nhe_o-pubsub.ad[sb]`): Bounded in-process Publish/Subscribe broker supporting `Subscribe`, `Unsubscribe`, `Publish`, and `Poll_Message` across named channels and prefix/wildcard patterns (`*`), backed by circular message queues.
+- **`Nhe_O.PubSub`** (`src/nhe_o-pubsub.ad[sb]`): Bounded in-process Publish/Subscribe broker supporting `Subscribe`, `Unsubscribe`, `Publish`, and `Poll_Message` across named channels and prefix/wildcard patterns (`*`), backed by circular message queues with dual delivery modes: default fast in-memory (Redis) and optional `Durable` WAL-committed dispatch (PostgreSQL `LISTEN`/`NOTIFY`, per `ADR-004`).
 - **`Nhe_O.SQL`** (`src/nhe_o-sql.ad[sb]`): Tokenizer, parser, and statement classifier for PostgreSQL-dialect SQL (`CREATE TABLE`, `INSERT INTO ... ON CONFLICT`, `SELECT ... WHERE ... ORDER BY embedding <-> $1`, `BEGIN`, `COMMIT`, `ROLLBACK`, `LISTEN`, `NOTIFY`).
 - **`Nhe_O.IO`** (`src/nhe_o-io.ads` and `src/nhe_o-io.adb`): Both specification and body operate under `pragma SPARK_Mode (On);`. Binds directly to exception-free POSIX kernel syscalls (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`, `unlink`) with `Side_Effects, Import => True, Convention => C` and `Ada.Text_IO`, verifying NUL-terminated path construction (`To_C_Path`), bounded 64-bit page offsets (`Valid_Page_Id`), exact byte counts, and hardware `fsync` completion.
 
@@ -75,9 +75,10 @@ How we build the vision in `VISION.md`. This is the **map** for design decisions
 | **Language** | Ada 2022 (`-gnat2022`) |
 | **Formal Verification** | 100% SPARK 2022 (`pragma SPARK_Mode (On);` in all 18 files) |
 | **Compiler & Build** | GNAT 16+ / `gprbuild` (`nhe_o.gpr`) |
-| **Storage Layout** | 4096-byte Slotted Pages (`pread`/`pwrite`) + Append-Only CRC32 WAL (`write`/`fsync`) |
+| **Storage Layout** | 4096-byte Primary Slotted Pages + 4KB TOAST Overflow Chains (`pread`/`pwrite`) + Append-Only CRC32 WAL (`write`/`fsync`) |
 | **Concurrency / Isolation** | MVCC Snapshot Isolation (`xmin`/`xmax`) |
-| **Vector Indexing** | Exact Flat Scan + Bounded Navigable Small World (HNSW) Graph |
+| **Vector Indexing & RAG** | Up to 4096-D (`Float32` / `Int8` / `Binary`) · Exact Flat Scan + Bounded HNSW Graph + Hybrid JSONB/TOAST RAG |
+
 
 ---
 

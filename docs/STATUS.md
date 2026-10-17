@@ -3,7 +3,7 @@
 > **Start here.** Entry point for any session (per `../AGENTS.md`).
 > States where the project stands, the active epic, and the next task.
 
-_Last updated: 2026-10-16_
+_Last updated: 2026-10-17_
 
 ---
 
@@ -11,29 +11,33 @@ _Last updated: 2026-10-16_
 
 **Nhé O** (Alire crate `nhe_o`, Ada root package `Nhe_O`) — A formally verified, disk-persistent, ACID-compliant embedded database engine written in Ada/SPARK featuring PostgreSQL syntax and data types, native Vector search, JSON/JSONB processing, Redis-compatible Key-Value caching, and Pub/Sub messaging.
 
-The project has completed **Epic 01 (Scaffold and Architecture)** and is ready for **Epic 02 (B+Tree Storage Indexing, HNSW Vector Graph & Query Executor)**. The documentation system is scaffolded from Monion's `project-docs` archetype (Revision R8), core architectural decisions (`ADR-001`..`ADR-002`) and domain invariants (`BR-001`..`BR-005`) are ratified, and the foundational Ada 2022 / SPARK 2022 codebase is implemented in **100% `pragma SPARK_Mode (On);`** across all 18 source files, compiled with zero warnings, runtime-verified with contract assertions (`-gnata`), and published to GitHub (`hoangdinhlong/nhe_o`).
+The project has completed **Epic 01 (Scaffold and Architecture)** and initiated **Epic 02 (B+Tree Storage, TOAST Overflow, 4096-D Quantized HNSW & Universal RAG Executor)**. Open questions `Q-001` and `Q-002` are resolved (`ADR-003`, `ADR-004`), domain invariants (`BR-001`..`BR-006`) are ratified, and the foundational Ada 2022 / SPARK 2022 codebase is implemented in **100% `pragma SPARK_Mode (On);`** across all 18 source files, compiled with zero warnings, runtime-verified with contract assertions (`-gnata`), and published to GitHub (`hoangdinhlong/nhe_o`).
 
 - ✅ Monion `project-docs` R8 template applied and customized.
 - ✅ System vision, 100% `SPARK_Mode (On)` architecture, and domain invariants documented (`VISION.md`, `ARCHITECTURE.md`, `business-rules.md`).
-- ✅ Architectural decisions recorded (`ADR-001`..`ADR-002`): unified multi-model engine over shared MVCC/WAL (`ADR-001`) and 100% `SPARK_Mode (On)` via statically bounded memory and contract-bound POSIX syscall I/O (`ADR-002`).
+- ✅ Architectural decisions recorded (`ADR-001`..`ADR-004`): unified multi-model engine (`ADR-001`), 100% `SPARK_Mode (On)` POSIX syscall I/O (`ADR-002`), 4KB TOAST overflow chains + 4096-D & `Int8`/Binary quantized vectors for universal local LLM RAG (`ADR-003`), and dual-mode in-memory + `DURABLE` WAL-committed Pub/Sub (`ADR-004`).
 - ✅ PostgreSQL Type System (`Nhe_O.Types`), SQL Dialect Parser (`Nhe_O.SQL`), Vector Engine (`Nhe_O.Vector` with `<->`, `<=>`, `<#>`), and JSON/JSONB Engine (`Nhe_O.JSON` with `->`, `->>`, `@>`, `?`) implemented in 100% SPARK (`SPARK_Mode => On`).
 - ✅ ACID MVCC Transaction Manager & CRC32 WAL/Slotted-Page Framer (`Nhe_O.Transaction`), Redis-style KV Cache with TTL & LRU eviction (`Nhe_O.KV`), and Ring-Buffer Pub/Sub Broker (`Nhe_O.PubSub`) implemented in 100% SPARK (`SPARK_Mode => On`).
 - ✅ Contract-bound POSIX I/O substrate (`Nhe_O.IO` spec and body `src/nhe_o-io.adb` both in `SPARK_Mode => On`) persisting 4KB pages (`pread`/`pwrite`) and WAL frames (`write`/`pread`/`fsync`) to disk with zero `SPARK_Mode (Off)` in the repository.
-- ⛔ Multi-page B+Tree table/index splits and HNSW graph persistence (planned for Epic 02).
-- ⛔ Full SQL Volcano/Vectorized execution pipeline joining relational, JSONB, and vector predicates (planned for Epic 02).
+- 🚧 4KB TOAST overflow page chains, 4096-D `Float32`/`Int8`/`Binary` vector quantization, multi-page B+Tree splits, and HNSW ANN graph index (active in Epic 02).
+- 🚧 Dual-mode `DURABLE` WAL Pub/Sub and Universal RAG Hybrid SQL Executor (active in Epic 02).
 
 ## Epic overview
 
 | Epic | Goal | Status |
 |------|------|--------|
-| `01-scaffold-and-architecture` | Establish project scaffolding, 100% SPARK core & POSIX I/O subsystems | ☑ Done |
+| `01-scaffold-and-architecture` | Establish project scaffolding, 100% SPARK core & POSIX I/O subsystems | ✅ Done |
+| `02-storage-indexing-and-rag-executor` | 4KB TOAST overflow, 4096-D quantized HNSW, B+Tree, Durable Pub/Sub & Universal RAG Executor | 🚧 Active |
 
-## Active epic → `epics/01-scaffold-and-architecture/PROGRESS.md`
+## Active epic → `epics/02-storage-indexing-and-rag-executor/PROGRESS.md`
 
-Epic 01 is complete. Next concrete tasks for upcoming Epic 02:
-1. Implement multi-page B+Tree node splitting and WAL crash-recovery redo pass in `Nhe_O.Transaction`.
-2. Add bounded HNSW navigable small-world graph index over `Nhe_O.Vector` for sub-linear approximate nearest neighbor search.
-3. Connect `Nhe_O.SQL` parsed AST statements to physical B+Tree, JSONB, and Vector scan executors.
+Next concrete tasks in Epic 02:
+1. Implement 4KB TOAST overflow page chains (`Overflow_Page_Id`, 16-byte inline TOAST pointer, and multi-page WAL redo pass) in `Nhe_O.Transaction` (`ADR-003`, `BR-006`).
+2. Expand `Nhe_O.Vector` to `Max_Vector_Dim = 4096` and implement Scalar (`Int8`) & Binary (`1-bit` Hamming) quantization alongside `Float32` (`ADR-003`, `BR-003`).
+3. Implement multi-page B+Tree relational/primary-key index with deterministic node splitting in `SPARK_Mode (On)`.
+4. Implement bounded HNSW navigable small-world graph index for sub-linear ANN search over `Float32`, `Int8`, and `Binary` vectors.
+5. Implement Dual-Mode Pub/Sub (`ADR-004`, `BR-005`) with transactional `Durable` notification staging and post-WAL-commit dispatch (`LISTEN`/`NOTIFY`).
+6. Implement Universal RAG & Hybrid SQL Query Executor joining B+Tree scan, JSONB metadata filter (`@>`), TOAST parent-chunk retrieval, and HNSW Vector top-K search.
 
 ## Known issues / blockers
 
@@ -44,6 +48,9 @@ Epic 01 is complete. Next concrete tasks for upcoming Epic 02:
 See `DECISIONS.md`.
 - `ADR-001`: Unified Multi-Model Engine (PostgreSQL SQL/JSONB/Vector + Redis KV & Pub/Sub over Shared MVCC/WAL).
 - `ADR-002`: 100% `SPARK_Mode (On)` Mandate via Statically Bounded Memory and Contract-Bound POSIX Syscall I/O.
+- `ADR-003`: 4KB Slotted Pages with TOAST Overflow Chains, 4096-D Vectors & Quantization for Universal RAG.
+- `ADR-004`: Dual-Mode Pub/Sub: Fast In-Memory Ring Buffers + Optional `DURABLE` WAL-Committed Dispatch.
 
 Pre-decision ideas live in `ideas/`. Questions still waiting on an answer live in
 `OPEN-QUESTIONS.md`.
+
