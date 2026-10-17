@@ -32,11 +32,12 @@ Developers are forced either to run a heavy fleet of external server daemons (Po
 **Nhé O** (crate `nhe_o`, Ada root package `Nhe_O`) is a single-binary, embeddable multi-model database management system written in **Ada 2022 and SPARK 2022**:
 - **SQLite-Style Embedded Footprint**: Runs directly in-process or as a lightweight local engine backed by a deterministic disk page file and Write-Ahead Log (WAL). Zero external servers required.
 - **PostgreSQL Syntax & Data Types**: Supports PostgreSQL-compatible SQL syntax (`$1` parameters, `::type` casts, `RETURNING`, `ON CONFLICT DO UPDATE`) and native PostgreSQL data types (`INT2`, `INT4`, `INT8`, `FLOAT4`, `FLOAT8`, `NUMERIC`, `BOOLEAN`, `TEXT`, `BYTEA`, `UUID`, `TIMESTAMPTZ`, `JSON`, `JSONB`, `VECTOR`).
-- **Native Vector Database**: First-class `VECTOR(d)` column and value type with formally verified L2 distance (`<->`), cosine distance (`<=>`), and negative inner product (`<#>`) operators.
+- **Native Vector Database & Quantized HNSW**: First-class `VECTOR(d)` column and value type (up to `4096` dimensions) with `Float32`, `Int8` (SQ8), and `1-bit` Binary Hamming quantization, Multi-Layer HNSW indexing, and formally verified L2 distance (`<->`), cosine distance (`<=>`), and negative inner product (`<#>`) operators.
 - **PostgreSQL JSON / JSONB Engine**: Structural validation and binary tree indexing with `->`, `->>`, `@>` (containment), and `?` (key-existence) operators.
-- **Full ACID & Disk Persistence**: Multi-Version Concurrency Control (MVCC) with snapshot isolation (`xmin`/`xmax`) paired with CRC32-checksummed Write-Ahead Logging (WAL) and slotted 4KB disk pages.
-- **Redis-Grade Key-Value Cache & Pub/Sub**: Direct high-speed KV operations (`GET`, `SET`, `DEL`, `INCR`, `EXPIRE`, `TTL`) with deterministic TTL expiration and LRU eviction, plus an in-process Pub/Sub message broker (`PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, pattern matching).
-- **100% SPARK Verified Codebase**: Every single module specification and body (18/18 files in `src/`, including `Nhe_O.IO`) operates under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)`.
+- **Full ACID, TOAST Overflow & Disk Persistence**: Multi-Version Concurrency Control (MVCC) with snapshot isolation (`xmin`/`xmax`) paired with CRC32-checksummed Write-Ahead Logging (WAL), slotted 4KB primary disk pages, 4KB TOAST overflow page chains, and Multi-Page B+Tree indexing.
+- **Redis-Grade Key-Value Cache & Dual-Mode Pub/Sub**: Direct high-speed KV operations (`GET`, `SET`, `DEL`, `INCR`, `EXPIRE`, `TTL`) with deterministic TTL expiration and LRU eviction, plus an in-process Pub/Sub message broker (`PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, pattern matching) supporting both immediate in-memory delivery and `DURABLE` WAL-committed notifications (`LISTEN`/`NOTIFY`).
+- **Universal Local LLM RAG & C/Python FFI SDK**: Built-in Hybrid RAG & 1-hop GraphRAG executor exposed via a precondition-free C ABI (`include/nhe_o.h`, `lib/libnhe_o.so`) and Python `ctypes` SDK (`bindings/python/nhe_o.py`).
+- **100% SPARK Verified Codebase (Silver + Partial Gold)**: Every single module specification and body (26/26 files across 14 units in `src/`, including `Nhe_O.IO` and `Nhe_O.C_API`) operates under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)`, achieving **1,543 / 1,543 formal checks proved (0 unproved)** with `gnatprove 16.1.0`.
 
 ---
 
@@ -47,8 +48,9 @@ Developers are forced either to run a heavy fleet of external server daemons (Po
 3. **Rich JSON/JSONB Querying**: Store and query nested JSON documents using PostgreSQL's `->`, `->>`, `@>`, and `?` operators without memory safety vulnerabilities.
 4. **Crash-Safe ACID Persistence**: Guarantee atomicity, consistency, snapshot isolation, and durability across power loss or process crashes via WAL redo recovery, hardware `fsync`, and page checksums.
 5. **Embedded Redis-Compatible Cache**: Sub-microsecond in-memory Key-Value reads/writes with optional TTL expiration, LRU bounded eviction, and transparent WAL persistence.
-6. **Real-Time Pub/Sub Channels**: Publish and subscribe to named channels or wildcard patterns using bounded, lock-free/protected ring buffers with zero dynamic heap allocation.
-7. **100% `SPARK_Mode (On)` Verification**: Enforce that 100% of parsing, indexing, transaction visibility, vector math, JSON traversal, KV caching, Pub/Sub routing, and POSIX syscall I/O orchestration (`Nhe_O.IO`) operate under `SPARK_Mode (On)`.
+6. **Real-Time & Transactional Pub/Sub Channels**: Publish and subscribe to named channels or wildcard patterns using bounded ring buffers with zero dynamic heap allocation and optional WAL-commit gating.
+7. **100% `SPARK_Mode (On)` Verification (Stone / Bronze / Silver / Partial Gold)**: Enforce that 100% of parsing, B+Tree/HNSW indexing, transaction visibility, vector math, JSON traversal, KV caching, Pub/Sub routing, C FFI boundaries (`Nhe_O.C_API`), and POSIX syscall I/O orchestration (`Nhe_O.IO`) operate under `SPARK_Mode (On)` with 100% proved Absence of Run-Time Errors (Silver) and key domain integrity contracts (Gold).
+
 
 ---
 

@@ -12,26 +12,30 @@ How we build the vision in `VISION.md`. This is the **map** for design decisions
 
 ```text
 +-----------------------------------------------------------------------------+
+|   External Callers: CLI (`nhe_o_main`) · C99/C++ (`nhe_o.h`) · Python SDK   |
++-------------------------------------|---------------------------------------+
+                                      | (Precondition-Free Defensive C ABI)
++-------------------------------------v---------------------------------------+
 |            Nhé O (`Nhe_O`) Embedded DBMS — 100% pragma SPARK_Mode (On)      |
+|      [1,543 / 1,543 Checks Proved: 100% SPARK Silver + Partial Gold]        |
 |                                                                             |
 |  +----------------------+ +-------------------+ +------------------------+  |
-|  |  PostgreSQL SQL &    | |   Redis-Compatible| |  Pub/Sub Event         |  |
-|  |  Query Planner       | |   KV Cache Engine | |  Broker (RingBuf)      |  |
-|  |  (`Nhe_O.SQL`)       | |   (`Nhe_O.KV`)    | |  (`Nhe_O.PubSub`)      |  |
+|  |  PostgreSQL SQL &    | |   Redis-Compatible| |  Dual-Mode Pub/Sub     |  |
+|  |  Hybrid RAG Executor | |   KV Cache Engine | |  Broker (Mem + WAL)    |  |
+|  |  (`SQL` / `RAG`)     | |   (`Nhe_O.KV`)    | |  (`Nhe_O.PubSub`)      |  |
 |  +----------+-----------+ +---------+---------+ +-----------+------------+  |
 |             |                       |                       |               |
 |  +----------v-----------------------v-----------------------v------------+  |
-|  |                  Multi-Model Data & Operator Engines                  |  |
+|  |           Multi-Model Data, Vector & Indexing Engines                 |  |
 |  |  +-----------------+   +-------------------+   +-------------------+  |  |
-|  |  | PG Type System  |   | Vector Engine     |   | JSON / JSONB      |  |  |
-|  |  | (`Nhe_O.Types`) |   | (`Nhe_O.Vector`)  |   | (`Nhe_O.JSON`)    |  |  |
-|  |  | INT2/4/8, TEXT, |   | <-> L2, <=> Cos,  |   | ->, ->>, @>, ?    |  |  |
-|  |  | UUID, NUMERIC   |   | <#> Inner Prod    |   | Structural AST    |  |  |
+|  |  | PG Type & JSONB |   | 4096-D Vector &   |   | Multi-Page B+Tree |  |  |
+|  |  | (`Types`/`JSON`)|   | Quantized HNSW    |   | Primary Key Index |  |  |
+|  |  | ->, ->>, @>, ?  |   | (`Vector`/`HNSW`) |   | (`Nhe_O.BTree`)   |  |  |
 |  |  +-----------------+   +-------------------+   +-------------------+  |  |
 |  +----------------------------------+------------------------------------+  |
 |                                     |                                       |
 |  +----------------------------------v------------------------------------+  |
-|  |         ACID Storage, MVCC & WAL Framing (`Nhe_O.Transaction`)        |  |
+|  |    ACID Storage, MVCC, 4KB TOAST & WAL Framing (`Nhe_O.Transaction`)  |  |
 |  |   Snapshot Isolation (xmin/xmax) · 4KB Slotted Pages · CRC32 Checksum |  |
 |  +----------------------------------+------------------------------------+  |
 |                                     |                                       |
@@ -77,12 +81,13 @@ How we build the vision in `VISION.md`. This is the **map** for design decisions
 | Concern | Choice |
 |---------|--------|
 | **Language** | Ada 2022 (`-gnat2022`) |
-| **Formal Verification** | 100% SPARK 2022 (`pragma SPARK_Mode (On);` in all 26 files, proven by `gnatprove 16.1.0` with `Z3`, `cvc5`, `Alt-Ergo`) |
+| **Formal Verification** | 100% SPARK 2022 (`pragma SPARK_Mode (On);` in all 26 files — **100% Stone, Bronze, Silver AoRTE & Partial Gold**: `1,543 / 1,543` checks proved by `gnatprove 16.1.0` with `Z3`, `cvc5`, `Alt-Ergo`) |
 | **Compiler & Build** | Alire `2.1.1` / GNAT `16.1.0` / `gprbuild 26.0.1` (`nhe_o.gpr` & `nhe_o_lib.gpr`) |
 | **Storage Layout** | 4096-byte Primary Slotted Pages + 4KB TOAST Overflow Chains (`pread`/`pwrite`) + Append-Only CRC32 WAL (`write`/`fsync`) |
 | **Concurrency / Isolation** | MVCC Snapshot Isolation (`xmin`/`xmax`) |
 | **Vector Indexing & RAG** | Up to 4096-D (`Float32` / `Int8` / `Binary`) · Multi-Layer HNSW Graph + Multi-Page B+Tree + Hybrid JSONB/TOAST/GraphRAG |
 | **C ABI / FFI & SDKs** | `Nhe_O.C_API` (`lib/libnhe_o.so`) · C99/C++17 (`include/nhe_o.h`) · Python `ctypes` (`bindings/python/nhe_o.py`) |
+
 
 
 ---
