@@ -60,10 +60,13 @@ How we build the vision in `VISION.md`. This is the **map** for design decisions
   - Negative inner product (`<#>` / `Negative_Inner_Product`)
   - Dimension compatibility preconditions (`Dim_A = Dim_B`) and bounded floating-point safety preventing overflow and division by zero.
 - **`Nhe_O.JSON`** (`src/nhe_o-json.ad[sb]`): PostgreSQL `JSON` and `JSONB` validation, key-value field extraction (`->` object field as JSON, `->>` object field as text), key-existence (`?`), and structural containment (`@>`), proven free of buffer overruns.
-- **`Nhe_O.Transaction`** (`src/nhe_o-transaction.ad[sb]`): ACID transaction lifecycle (`Begin_Tx`, `Commit_Tx`, `Rollback_Tx`), MVCC tuple headers (`Xmin`, `Xmax`), snapshot visibility predicate (`Is_Tuple_Visible`), 4096-byte primary slotted page serialization with PostgreSQL-style TOAST overflow page chains (`ADR-003` / `BR-006`), and CRC32 WAL frame encoding/verification.
+- **`Nhe_O.Transaction`** (`src/nhe_o-transaction.ad[sb]`): ACID transaction lifecycle (`Begin_Tx`, `Commit_Tx`, `Rollback_Tx`), MVCC tuple headers (`Xmin`, `Xmax`), snapshot visibility predicate (`Is_Tuple_Visible`), 4096-byte primary slotted page serialization with PostgreSQL-style 4KB TOAST overflow page chains (`Write_TOAST_Chain`, `Read_TOAST_Chain`, `ADR-003` / `BR-006`), and CRC32 WAL frame encoding, verification, and crash-recovery replay (`Redo_WAL_Recovery`).
+- **`Nhe_O.BTree`** (`src/nhe_o-btree.ad[sb]`): Multi-page B+Tree index mapping `Integer_64` keys to `(Target_Page, Target_Slot, TOAST_Root)` with deterministic leaf and root splitting (`Insert_Key`), exact lookup (`Search_Key`), ordered range scan (`Range_Scan`), and 4KB page serialization (`Encode_Node_Page` / `Decode_Node_Page`).
+- **`Nhe_O.HNSW`** (`src/nhe_o-hnsw.ad[sb]`): Bounded multi-layer Hierarchical Navigable Small World (HNSW) graph index supporting sub-linear ANN search (`Search_KNN`) across `Float32`, `Int8` (SQ8), and `4096-D` `Binary` (1-bit Hamming) encodings.
 - **`Nhe_O.KV`** (`src/nhe_o-kv.ad[sb]`): Redis-compatible high-speed Key-Value store and cache engine supporting `Set`, `Get`, `Del`, `Exists`, `Incr_By`, `Expire`, and `TTL`. Enforces lazy and active TTL expiration and deterministic LRU eviction when the cache reaches capacity.
-- **`Nhe_O.PubSub`** (`src/nhe_o-pubsub.ad[sb]`): Bounded in-process Publish/Subscribe broker supporting `Subscribe`, `Unsubscribe`, `Publish`, and `Poll_Message` across named channels and prefix/wildcard patterns (`*`), backed by circular message queues with dual delivery modes: default fast in-memory (Redis) and optional `Durable` WAL-committed dispatch (PostgreSQL `LISTEN`/`NOTIFY`, per `ADR-004`).
+- **`Nhe_O.PubSub`** (`src/nhe_o-pubsub.ad[sb]`): Bounded in-process Publish/Subscribe broker supporting `Subscribe`, `Unsubscribe`, `Publish`, and `Poll_Message` across named channels and prefix/wildcard patterns (`*`), backed by circular message queues with dual delivery modes: default fast in-memory (Redis) and optional `Durable` WAL-committed dispatch (`Stage_Notify`, `Flush_Committed_Notifications`, `Discard_Staged_Notifications`, per `ADR-004`).
 - **`Nhe_O.SQL`** (`src/nhe_o-sql.ad[sb]`): Tokenizer, parser, and statement classifier for PostgreSQL-dialect SQL (`CREATE TABLE`, `INSERT INTO ... ON CONFLICT`, `SELECT ... WHERE ... ORDER BY embedding <-> $1`, `BEGIN`, `COMMIT`, `ROLLBACK`, `LISTEN`, `NOTIFY`).
+- **`Nhe_O.RAG`** (`src/nhe_o-rag.ad[sb]`): Universal Local LLM RAG & Hybrid SQL Query Executor unifying B+Tree primary-key indexing, multi-layer HNSW quantized ANN search, `JSONB` metadata pre-filtering (`@>`), lexical keyword boosting, 4KB TOAST parent-document chunk retrieval, 1-hop GraphRAG neighbor expansion, and `DURABLE` `rag.indexed` WAL notifications.
 - **`Nhe_O.IO`** (`src/nhe_o-io.ads` and `src/nhe_o-io.adb`): Both specification and body operate under `pragma SPARK_Mode (On);`. Binds directly to exception-free POSIX kernel syscalls (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`, `unlink`) with `Side_Effects, Import => True, Convention => C` and `Ada.Text_IO`, verifying NUL-terminated path construction (`To_C_Path`), bounded 64-bit page offsets (`Valid_Page_Id`), exact byte counts, and hardware `fsync` completion.
 
 ---
@@ -73,11 +76,11 @@ How we build the vision in `VISION.md`. This is the **map** for design decisions
 | Concern | Choice |
 |---------|--------|
 | **Language** | Ada 2022 (`-gnat2022`) |
-| **Formal Verification** | 100% SPARK 2022 (`pragma SPARK_Mode (On);` in all 18 files) |
+| **Formal Verification** | 100% SPARK 2022 (`pragma SPARK_Mode (On);` in all 24 files) |
 | **Compiler & Build** | GNAT 16+ / `gprbuild` (`nhe_o.gpr`) |
 | **Storage Layout** | 4096-byte Primary Slotted Pages + 4KB TOAST Overflow Chains (`pread`/`pwrite`) + Append-Only CRC32 WAL (`write`/`fsync`) |
 | **Concurrency / Isolation** | MVCC Snapshot Isolation (`xmin`/`xmax`) |
-| **Vector Indexing & RAG** | Up to 4096-D (`Float32` / `Int8` / `Binary`) · Exact Flat Scan + Bounded HNSW Graph + Hybrid JSONB/TOAST RAG |
+| **Vector Indexing & RAG** | Up to 4096-D (`Float32` / `Int8` / `Binary`) · Multi-Layer HNSW Graph + Multi-Page B+Tree + Hybrid JSONB/TOAST/GraphRAG |
 
 
 ---

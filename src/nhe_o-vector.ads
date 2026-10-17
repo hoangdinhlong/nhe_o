@@ -1,10 +1,20 @@
---  Formally verified PostgreSQL pgvector-compatible Vector Engine (BR-003)
+--  Formally verified PostgreSQL pgvector-compatible Vector Engine (BR-003 / ADR-003)
 pragma SPARK_Mode (On);
+
+with Interfaces;
 
 package Nhe_O.Vector is
 
-   Max_Vector_Dim : constant := 256;
+   --  Supports all modern embedding models up to 4096 dimensions
+   --  (e.g., MiniLM 384-D, bge-m3 1024-D, text-embedding-3-large 3072-D, Qwen3-Embedding-8B 4096-D)
+   Max_Vector_Dim : constant := 4096;
    subtype Vector_Dim is Positive range 1 .. Max_Vector_Dim;
+
+   type Vector_Encoding_Kind is (
+      Encoding_Float32,     --  4 bytes/dim (16 KB at 4096-D, stored in TOAST overflow pages)
+      Encoding_Int8_SQ8,    --  1 byte/dim  (4 KB at 4096-D, 4x RAM reduction)
+      Encoding_Binary_1Bit  --  1 bit/dim   (512 B at 4096-D, 32x RAM reduction, fits inline)
+   );
 
    --  Bounded float component preventing IEEE-754 overflow during dot/L2 sum
    Max_Component : constant := 1.0e6;
@@ -16,6 +26,32 @@ package Nhe_O.Vector is
    type Vector_Value is record
       Dim      : Vector_Dim   := 1;
       Elements : Vector_Array := [others => 0.0];
+   end record;
+
+   -------------------------------------------------------------------------
+   --  Scalar Quantization (Int8 / SQ8) — 4x Memory Reduction (ADR-003)
+   -------------------------------------------------------------------------
+
+   type Int8_Component is range -127 .. 127;
+   type Int8_Vector_Array is array (Vector_Dim) of Int8_Component;
+
+   type Quantized_Int8_Vector is record
+      Dim      : Vector_Dim         := 1;
+      Scale    : Non_Negative_Float := 1.0;
+      Elements : Int8_Vector_Array  := [others => 0];
+   end record;
+
+   -------------------------------------------------------------------------
+   --  Binary Quantization (1-bit Hamming) — 32x Memory Reduction (ADR-003)
+   -------------------------------------------------------------------------
+
+   Max_Binary_Words : constant := 64; --  64 * 64 bits = 4096 bits (512 bytes)
+   subtype Binary_Word_Index is Positive range 1 .. Max_Binary_Words;
+   type Binary_Word_Array is array (Binary_Word_Index) of Interfaces.Unsigned_64;
+
+   type Quantized_Binary_Vector is record
+      Dim   : Vector_Dim        := 1;
+      Words : Binary_Word_Array := [others => 0];
    end record;
 
    --  Construct a 3D vector helper for testing and SQL literals
@@ -55,4 +91,34 @@ package Nhe_O.Vector is
      with Pre  => A.Dim = B.Dim,
           Post => Cosine_Distance'Result in 0.0 .. 2.0;
 
+   --  Quantize Float32 vector to Int8 (SQ8) symmetric scalar quantization
+   function Quantize_To_Int8 (V : Vector_Value) return Quantized_Int8_Vector
+     with Post => Quantize_To_Int8'Result.Dim = V.Dim
+                  and then Quantize_To_Int8'Result.Scale > 0.0;
+
+   --  Reconstruct approximate Float32 vector from Int8 (SQ8) quantized vector
+   function Dequantize_From_Int8 (Q : Quantized_Int8_Vector) return Vector_Value
+     with Post => Dequantize_From_Int8'Result.Dim = Q.Dim;
+
+   --  Squared L2 distance in Int8 quantized integer domain (guaranteed overflow-free)
+   function Int8_L2_Distance_Squared
+     (A, B : Quantized_Int8_Vector) return Natural
+     with Pre => A.Dim = B.Dim;
+
+   --  Inner product in Int8 quantized integer domain (guaranteed overflow-free)
+   function Int8_Inner_Product
+     (A, B : Quantized_Int8_Vector) return Integer
+     with Pre => A.Dim = B.Dim;
+
+   --  Quantize Float32 vector to 1-bit Binary representation (bit = 1 iff V(i) > 0.0)
+   function Quantize_To_Binary (V : Vector_Value) return Quantized_Binary_Vector
+     with Post => Quantize_To_Binary'Result.Dim = V.Dim;
+
+   --  Compute exact Hamming distance (XOR + PopCount) over 1 .. A.Dim bits
+   function Hamming_Distance
+     (A, B : Quantized_Binary_Vector) return Natural
+     with Pre  => A.Dim = B.Dim,
+          Post => Hamming_Distance'Result <= A.Dim;
+
 end Nhe_O.Vector;
+

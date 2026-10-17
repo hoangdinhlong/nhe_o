@@ -8,12 +8,12 @@ Status legend: ☐ todo · ◐ in progress · ☑ done
 
 | # | Task | Status | Tests |
 |---|------|--------|-------|
-| 1 | Implement 4KB TOAST overflow page chains (`Overflow_Page_Id`, 16-byte inline TOAST pointer, and multi-page WAL redo pass) in `Nhe_O.Transaction` (`ADR-003`, `BR-006`) | ☐ | — |
-| 2 | Expand `Nhe_O.Vector` to `Max_Vector_Dim = 4096` and implement Scalar (`Int8`) & Binary (`1-bit` Hamming) quantization alongside `Float32` (`ADR-003`, `BR-003`) | ☐ | — |
-| 3 | Implement multi-page B+Tree relational/primary-key index with deterministic node splitting in `SPARK_Mode (On)` | ☐ | — |
-| 4 | Implement bounded HNSW navigable small-world graph index for sub-linear ANN search over `Float32`, `Int8`, and `Binary` vectors | ☐ | — |
-| 5 | Implement Dual-Mode Pub/Sub (`ADR-004`, `BR-005`): add transactional `Durable` notification staging and post-WAL-commit dispatch (`LISTEN`/`NOTIFY`) | ☐ | — |
-| 6 | Implement Universal RAG & Hybrid SQL Query Executor joining B+Tree scan, JSONB metadata filter (`@>`), TOAST parent-chunk retrieval, and HNSW Vector top-K search | ☐ | — |
+| 1 | Implement 4KB TOAST overflow page chains (`Overflow_Page_Id`, 16-byte inline TOAST pointer, and multi-page WAL redo pass) in `Nhe_O.Transaction` (`ADR-003`, `BR-006`) | ☑ | Suite `[5/10]` (`Write_TOAST_Chain`, `Read_TOAST_Chain`, `Redo_WAL_Recovery` verified) |
+| 2 | Expand `Nhe_O.Vector` to `Max_Vector_Dim = 4096` and implement Scalar (`Int8`) & Binary (`1-bit` Hamming) quantization alongside `Float32` (`ADR-003`, `BR-003`) | ☑ | Suite `[2/10]` (4096-D `Float32`, `Int8` SQ8, and `Binary` Hamming verified) |
+| 3 | Implement multi-page B+Tree relational/primary-key index with deterministic node splitting in `SPARK_Mode (On)` | ☑ | Suite `[6/10]` (`Nhe_O.BTree` leaf/root splits, `Search_Key`, `Range_Scan`, page encode/decode verified) |
+| 4 | Implement bounded HNSW navigable small-world graph index for sub-linear ANN search over `Float32`, `Int8`, and `Binary` vectors | ☑ | Suite `[7/10]` (`Nhe_O.HNSW` multi-layer ANN search across all 3 encodings verified) |
+| 5 | Implement Dual-Mode Pub/Sub (`ADR-004`, `BR-005`): add transactional `Durable` notification staging and post-WAL-commit dispatch (`LISTEN`/`NOTIFY`) | ☑ | Suite `[9/10]` (`Stage_Notify`, rollback discard, and post-WAL `Flush_Committed_Notifications` verified) |
+| 6 | Implement Universal RAG & Hybrid SQL Query Executor joining B+Tree scan, JSONB metadata filter (`@>`), TOAST parent-chunk retrieval, and HNSW Vector top-K search | ☑ | Suite `[10/10]` (`Nhe_O.RAG` Hybrid SQL + `JSONB` + Keyword + HNSW + TOAST + GraphRAG verified) |
 
 ## Notes / sequencing
 - Task 1 (4KB TOAST overflow pages) and Task 2 (4096-D & quantized vectors) go first as the storage foundation for Tasks 4 and 6.

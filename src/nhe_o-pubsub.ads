@@ -1,7 +1,8 @@
---  Formally verified Deterministic Ring-Buffer Pub/Sub Broker (BR-005)
+--  Formally verified Dual-Mode Ring-Buffer & Durable WAL Pub/Sub Broker (BR-005 / ADR-004)
 pragma SPARK_Mode (On);
 
-with Nhe_O.Types; use Nhe_O.Types;
+with Nhe_O.Types;       use Nhe_O.Types;
+with Nhe_O.Transaction; use Nhe_O.Transaction;
 
 package Nhe_O.PubSub is
 
@@ -35,12 +36,28 @@ package Nhe_O.PubSub is
       Subscribers : Subscriber_Table := [others => (others => <>)];
    end record;
 
+   -------------------------------------------------------------------------
+   --  Transactional Durable Notification Staging (PostgreSQL LISTEN/NOTIFY)
+   -------------------------------------------------------------------------
+
+   Max_Staged_Notifications : constant := 16;
+   subtype Staged_Notify_Index is Positive range 1 .. Max_Staged_Notifications;
+   subtype Staged_Notify_Count is Natural range 0 .. Max_Staged_Notifications;
+
+   type Staged_Notify_Array is array (Staged_Notify_Index) of PubSub_Message;
+
+   type Tx_Notification_Buffer is record
+      Owner_Tx : Valid_Tx_Id         := 1;
+      Count    : Staged_Notify_Count := 0;
+      Items    : Staged_Notify_Array := [others => (others => <>)];
+   end record;
+
    --  Match exact channel or trailing '*' prefix wildcard (e.g. "events.*")
    function Matches_Channel
      (Pattern : Bounded_Ident;
       Channel : Bounded_Ident) return Boolean;
 
-   --  SUBSCRIBE / PSUBSCRIBE: Register a channel or pattern subscription
+   --  SUBSCRIBE / PSUBSCRIBE / LISTEN: Register a channel or pattern subscription
    procedure Subscribe
      (Broker  : in out PubSub_Broker;
       Pattern : in     Bounded_Ident;
@@ -49,20 +66,49 @@ package Nhe_O.PubSub is
      with Pre  => Pattern.Length > 0,
           Post => (if Status = Status_Ok then Broker.Subscribers (Sub_Id).Active);
 
-   --  UNSUBSCRIBE: Deactivate a subscriber slot and clear its queue
+   --  UNSUBSCRIBE / UNLISTEN: Deactivate a subscriber slot and clear its queue
    procedure Unsubscribe
      (Broker : in out PubSub_Broker;
       Sub_Id : in     Subscriber_Id)
      with Post => not Broker.Subscribers (Sub_Id).Active
                   and then Broker.Subscribers (Sub_Id).Count = 0;
 
-   --  PUBLISH / NOTIFY: Deliver payload to all matching active subscribers' ring buffers
+   --  Mode 1 (Redis PUBLISH): Immediate in-memory delivery to matching subscribers
    procedure Publish
      (Broker    : in out PubSub_Broker;
       Channel   : in     Bounded_Ident;
       Payload   : in     Bounded_Text;
       Delivered :    out Subscriber_Count)
      with Pre => Channel.Length > 0;
+
+   --  Mode 2 (PostgreSQL NOTIFY — Durable): Stage a notification inside an active transaction
+   --  held behind the WAL Commit Barrier until Commit_Tx succeeds (ADR-004 / BR-005)
+   procedure Stage_Notify
+     (Ctx     : in     Transaction_Context;
+      Staging : in out Tx_Notification_Buffer;
+      Channel : in     Bounded_Ident;
+      Payload : in     Bounded_Text;
+      Status  :    out Engine_Status)
+     with Pre  => Ctx.State = Tx_Active and then Channel.Length > 0,
+          Post => (if Status = Status_Ok then
+                     Staging.Count = Staging.Count'Old + 1
+                     and then Staging.Owner_Tx = Ctx.Id);
+
+   --  Flush staged notifications across the WAL Commit Barrier ONLY after Tx_Committed
+   procedure Flush_Committed_Notifications
+     (Ctx             : in     Transaction_Context;
+      Staging         : in out Tx_Notification_Buffer;
+      Broker          : in out PubSub_Broker;
+      Total_Delivered :    out Natural)
+     with Pre  => Ctx.State = Tx_Committed,
+          Post => Staging.Count = 0;
+
+   --  Discard staged notifications when a transaction rolls back or aborts
+   procedure Discard_Staged_Notifications
+     (Ctx     : in     Transaction_Context;
+      Staging : in out Tx_Notification_Buffer)
+     with Pre  => Ctx.State = Tx_Aborted,
+          Post => Staging.Count = 0;
 
    --  Dequeue oldest FIFO message from subscriber's ring buffer
    procedure Poll_Message
@@ -75,3 +121,4 @@ package Nhe_O.PubSub is
                        Broker'Old.Subscribers (Sub_Id).Count - 1);
 
 end Nhe_O.PubSub;
+

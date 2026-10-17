@@ -98,6 +98,64 @@ package body Nhe_O.PubSub is
       end loop;
    end Publish;
 
+   procedure Stage_Notify
+     (Ctx     : in     Transaction_Context;
+      Staging : in out Tx_Notification_Buffer;
+      Channel : in     Bounded_Ident;
+      Payload : in     Bounded_Text;
+      Status  :    out Engine_Status)
+   is
+   begin
+      if Staging.Count = Max_Staged_Notifications then
+         Status := Status_Capacity_Exceeded;
+         return;
+      end if;
+
+      Staging.Owner_Tx := Ctx.Id;
+      Staging.Count    := Staging.Count + 1;
+      Staging.Items (Staging.Count) := (
+         Channel => Channel,
+         Payload => Payload
+      );
+      Status := Status_Ok;
+   end Stage_Notify;
+
+   procedure Flush_Committed_Notifications
+     (Ctx             : in     Transaction_Context;
+      Staging         : in out Tx_Notification_Buffer;
+      Broker          : in out PubSub_Broker;
+      Total_Delivered :    out Natural)
+   is
+      pragma Unreferenced (Ctx);
+      Step_Deliv : Subscriber_Count;
+   begin
+      Total_Delivered := 0;
+      for I in 1 .. Staging.Count loop
+         pragma Loop_Invariant (Total_Delivered <= (I - 1) * Max_Subscribers);
+         if Staging.Items (I).Channel.Length > 0 then
+            Publish
+              (Broker    => Broker,
+               Channel   => Staging.Items (I).Channel,
+               Payload   => Staging.Items (I).Payload,
+               Delivered => Step_Deliv);
+            Total_Delivered := Total_Delivered + Step_Deliv;
+         end if;
+      end loop;
+
+      Staging.Count := 0;
+      Staging.Items := [others => (others => <>)];
+   end Flush_Committed_Notifications;
+
+   procedure Discard_Staged_Notifications
+     (Ctx     : in     Transaction_Context;
+      Staging : in out Tx_Notification_Buffer)
+   is
+      pragma Unreferenced (Ctx);
+   begin
+      Staging.Count := 0;
+      Staging.Items := [others => (others => <>)];
+   end Discard_Staged_Notifications;
+
    procedure Poll_Message
      (Broker : in out PubSub_Broker;
       Sub_Id : in     Subscriber_Id;
@@ -127,3 +185,4 @@ package body Nhe_O.PubSub is
    end Poll_Message;
 
 end Nhe_O.PubSub;
+
