@@ -4,6 +4,8 @@ Thumbs.db
 obj/
 bin/
 gnatprove/
+alire/
+config/
 *.ali
 *.o
 b~*

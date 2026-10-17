@@ -38,7 +38,7 @@ Epic 01 and Epic 02 are complete (all 10 verification suites passing). Potential
 
 ## Known issues / blockers
 
-- None. GNAT 16 (`gnatmake` using the compiler switches in `nhe_o.gpr`) compiles all 24 SPARK units cleanly with `-gnat2022 -gnatwa -gnata -gnatQ` and zero warnings.
+- None. Full Ada/SPARK toolchain (`alr 2.1.1`, `gnat_native 16.1.0`, `gprbuild 26.0.1`, `gnatprove 16.1.0`, `GNAT Studio 2026.2`, `als 2027.0`) is installed in `/home/long/Apps/` and compiles all 24 SPARK units cleanly (`alr build` / `gprbuild -P nhe_o.gpr`) with zero warnings.
 
 ## Decisions
 
