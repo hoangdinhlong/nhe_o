@@ -33,7 +33,8 @@ package Nhe_O.JSON is
    end record;
 
    --  Validate structural balanced syntax for PostgreSQL JSON / JSONB literal
-   function Is_Valid_JSON (Raw : Bounded_Text) return Boolean;
+   function Is_Valid_JSON (Raw : Bounded_Text) return Boolean
+     with Global => null;
 
    --  Put or update a field in a decomposed JSONB document (`jsonb_set`)
    procedure Put_Field
@@ -42,13 +43,20 @@ package Nhe_O.JSON is
       Val    : in     Bounded_Text;
       Kind   : in     JSONB_Value_Kind;
       Status :    out Engine_Status)
-     with Pre  => Key.Length > 0,
-          Post => (if Status = Status_Ok then Doc.Count >= Doc.Count'Old);
+     with Global => null,
+          Always_Terminates,
+          Pre    => Key.Length > 0,
+          Post   => (if Status = Status_Ok then Doc.Count >= Doc.Count'Old);
 
    --  PostgreSQL `?` operator: Does the key exist as a top-level key in JSONB?
    function Has_Key
      (Doc : JSONB_Document;
-      Key : Bounded_Ident) return Boolean;
+      Key : Bounded_Ident) return Boolean
+     with Global => null,
+          Post   => Has_Key'Result =
+                      (for some I in 1 .. Doc.Count =>
+                         Doc.Fields (I).Active
+                         and then Equal_Ident (Doc.Fields (I).Key, Key));
 
    --  PostgreSQL `->` operator: Extract JSON object field with its JSONB value kind
    procedure Get_Field
@@ -57,7 +65,9 @@ package Nhe_O.JSON is
       Found :    out Boolean;
       Val   :    out Bounded_Text;
       Kind  :    out JSONB_Value_Kind)
-     with Post => (if Found then Has_Key (Doc, Key));
+     with Global => null,
+          Always_Terminates,
+          Post   => (if Found then Has_Key (Doc, Key));
 
    --  PostgreSQL `->>` operator: Extract JSON object field as TEXT
    procedure Get_Field_Text
@@ -65,10 +75,13 @@ package Nhe_O.JSON is
       Key   : in     Bounded_Ident;
       Found :    out Boolean;
       Val   :    out Bounded_Text)
-     with Post => (if Found then Has_Key (Doc, Key));
+     with Global => null,
+          Always_Terminates,
+          Post   => (if Found then Has_Key (Doc, Key));
 
    --  PostgreSQL `@>` operator: Does Left JSONB contain all key/value entries of Right JSONB?
    function Contains
-     (Left, Right : JSONB_Document) return Boolean;
+     (Left, Right : JSONB_Document) return Boolean
+     with Global => null;
 
 end Nhe_O.JSON;

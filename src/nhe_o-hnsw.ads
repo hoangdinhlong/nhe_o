@@ -79,7 +79,11 @@ package Nhe_O.HNSW is
    procedure Init_HNSW
      (Index :    out HNSW_Index;
       Dim   : in     Vector_Dim)
-     with Post => Index.Dim = Dim and then Index.Node_Count = 0;
+     with Global => null,
+          Always_Terminates,
+          Post   => Index.Dim = Dim
+                    and then Index.Node_Count = 0
+                    and then Index.Entry_Node = 1;
 
    --  Insert a vector into the HNSW graph, automatically computing Binary (1-bit),
    --  Int8 (SQ8), and Matryoshka Float32 representations and linking small-world edges
@@ -90,11 +94,14 @@ package Nhe_O.HNSW is
       TOAST_Root : in     Valid_Page_Id;
       Layer_Hint : in     HNSW_Layer;
       Status     :    out Engine_Status)
-     with Pre  => Vec.Dim = Index.Dim
-                  and then Index.Node_Count <= Max_HNSW_Nodes,
-          Post => (if Status = Status_Ok then
-                     Index.Node_Count = Index.Node_Count'Old + 1
-                     and then Index.Entry_Node in 1 .. Index.Node_Count);
+     with Global => null,
+          Always_Terminates,
+          Pre    => Vec.Dim = Index.Dim
+                    and then Index.Node_Count <= Max_HNSW_Nodes,
+          Post   => Index.Dim = Index.Dim'Old
+                    and then (if Status = Status_Ok then
+                                Index.Node_Count = Index.Node_Count'Old + 1
+                                and then Index.Entry_Node in 1 .. Index.Node_Count);
 
    --  Compute distance between a query vector and an HNSW node using the selected
    --  encoding mode (Float32, Int8 SQ8, or 4096-D 1-bit Binary Hamming)
@@ -104,9 +111,10 @@ package Nhe_O.HNSW is
       Q_Int8   : Quantized_Int8_Vector;
       Q_Binary : Quantized_Binary_Vector;
       Encoding : Vector_Encoding_Kind) return Non_Negative_Float
-     with Pre => Node.Bin_Vec.Dim = Q_Binary.Dim
-                 and then Q_Float.Dim = Q_Binary.Dim
-                 and then Q_Int8.Dim = Q_Binary.Dim;
+     with Global => null,
+          Pre    => Node.Bin_Vec.Dim = Q_Binary.Dim
+                    and then Q_Float.Dim = Q_Binary.Dim
+                    and then Q_Int8.Dim = Q_Binary.Dim;
 
    --  Hierarchical ANN search: greedy upper-layer descent (Top_Layer .. 2) followed by
    --  layer-1 small-world beam expansion and sorted Top-K candidate selection
@@ -116,9 +124,11 @@ package Nhe_O.HNSW is
       Encoding : in     Vector_Encoding_Kind;
       K        : in     KNN_Result_Index;
       Results  :    out HNSW_Search_Result)
-     with Pre  => Query.Dim = Index.Dim
-                  and then Index.Node_Count <= Max_HNSW_Nodes,
-          Post => Results.Count <= K
-                  and then Results.Count <= Index.Node_Count;
+     with Global => null,
+          Always_Terminates,
+          Pre    => Query.Dim = Index.Dim
+                    and then Index.Node_Count <= Max_HNSW_Nodes,
+          Post   => Results.Count <= K
+                    and then Results.Count <= Index.Node_Count;
 
 end Nhe_O.HNSW;

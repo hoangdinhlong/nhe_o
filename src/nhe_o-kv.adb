@@ -9,6 +9,11 @@ package body Nhe_O.KV is
    is
    begin
       for I in KV_Slot_Index loop
+         pragma Loop_Invariant
+           (for all J in 1 .. I - 1 =>
+              not (Store.Slots (J).Occupied
+                   and then not Is_Slot_Expired (Store.Slots (J), Now)
+                   and then Equal_Ident (Store.Slots (J).Key, Key)));
          if Store.Slots (I).Occupied
            and then not Is_Slot_Expired (Store.Slots (I), Now)
            and then Equal_Ident (Store.Slots (I).Key, Key)

@@ -3,9 +3,11 @@ Thumbs.db
 *.log
 obj/
 bin/
+lib/
 gnatprove/
 alire/
 config/
+__pycache__/
 *.ali
 *.o
 b~*

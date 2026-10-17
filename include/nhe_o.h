@@ -1,0 +1,164 @@
+/*
+ * nhe_o.h — C99 / C++17 Foreign Function Interface Header for Nhe_O
+ *
+ * Formally verified embedded PostgreSQL + pgvector + Redis + Hybrid RAG engine
+ * written in 100% Ada/SPARK 2014 (pragma SPARK_Mode (On);).
+ */
+
+#ifndef NHE_O_H
+#define NHE_O_H
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Fixed buffer capacities matching Nhe_O.Types */
+#define NHE_O_MAX_IDENT_LEN 64
+#define NHE_O_MAX_TEXT_LEN  512
+
+/* Status codes returned in *out_status */
+typedef enum {
+    NHE_O_STATUS_OK                 = 0,
+    NHE_O_STATUS_NOT_FOUND          = 1,
+    NHE_O_STATUS_EXPIRED            = 2,
+    NHE_O_STATUS_INVALID_SYNTAX     = 3,
+    NHE_O_STATUS_TYPE_MISMATCH      = 4,
+    NHE_O_STATUS_DIMENSION_MISMATCH = 5,
+    NHE_O_STATUS_CAPACITY_EXCEEDED  = 6,
+    NHE_O_STATUS_TX_ABORTED         = 7,
+    NHE_O_STATUS_IO_ERROR           = 8,
+    NHE_O_STATUS_INVALID_ARG        = 9
+} nhe_o_status_t;
+
+/* Vector quantization modes for HNSW / Hybrid RAG queries */
+typedef enum {
+    NHE_O_ENCODING_FLOAT32     = 0,
+    NHE_O_ENCODING_INT8_SQ8    = 1,
+    NHE_O_ENCODING_BINARY_1BIT = 2
+} nhe_o_encoding_t;
+
+/* Engine version queries */
+int nhe_o_version_major(void);
+int nhe_o_version_minor(void);
+
+/* Initialize / reset embedded Nhe_O runtime state */
+void nhe_o_init(int *out_status);
+
+/* Analyze a PostgreSQL-dialect SQL statement */
+void nhe_o_analyze_sql(
+    const char *query_buf,
+    int         query_len,
+    int        *out_stmt_kind,
+    int        *out_has_vector,
+    int        *out_has_jsonb,
+    int        *out_status
+);
+
+/* Compute 3D L2 distance (<->), Cosine distance (<=>), and 1-bit Hamming distance */
+void nhe_o_vector_distance_3d(
+    float  ax, float ay, float az,
+    float  bx, float by, float bz,
+    float *out_l2_dist,
+    float *out_cos_dist,
+    int   *out_hamming,
+    int   *out_status
+);
+
+/* Redis-compatible Key-Value Cache operations */
+void nhe_o_kv_set(
+    const char *key_buf,
+    int         key_len,
+    const char *val_buf,
+    int         val_len,
+    int64_t     now_sec,
+    int64_t     ttl_sec,
+    int        *out_status
+);
+
+void nhe_o_kv_get(
+    const char *key_buf,
+    int         key_len,
+    int64_t     now_sec,
+    char       *out_val_buf,
+    int        *out_val_len,
+    int        *out_status
+);
+
+void nhe_o_kv_del(
+    const char *key_buf,
+    int         key_len,
+    int        *out_removed,
+    int        *out_status
+);
+
+void nhe_o_kv_incr_by(
+    const char *key_buf,
+    int         key_len,
+    int64_t     delta_val,
+    int64_t     now_sec,
+    int64_t    *out_new_val,
+    int        *out_status
+);
+
+/* Dual-Mode Ring-Buffer & Durable WAL Pub/Sub Broker operations */
+void nhe_o_pubsub_subscribe(
+    const char *pattern_buf,
+    int         pattern_len,
+    int        *out_sub_id,
+    int        *out_status
+);
+
+void nhe_o_pubsub_publish(
+    const char *chan_buf,
+    int         chan_len,
+    const char *payload_buf,
+    int         payload_len,
+    int        *out_delivered,
+    int        *out_status
+);
+
+void nhe_o_pubsub_poll(
+    int   sub_id,
+    char *out_chan_buf,
+    int  *out_chan_len,
+    char *out_payload_buf,
+    int  *out_payload_len,
+    int  *out_found,
+    int  *out_status
+);
+
+/* Universal Hybrid RAG (B+Tree + HNSW + TOAST Parent Chunks + GraphRAG + WAL) */
+void nhe_o_rag_ingest_3d(
+    int         doc_id,
+    const char *summary_buf,
+    int         summary_len,
+    float       vx,
+    float       vy,
+    float       vz,
+    int         related_doc_id,
+    int        *out_status
+);
+
+void nhe_o_rag_query_3d(
+    float       qx,
+    float       qy,
+    float       qz,
+    int         encoding_mode,
+    const char *keyword_buf,
+    int         keyword_len,
+    int         top_k,
+    int        *out_hit_count,
+    int        *out_top_doc_id,
+    float      *out_top_distance,
+    int        *out_parent_bytes,
+    int        *out_graph_hit,
+    int        *out_status
+);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* NHE_O_H */

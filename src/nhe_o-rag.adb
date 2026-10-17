@@ -151,7 +151,7 @@ package body Nhe_O.RAG is
      with Pre  => Result.Count <= Max_K,
           Post => Result.Count <= Max_K
    is
-      Pos : RAG_Hit_Index := 1;
+      Pos : RAG_Hit_Index;
    begin
       if Result.Count = Max_K
         and then Hit.Distance >= Result.Hits (Result.Count).Distance

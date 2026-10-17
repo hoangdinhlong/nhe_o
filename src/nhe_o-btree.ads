@@ -69,10 +69,12 @@ package Nhe_O.BTree is
 
    --  Initialize an empty B+Tree with a single root leaf node
    procedure Init_BTree (Tree : out BTree_Index)
-     with Post => Tree.Node_Count = 1
-                  and then Tree.Root_Node = 1
-                  and then Tree.Total_Keys = 0
-                  and then Tree.Split_Count = 0;
+     with Global => null,
+          Always_Terminates,
+          Post   => Tree.Node_Count = 1
+                    and then Tree.Root_Node = 1
+                    and then Tree.Total_Keys = 0
+                    and then Tree.Split_Count = 0;
 
    --  Insert or update a key -> record pointer in the B+Tree, splitting leaf/root nodes when full
    procedure Insert_Key
@@ -80,10 +82,12 @@ package Nhe_O.BTree is
       Key    : in     Integer_64;
       Ptr    : in     BTree_Record_Pointer;
       Status :    out Engine_Status)
-     with Pre  => Tree.Node_Count in 1 .. Max_BTree_Nodes
-                  and then Tree.Root_Node in 1 .. Tree.Node_Count,
-          Post => Tree.Node_Count in 1 .. Max_BTree_Nodes
-                  and then Tree.Root_Node in 1 .. Tree.Node_Count;
+     with Global => null,
+          Always_Terminates,
+          Pre    => Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Tree.Root_Node in 1 .. Tree.Node_Count,
+          Post   => Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Tree.Root_Node in 1 .. Tree.Node_Count;
 
    --  Exact key lookup traversing internal separator keys down to the leaf node
    procedure Search_Key
@@ -91,8 +95,10 @@ package Nhe_O.BTree is
       Key   : in     Integer_64;
       Found :    out Boolean;
       Ptr   :    out BTree_Record_Pointer)
-     with Pre => Tree.Node_Count in 1 .. Max_BTree_Nodes
-                 and then Tree.Root_Node in 1 .. Tree.Node_Count;
+     with Global => null,
+          Always_Terminates,
+          Pre    => Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Tree.Root_Node in 1 .. Tree.Node_Count;
 
    --  Ordered range scan [Min_Key .. Max_Key] across linked leaf nodes
    procedure Range_Scan
@@ -100,18 +106,24 @@ package Nhe_O.BTree is
       Min_Key : in     Integer_64;
       Max_Key : in     Integer_64;
       Results :    out BTree_Scan_Result)
-     with Pre => Tree.Node_Count in 1 .. Max_BTree_Nodes
-                 and then Min_Key <= Max_Key;
+     with Global => null,
+          Always_Terminates,
+          Pre    => Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Min_Key <= Max_Key;
 
    --  Serialize a B+Tree node into a 4096-byte Slotted Page buffer with Magic "BTRE"
    procedure Encode_Node_Page
      (Node : in     BTree_Node;
-      Page :    out Page_Buffer);
+      Page :    out Page_Buffer)
+     with Global => null,
+          Always_Terminates;
 
    --  Deserialize a B+Tree node from a 4096-byte Slotted Page buffer
    procedure Decode_Node_Page
      (Page  : in     Page_Buffer;
       Node  :    out BTree_Node;
-      Valid :    out Boolean);
+      Valid :    out Boolean)
+     with Global => null,
+          Always_Terminates;
 
 end Nhe_O.BTree;

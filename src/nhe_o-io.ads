@@ -31,15 +31,18 @@ package Nhe_O.IO is
    subtype C_Path_String is String (C_Path_Index);
 
    --  True iff Path contains an embedded ASCII.NUL character within 1 .. Path.Length
-   function Has_Embedded_NUL (Path : Bounded_Text) return Boolean;
+   function Has_Embedded_NUL (Path : Bounded_Text) return Boolean
+     with Global => null;
 
    procedure To_C_Path
      (Path   : in     Bounded_Text;
       C_Path :    out C_Path_String)
-     with Pre  => Path.Length > 0 and then not Has_Embedded_NUL (Path),
-          Post => C_Path (Path.Length + 1) = ASCII.NUL
-                  and then (for all I in 1 .. Path.Length =>
-                              C_Path (I) = Path.Data (I));
+     with Global => null,
+          Always_Terminates,
+          Pre    => Path.Length > 0 and then not Has_Embedded_NUL (Path),
+          Post   => C_Path (Path.Length + 1) = ASCII.NUL
+                    and then (for all I in 1 .. Path.Length =>
+                                C_Path (I) = Path.Data (I));
 
    --  Write a 4096-byte slotted page to the database file at offset Page_Id * 4096
    procedure Write_Page
@@ -47,7 +50,9 @@ package Nhe_O.IO is
       Page_Id   : in     Valid_Page_Id;
       Buffer    : in     Page_Buffer;
       Success   :    out Boolean)
-     with Pre => File_Path.Length > 0;
+     with Global => null,
+          Always_Terminates,
+          Pre    => File_Path.Length > 0;
 
    --  Read a 4096-byte slotted page from the database file at offset Page_Id * 4096
    procedure Read_Page
@@ -55,14 +60,18 @@ package Nhe_O.IO is
       Page_Id   : in     Valid_Page_Id;
       Buffer    :    out Page_Buffer;
       Success   :    out Boolean)
-     with Pre => File_Path.Length > 0;
+     with Global => null,
+          Always_Terminates,
+          Pre    => File_Path.Length > 0;
 
    --  Append a CRC32-framed WAL record to the Write-Ahead Log and fsync to disk
    procedure Append_WAL_Frame
      (WAL_Path : in     Bounded_Text;
       Frame    : in     WAL_Frame_Buffer;
       Success  :    out Boolean)
-     with Pre => WAL_Path.Length > 0;
+     with Global => null,
+          Always_Terminates,
+          Pre    => WAL_Path.Length > 0;
 
    --  Read a WAL frame at 0-based index Frame_Idx from the Write-Ahead Log on disk
    procedure Read_WAL_Frame
@@ -70,16 +79,44 @@ package Nhe_O.IO is
       Frame_Idx : in     Valid_Page_Id;
       Frame     :    out WAL_Frame_Buffer;
       Success   :    out Boolean)
-     with Pre => WAL_Path.Length > 0;
+     with Global => null,
+          Always_Terminates,
+          Pre    => WAL_Path.Length > 0;
 
    --  Delete a database or WAL file if present on disk
+   pragma Warnings (GNATprove, Off, "subprogram ""Delete_File_If_Exists"" has no effect",
+                    Reason => "Unlinks OS file on disk via contract-bound POSIX unlink syscall");
    procedure Delete_File_If_Exists
      (File_Path : in Bounded_Text)
-     with Pre => File_Path.Length > 0;
+     with Global => null,
+          Always_Terminates,
+          Pre    => File_Path.Length > 0;
+   pragma Warnings (GNATprove, On, "subprogram ""Delete_File_If_Exists"" has no effect");
 
-   --  Console output I/O helpers in SPARK_Mode (On)
-   procedure Print_Line (Msg : in String);
+   --  Console output & CLI helpers in SPARK_Mode (On)
+   procedure Print_Line (Msg : in String)
+     with Always_Terminates;
 
-   procedure Print_Blank_Line;
+   procedure Print_Blank_Line
+     with Always_Terminates;
+
+   --  Read command-line argument at 1-based position Index into Bounded_Text
+   pragma Warnings (GNATprove, Off, "subprogram ""Read_CLI_Arg"" has no effect",
+                    Reason => "Reads OS process argv vector");
+   procedure Read_CLI_Arg
+     (Index : in     Positive;
+      Arg   :    out Bounded_Text;
+      Found :    out Boolean)
+     with Global => null,
+          Always_Terminates;
+   pragma Warnings (GNATprove, On, "subprogram ""Read_CLI_Arg"" has no effect");
+
+   --  Mark process exit status as Failure (non-zero) on runtime verification failure
+   pragma Warnings (GNATprove, Off, "subprogram ""Set_Exit_Failure"" has no effect",
+                    Reason => "Sets OS process exit code to Failure");
+   procedure Set_Exit_Failure
+     with Global => null,
+          Always_Terminates;
+   pragma Warnings (GNATprove, On, "subprogram ""Set_Exit_Failure"" has no effect");
 
 end Nhe_O.IO;

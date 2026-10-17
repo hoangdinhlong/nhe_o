@@ -33,7 +33,7 @@ package body Nhe_O.BTree is
           Post => Leaf.Kind = Node_Leaf
                   and then Leaf.Num_Keys in 1 .. Max_Keys_Per_Node
    is
-      Insert_Pos : Key_Slot_Index := 1;
+      Insert_Pos : Key_Slot_Index;
    begin
       --  Check for existing key update first
       for I in 1 .. Leaf.Num_Keys loop
@@ -75,7 +75,7 @@ package body Nhe_O.BTree is
           Post => Route_To_Leaf'Result in 1 .. Tree.Node_Count
    is
       Root : constant BTree_Node := Tree.Nodes (Tree.Root_Node);
-      Cand : BTree_Node_Id       := Tree.Root_Node;
+      Cand : BTree_Node_Id;
    begin
       if Root.Kind = Node_Leaf then
          return Tree.Root_Node;
@@ -122,6 +122,7 @@ package body Nhe_O.BTree is
 
       --  2. If target leaf has free space, insert directly
       if Tree.Nodes (Leaf_Id).Num_Keys < Max_Keys_Per_Node then
+         Tree.Nodes (Leaf_Id).Kind := Node_Leaf;
          Insert_Into_Non_Full_Leaf (Tree.Nodes (Leaf_Id), Key, Ptr, Added);
          if Added and then Tree.Total_Keys < Natural'Last then
             Tree.Total_Keys := Tree.Total_Keys + 1;
@@ -157,6 +158,7 @@ package body Nhe_O.BTree is
             Next_Leaf => Tree.Nodes (Leaf_Id).Next_Leaf
          );
 
+         Tree.Nodes (Leaf_Id).Kind      := Node_Leaf;
          Tree.Nodes (Leaf_Id).Num_Keys  := 2;
          Tree.Nodes (Leaf_Id).Next_Leaf := New_Leaf_Id;
          Promoted_Key := Tree.Nodes (New_Leaf_Id).Keys (1);
@@ -200,23 +202,7 @@ package body Nhe_O.BTree is
          New_Leaf_Id     := Tree.Node_Count + 1;
          Tree.Node_Count := Tree.Node_Count + 1;
 
-         Tree.Nodes (New_Leaf_Id) := (
-            Kind      => Node_Leaf,
-            Page_Id   => Valid_Page_Id (New_Leaf_Id),
-            Num_Keys  => 2,
-            Keys      => [1 => Tree.Nodes (Leaf_Id).Keys (3),
-                          2 => Tree.Nodes (Leaf_Id).Keys (4),
-                          others => 0],
-            Pointers  => [1 => Tree.Nodes (Leaf_Id).Pointers (3),
-                          2 => Tree.Nodes (Leaf_Id).Pointers (4),
-                          others => (others => <>)],
-            Children  => [others => 1],
-            Next_Leaf => Tree.Nodes (Leaf_Id).Next_Leaf
-         );
-
-         Tree.Nodes (Leaf_Id).Num_Keys  := 2;
-         Tree.Nodes (Leaf_Id).Next_Leaf := New_Leaf_Id;
-         Promoted_Key := Tree.Nodes (New_Leaf_Id).Keys (1);
+         Promoted_Key := Tree.Nodes (Leaf_Id).Keys (3);
 
          --  Insert Promoted_Key and New_Leaf_Id into internal Root node in sorted order
          Root_Slot := Tree.Nodes (Tree.Root_Node).Num_Keys + 1;
@@ -237,6 +223,24 @@ package body Nhe_O.BTree is
          Tree.Nodes (Tree.Root_Node).Children (Root_Slot + 1) := New_Leaf_Id;
          Tree.Nodes (Tree.Root_Node).Num_Keys                 :=
            Tree.Nodes (Tree.Root_Node).Num_Keys + 1;
+
+         Tree.Nodes (New_Leaf_Id) := (
+            Kind      => Node_Leaf,
+            Page_Id   => Valid_Page_Id (New_Leaf_Id),
+            Num_Keys  => 2,
+            Keys      => [1 => Promoted_Key,
+                          2 => Tree.Nodes (Leaf_Id).Keys (4),
+                          others => 0],
+            Pointers  => [1 => Tree.Nodes (Leaf_Id).Pointers (3),
+                          2 => Tree.Nodes (Leaf_Id).Pointers (4),
+                          others => (others => <>)],
+            Children  => [others => 1],
+            Next_Leaf => Tree.Nodes (Leaf_Id).Next_Leaf
+         );
+
+         Tree.Nodes (Leaf_Id).Kind      := Node_Leaf;
+         Tree.Nodes (Leaf_Id).Num_Keys  := 2;
+         Tree.Nodes (Leaf_Id).Next_Leaf := New_Leaf_Id;
 
          if Tree.Split_Count < Natural'Last then
             Tree.Split_Count := Tree.Split_Count + 1;
@@ -420,7 +424,7 @@ package body Nhe_O.BTree is
 
          Node.Keys (I) := Integer_64 (Raw_Key);
          if Raw_TPage <= Unsigned_32 (Max_Page_Id)
-           and then Raw_TSlot >= 1
+           and then Raw_TSlot in 1 .. Unsigned_32 (Positive'Last)
            and then Raw_Toast <= Unsigned_32 (Max_Page_Id)
          then
             Node.Pointers (I) := (

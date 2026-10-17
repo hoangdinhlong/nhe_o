@@ -38,7 +38,13 @@ package Nhe_O.KV is
    function Exists
      (Store : KV_Store;
       Key   : Bounded_Ident;
-      Now   : Epoch_Seconds) return Boolean;
+      Now   : Epoch_Seconds) return Boolean
+     with Global => null,
+          Post   => Exists'Result =
+                      (for some I in KV_Slot_Index =>
+                         Store.Slots (I).Occupied
+                         and then not Is_Slot_Expired (Store.Slots (I), Now)
+                         and then Equal_Ident (Store.Slots (I).Key, Key));
 
    --  Redis `SET` / `SETEX`: Store key-value pair with optional TTL; evicts expired or LRU slot if full
    procedure Set
@@ -48,9 +54,11 @@ package Nhe_O.KV is
       Now     : in     Epoch_Seconds;
       Has_TTL : in     Boolean       := False;
       TTL_Sec : in     Epoch_Seconds := 0)
-     with Pre  => Key.Length > 0
-                  and then (if Has_TTL then TTL_Sec > 0 and then Now <= Epoch_Seconds'Last - TTL_Sec),
-          Post => Exists (Store, Key, Now);
+     with Global => null,
+          Always_Terminates,
+          Pre    => Key.Length > 0
+                    and then (if Has_TTL then TTL_Sec > 0 and then Now <= Epoch_Seconds'Last - TTL_Sec),
+          Post   => Exists (Store, Key, Now);
 
    --  Redis `GET`: Retrieve value if present and not expired; updates LRU timestamp
    procedure Get
@@ -58,14 +66,18 @@ package Nhe_O.KV is
       Key    : in     Bounded_Ident;
       Now    : in     Epoch_Seconds;
       Val    :    out Bounded_Text;
-      Status :    out Engine_Status);
+      Status :    out Engine_Status)
+     with Global => null,
+          Always_Terminates;
 
    --  Redis `DEL`: Remove key from store
    procedure Del
      (Store   : in out KV_Store;
       Key     : in     Bounded_Ident;
       Removed :    out Boolean)
-     with Post => not Exists (Store, Key, 0);
+     with Global => null,
+          Always_Terminates,
+          Post   => not Exists (Store, Key, 0);
 
    --  Redis `EXPIRE`: Attach a TTL in seconds to an existing live key
    procedure Expire
@@ -74,13 +86,16 @@ package Nhe_O.KV is
       Now     : in     Epoch_Seconds;
       TTL_Sec : in     Epoch_Seconds;
       Updated :    out Boolean)
-     with Pre => TTL_Sec > 0 and then Now <= Epoch_Seconds'Last - TTL_Sec;
+     with Global => null,
+          Always_Terminates,
+          Pre    => TTL_Sec > 0 and then Now <= Epoch_Seconds'Last - TTL_Sec;
 
    --  Redis `TTL`: Return remaining seconds (-2 if missing/expired, -1 if no TTL)
    function Remaining_TTL
      (Store : KV_Store;
       Key   : Bounded_Ident;
-      Now   : Epoch_Seconds) return Integer_64;
+      Now   : Epoch_Seconds) return Integer_64
+     with Global => null;
 
    --  Redis `INCRBY`: Atomically increment numeric value of Key by Delta_Val
    procedure Incr_By
@@ -90,6 +105,8 @@ package Nhe_O.KV is
       Now       : in     Epoch_Seconds;
       New_Val   :    out Integer_64;
       Status    :    out Engine_Status)
-     with Pre => Key.Length > 0;
+     with Global => null,
+          Always_Terminates,
+          Pre    => Key.Length > 0;
 
 end Nhe_O.KV;

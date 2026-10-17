@@ -4,6 +4,7 @@
 --  `unlink`) with explicit return-code verification and bounded offset arithmetic.
 pragma SPARK_Mode (On);
 
+with Ada.Command_Line;
 with Ada.Text_IO;
 with Interfaces.C; use Interfaces.C;
 
@@ -29,6 +30,8 @@ package body Nhe_O.IO is
       Flags : int;
       Mode  : unsigned) return int
      with Side_Effects,
+          Global        => null,
+          Always_Terminates,
           Import        => True,
           Convention    => C,
           External_Name => "open";
@@ -39,6 +42,8 @@ package body Nhe_O.IO is
       Count  : size_t;
       Offset : Off_T) return Ssize_T
      with Side_Effects,
+          Global        => null,
+          Always_Terminates,
           Import        => True,
           Convention    => C,
           External_Name => "pwrite";
@@ -49,6 +54,8 @@ package body Nhe_O.IO is
       Count  : size_t;
       Offset : Off_T) return Ssize_T
      with Side_Effects,
+          Global        => null,
+          Always_Terminates,
           Import        => True,
           Convention    => C,
           External_Name => "pread";
@@ -58,6 +65,8 @@ package body Nhe_O.IO is
       Buf   : WAL_Frame_Buffer;
       Count : size_t) return Ssize_T
      with Side_Effects,
+          Global        => null,
+          Always_Terminates,
           Import        => True,
           Convention    => C,
           External_Name => "write";
@@ -68,24 +77,32 @@ package body Nhe_O.IO is
       Count  : size_t;
       Offset : Off_T) return Ssize_T
      with Side_Effects,
+          Global        => null,
+          Always_Terminates,
           Import        => True,
           Convention    => C,
           External_Name => "pread";
 
    function Posix_Fsync (Fd : int) return int
      with Side_Effects,
+          Global        => null,
+          Always_Terminates,
           Import        => True,
           Convention    => C,
           External_Name => "fsync";
 
    function Posix_Close (Fd : int) return int
      with Side_Effects,
+          Global        => null,
+          Always_Terminates,
           Import        => True,
           Convention    => C,
           External_Name => "close";
 
    function Posix_Unlink (Path : C_Path_String) return int
      with Side_Effects,
+          Global        => null,
+          Always_Terminates,
           Import        => True,
           Convention    => C,
           External_Name => "unlink";
@@ -278,5 +295,34 @@ package body Nhe_O.IO is
    begin
       Ada.Text_IO.New_Line;
    end Print_Blank_Line;
+
+   pragma Warnings (GNATprove, Off, "no Global contract available",
+                    Reason => "Ada.Command_Line is read-only over OS process argv");
+   procedure Read_CLI_Arg
+     (Index : in     Positive;
+      Arg   :    out Bounded_Text;
+      Found :    out Boolean)
+   is
+      Count : constant Natural := Ada.Command_Line.Argument_Count;
+   begin
+      Arg   := (Length => 0, Data => [others => ' ']);
+      Found := False;
+      if Index <= Count then
+         declare
+            Raw : constant String := Ada.Command_Line.Argument (Index);
+         begin
+            if Raw'Length <= Max_Text_Len then
+               Arg   := Make_Text (Raw);
+               Found := True;
+            end if;
+         end;
+      end if;
+   end Read_CLI_Arg;
+
+   procedure Set_Exit_Failure is
+   begin
+      Ada.Command_Line.Set_Exit_Status (Ada.Command_Line.Failure);
+   end Set_Exit_Failure;
+   pragma Warnings (GNATprove, On, "no Global contract available");
 
 end Nhe_O.IO;

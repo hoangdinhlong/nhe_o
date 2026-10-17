@@ -49,14 +49,17 @@ package body Nhe_O.HNSW is
 
          when Encoding_Float32 =>
             for I in 1 .. Node.Prefix_Len loop
-               pragma Loop_Invariant (Sum_F >= 0.0);
+               pragma Loop_Invariant
+                 (Sum_F in 0.0 .. Float (I - 1) * 4.0e12);
                if I <= Q_Float.Dim then
                   Diff_F := Node.Float_Pref (I) - Q_Float.Elements (I);
                   Sq_F   := Diff_F * Diff_F;
-                  if Sum_F <= Float'Last - Sq_F then
-                     Sum_F := Sum_F + Sq_F;
-                  else
-                     Sum_F := Float'Last;
+                  if Sq_F > 4.0e12 then
+                     Sq_F := 4.0e12;
+                  end if;
+                  Sum_F := Sum_F + Sq_F;
+                  if Sum_F > Float (I) * 4.0e12 then
+                     Sum_F := Float (I) * 4.0e12;
                   end if;
                end if;
             end loop;
@@ -96,8 +99,8 @@ package body Nhe_O.HNSW is
       Q_Int8   : constant Quantized_Int8_Vector   := Quantize_To_Int8 (Vec);
       Q_Bin    : constant Quantized_Binary_Vector := Quantize_To_Binary (Vec);
       Pref_Len : Matryoshka_Index;
-      Best_Id  : HNSW_Node_Id := 1;
-      Best_Dst : Non_Negative_Float := Float'Last;
+      Best_Id  : HNSW_Node_Id;
+      Best_Dst : Non_Negative_Float;
       Cand_Dst : Non_Negative_Float;
    begin
       if Index.Node_Count = Max_HNSW_Nodes then
@@ -125,6 +128,7 @@ package body Nhe_O.HNSW is
       );
 
       for I in 1 .. Pref_Len loop
+         pragma Loop_Invariant (Index.Dim = Index.Dim'Loop_Entry);
          Index.Nodes (New_Id).Float_Pref (I) := Vec.Elements (I);
          Index.Nodes (New_Id).Int8_Pref (I)  := Q_Int8.Elements (I);
       end loop;
@@ -132,10 +136,12 @@ package body Nhe_O.HNSW is
       --  Connect bidirectional edges on layers 1 .. Layer_Hint
       if Index.Node_Count > 0 then
          for L in 1 .. Layer_Hint loop
+            pragma Loop_Invariant (Index.Dim = Index.Dim'Loop_Entry);
             Best_Id  := 1;
             Best_Dst := Float'Last;
 
             for Existing_Id in 1 .. Index.Node_Count loop
+               pragma Loop_Invariant (Index.Dim = Index.Dim'Loop_Entry);
                if Index.Nodes (Existing_Id).Active
                  and then Index.Nodes (Existing_Id).Top_Level >= L
                  and then Index.Nodes (Existing_Id).Bin_Vec.Dim = Vec.Dim
@@ -164,7 +170,10 @@ package body Nhe_O.HNSW is
       end if;
 
       Index.Node_Count := New_Id;
-      if Index.Node_Count = 1 or else Layer_Hint > Index.Top_Layer then
+      if Index.Node_Count = 1
+        or else Index.Entry_Node > Index.Node_Count
+        or else Layer_Hint > Index.Top_Layer
+      then
          Index.Entry_Node := New_Id;
          Index.Top_Layer  := Layer_Hint;
       end if;
@@ -180,7 +189,7 @@ package body Nhe_O.HNSW is
      with Pre  => Results.Count <= Max_K,
           Post => Results.Count <= Max_K
    is
-      Pos : KNN_Result_Index := 1;
+      Pos : KNN_Result_Index;
    begin
       --  Avoid duplicate Node_Id
       for I in 1 .. Results.Count loop

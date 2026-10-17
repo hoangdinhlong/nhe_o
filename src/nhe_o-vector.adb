@@ -22,13 +22,17 @@ package body Nhe_O.Vector is
       Sq   : Non_Negative_Float;
    begin
       for I in 1 .. A.Dim loop
-         pragma Loop_Invariant (I in 1 .. A.Dim and Sum >= 0.0);
+         pragma Loop_Invariant
+           (I in 1 .. A.Dim
+            and then Sum in 0.0 .. Float (I - 1) * 4.0e12);
          Diff := A.Elements (I) - B.Elements (I);
          Sq   := Diff * Diff;
-         if Sum <= Float'Last - Sq then
-            Sum := Sum + Sq;
-         else
-            Sum := Float'Last;
+         if Sq > 4.0e12 then
+            Sq := 4.0e12;
+         end if;
+         Sum := Sum + Sq;
+         if Sum > Float (I) * 4.0e12 then
+            Sum := Float (I) * 4.0e12;
          end if;
       end loop;
       return Sum;
@@ -66,24 +70,49 @@ package body Nhe_O.Vector is
 
    function Sqrt_Bounded (X : Non_Negative_Float) return Non_Negative_Float is
       Guess : Non_Negative_Float;
+      Term1 : Non_Negative_Float;
+      Term2 : Non_Negative_Float;
    begin
       if X <= 0.0 then
          return 0.0;
       elsif X >= 1.0 then
          Guess := (if X > 2.0 then X * 0.5 else 1.0);
+         if Guess < 1.0 then
+            Guess := 1.0;
+         elsif Guess > X then
+            Guess := X;
+         end if;
          for Step in 1 .. 80 loop
-            pragma Loop_Invariant (Guess >= 1.0);
-            Guess := 0.5 * Guess + 0.5 * (X / Guess);
+            pragma Loop_Invariant (Guess in 1.0 .. X);
+            Term1 := 0.5 * Guess;
+            Term2 := 0.5 * (X / Guess);
+            if Term1 > X * 0.5 then
+               Term1 := X * 0.5;
+            end if;
+            if Term2 > X * 0.5 then
+               Term2 := X * 0.5;
+            end if;
+            Guess := Term1 + Term2;
             if Guess < 1.0 then
                Guess := 1.0;
+            elsif Guess > X then
+               Guess := X;
             end if;
          end loop;
          return Guess;
       else
          Guess := 1.0;
          for Step in 1 .. 80 loop
-            pragma Loop_Invariant (Guess >= X and then Guess <= 1.0);
-            Guess := 0.5 * Guess + 0.5 * (X / Guess);
+            pragma Loop_Invariant (Guess in X .. 1.0);
+            Term1 := 0.5 * Guess;
+            Term2 := 0.5 * (X / Guess);
+            if Term1 > 0.5 then
+               Term1 := 0.5;
+            end if;
+            if Term2 > 0.5 then
+               Term2 := 0.5;
+            end if;
+            Guess := Term1 + Term2;
             if Guess < X then
                Guess := X;
             elsif Guess > 1.0 then
@@ -105,20 +134,34 @@ package body Nhe_O.Vector is
      (A, B : Vector_Value) return Float
    is
       Dot    : constant Float              := Inner_Product (A, B);
-      Norm_A : constant Non_Negative_Float := Sqrt_Bounded (L2_Distance_Squared (A, Vector_Value'(Dim => A.Dim, Elements => [others => 0.0])));
-      Norm_B : constant Non_Negative_Float := Sqrt_Bounded (L2_Distance_Squared (B, Vector_Value'(Dim => B.Dim, Elements => [others => 0.0])));
+      Norm_A : Non_Negative_Float          :=
+        Sqrt_Bounded (L2_Distance_Squared (A, Vector_Value'(Dim => A.Dim, Elements => [others => 0.0])));
+      Norm_B : Non_Negative_Float          :=
+        Sqrt_Bounded (L2_Distance_Squared (B, Vector_Value'(Dim => B.Dim, Elements => [others => 0.0])));
       Denom  : Float;
       Sim    : Float;
       Dist   : Float;
    begin
-      if Norm_A <= 1.0e-18 or else Norm_B <= 1.0e-18 then
+      if Norm_A <= 1.0e-9 or else Norm_B <= 1.0e-9 then
          return 1.0;
+      end if;
+      if Norm_A > 1.0e9 then
+         Norm_A := 1.0e9;
+      end if;
+      if Norm_B > 1.0e9 then
+         Norm_B := 1.0e9;
       end if;
       Denom := Norm_A * Norm_B;
-      if Denom <= 1.0e-36 then
+      if Denom <= 1.0e-18 then
          return 1.0;
       end if;
-      Sim := Dot / Denom;
+      if Dot >= Denom then
+         Sim := 1.0;
+      elsif Dot <= -Denom then
+         Sim := -1.0;
+      else
+         Sim := Dot / Denom;
+      end if;
       if Sim > 1.0 then
          Sim := 1.0;
       elsif Sim < -1.0 then
@@ -136,9 +179,10 @@ package body Nhe_O.Vector is
 
    function Quantize_To_Int8 (V : Vector_Value) return Quantized_Int8_Vector is
       Max_Abs : Non_Negative_Float := 0.0;
-      Scale   : Non_Negative_Float := 1.0;
+      Scale   : Non_Negative_Float;
       Res     : Quantized_Int8_Vector;
       Val_Abs : Non_Negative_Float;
+      Ratio   : Float;
       Scaled  : Float;
       Quant   : Integer;
    begin
@@ -165,11 +209,24 @@ package body Nhe_O.Vector is
 
       for I in 1 .. V.Dim loop
          if Max_Abs > 1.0e-12 then
-            Scaled := (V.Elements (I) / Max_Abs) * 127.0;
+            if V.Elements (I) >= Max_Abs then
+               Ratio := 1.0;
+            elsif V.Elements (I) <= -Max_Abs then
+               Ratio := -1.0;
+            else
+               Ratio := V.Elements (I) / Max_Abs;
+            end if;
          else
-            Scaled := 0.0;
+            Ratio := 0.0;
          end if;
 
+         if Ratio > 1.0 then
+            Ratio := 1.0;
+         elsif Ratio < -1.0 then
+            Ratio := -1.0;
+         end if;
+         pragma Assert (Ratio in -1.0 .. 1.0);
+         Scaled := Ratio * 127.0;
          if Scaled >= 127.0 then
             Quant := 127;
          elsif Scaled <= -127.0 then

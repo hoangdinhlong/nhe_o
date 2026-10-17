@@ -30,7 +30,9 @@ package body Nhe_O.Types is
          return False;
       end if;
       for I in 1 .. A.Length loop
-         pragma Loop_Invariant (I in 1 .. A.Length);
+         pragma Loop_Invariant
+           (I in 1 .. A.Length
+            and then (for all J in 1 .. I - 1 => A.Data (J) = B.Data (J)));
          if A.Data (I) /= B.Data (I) then
             return False;
          end if;
@@ -44,7 +46,9 @@ package body Nhe_O.Types is
          return False;
       end if;
       for I in 1 .. A.Length loop
-         pragma Loop_Invariant (I in 1 .. A.Length);
+         pragma Loop_Invariant
+           (I in 1 .. A.Length
+            and then (for all J in 1 .. I - 1 => A.Data (J) = B.Data (J)));
          if A.Data (I) /= B.Data (I) then
             return False;
          end if;

@@ -57,68 +57,81 @@ package Nhe_O.Vector is
    --  Construct a 3D vector helper for testing and SQL literals
    function Make_Vector_3D
      (X, Y, Z : Vector_Component) return Vector_Value
-     with Post => Make_Vector_3D'Result.Dim = 3;
+     with Global => null,
+          Post   => Make_Vector_3D'Result.Dim = 3;
 
    --  pgvector `<->` operator: Squared Euclidean (L2) distance
    function L2_Distance_Squared
      (A, B : Vector_Value) return Non_Negative_Float
-     with Pre  => A.Dim = B.Dim,
-          Post => L2_Distance_Squared'Result >= 0.0;
+     with Global => null,
+          Pre    => A.Dim = B.Dim,
+          Post   => L2_Distance_Squared'Result >= 0.0;
 
    --  Inner product (dot product)
    function Inner_Product
      (A, B : Vector_Value) return Float
-     with Pre => A.Dim = B.Dim;
+     with Global => null,
+          Pre    => A.Dim = B.Dim;
 
    --  pgvector `<#>` operator: Negative inner product
    function Negative_Inner_Product
      (A, B : Vector_Value) return Float
-     with Pre => A.Dim = B.Dim;
+     with Global => null,
+          Pre    => A.Dim = B.Dim;
 
    --  Newton-Raphson bounded square root in pure SPARK
    function Sqrt_Bounded (X : Non_Negative_Float) return Non_Negative_Float
-     with Post => Sqrt_Bounded'Result >= 0.0;
+     with Global => null,
+          Post   => Sqrt_Bounded'Result >= 0.0;
 
    --  pgvector `<->` operator: Euclidean (L2) distance
    function L2_Distance
      (A, B : Vector_Value) return Non_Negative_Float
-     with Pre  => A.Dim = B.Dim,
-          Post => L2_Distance'Result >= 0.0;
+     with Global => null,
+          Pre    => A.Dim = B.Dim,
+          Post   => L2_Distance'Result >= 0.0;
 
    --  pgvector `<=>` operator: Cosine distance in [0.0 .. 2.0]
    function Cosine_Distance
      (A, B : Vector_Value) return Float
-     with Pre  => A.Dim = B.Dim,
-          Post => Cosine_Distance'Result in 0.0 .. 2.0;
+     with Global => null,
+          Pre    => A.Dim = B.Dim,
+          Post   => Cosine_Distance'Result in 0.0 .. 2.0;
 
    --  Quantize Float32 vector to Int8 (SQ8) symmetric scalar quantization
    function Quantize_To_Int8 (V : Vector_Value) return Quantized_Int8_Vector
-     with Post => Quantize_To_Int8'Result.Dim = V.Dim
-                  and then Quantize_To_Int8'Result.Scale > 0.0;
+     with Global => null,
+          Post   => Quantize_To_Int8'Result.Dim = V.Dim
+                    and then Quantize_To_Int8'Result.Scale > 0.0;
 
    --  Reconstruct approximate Float32 vector from Int8 (SQ8) quantized vector
    function Dequantize_From_Int8 (Q : Quantized_Int8_Vector) return Vector_Value
-     with Post => Dequantize_From_Int8'Result.Dim = Q.Dim;
+     with Global => null,
+          Post   => Dequantize_From_Int8'Result.Dim = Q.Dim;
 
    --  Squared L2 distance in Int8 quantized integer domain (guaranteed overflow-free)
    function Int8_L2_Distance_Squared
      (A, B : Quantized_Int8_Vector) return Natural
-     with Pre => A.Dim = B.Dim;
+     with Global => null,
+          Pre    => A.Dim = B.Dim;
 
    --  Inner product in Int8 quantized integer domain (guaranteed overflow-free)
    function Int8_Inner_Product
      (A, B : Quantized_Int8_Vector) return Integer
-     with Pre => A.Dim = B.Dim;
+     with Global => null,
+          Pre    => A.Dim = B.Dim;
 
    --  Quantize Float32 vector to 1-bit Binary representation (bit = 1 iff V(i) > 0.0)
    function Quantize_To_Binary (V : Vector_Value) return Quantized_Binary_Vector
-     with Post => Quantize_To_Binary'Result.Dim = V.Dim;
+     with Global => null,
+          Post   => Quantize_To_Binary'Result.Dim = V.Dim;
 
    --  Compute exact Hamming distance (XOR + PopCount) over 1 .. A.Dim bits
    function Hamming_Distance
      (A, B : Quantized_Binary_Vector) return Natural
-     with Pre  => A.Dim = B.Dim,
-          Post => Hamming_Distance'Result <= A.Dim;
+     with Global => null,
+          Pre    => A.Dim = B.Dim,
+          Post   => Hamming_Distance'Result <= A.Dim;
 
 end Nhe_O.Vector;
 

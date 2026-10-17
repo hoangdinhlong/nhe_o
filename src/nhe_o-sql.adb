@@ -280,7 +280,7 @@ package body Nhe_O.SQL is
 
       for I in 1 .. P_Len loop
          if To_Lower_Char (Type_Keyword.Data (I)) /=
-            To_Lower_Char (Prefix (Prefix'First + I - 1))
+            To_Lower_Char (Prefix (Prefix'First + (I - 1)))
          then
             return False;
          end if;

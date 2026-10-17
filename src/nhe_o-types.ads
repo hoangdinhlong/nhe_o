@@ -60,21 +60,36 @@ package Nhe_O.Types is
    );
 
    function Make_Ident (S : String) return Bounded_Ident
-     with Pre  => S'Length <= Max_Ident_Len,
-          Post => Make_Ident'Result.Length = S'Length;
+     with Global => null,
+          Pre    => S'Length <= Max_Ident_Len,
+          Post   => Make_Ident'Result.Length = S'Length;
 
    function Make_Text (S : String) return Bounded_Text
-     with Pre  => S'Length <= Max_Text_Len,
-          Post => Make_Text'Result.Length = S'Length;
+     with Global => null,
+          Pre    => S'Length <= Max_Text_Len,
+          Post   => Make_Text'Result.Length = S'Length;
 
-   function Equal_Ident (A, B : Bounded_Ident) return Boolean;
+   function Equal_Ident (A, B : Bounded_Ident) return Boolean
+     with Global => null,
+          Post   => Equal_Ident'Result =
+                      (A.Length = B.Length
+                       and then (for all I in 1 .. A.Length =>
+                                   A.Data (I) = B.Data (I)));
 
-   function Equal_Text (A, B : Bounded_Text) return Boolean;
+   function Equal_Text (A, B : Bounded_Text) return Boolean
+     with Global => null,
+          Post   => Equal_Text'Result =
+                      (A.Length = B.Length
+                       and then (for all I in 1 .. A.Length =>
+                                   A.Data (I) = B.Data (I)));
 
-   function To_Lower_Char (C : Character) return Character;
+   function To_Lower_Char (C : Character) return Character
+     with Global => null;
 
-   function Equal_Ident_Case_Insensitive (A, B : Bounded_Ident) return Boolean;
+   function Equal_Ident_Case_Insensitive (A, B : Bounded_Ident) return Boolean
+     with Global => null;
 
-   function Type_Name (T : Pg_Data_Type) return Bounded_Ident;
+   function Type_Name (T : Pg_Data_Type) return Bounded_Ident
+     with Global => null;
 
 end Nhe_O.Types;

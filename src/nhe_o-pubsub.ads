@@ -55,7 +55,8 @@ package Nhe_O.PubSub is
    --  Match exact channel or trailing '*' prefix wildcard (e.g. "events.*")
    function Matches_Channel
      (Pattern : Bounded_Ident;
-      Channel : Bounded_Ident) return Boolean;
+      Channel : Bounded_Ident) return Boolean
+     with Global => null;
 
    --  SUBSCRIBE / PSUBSCRIBE / LISTEN: Register a channel or pattern subscription
    procedure Subscribe
@@ -63,15 +64,19 @@ package Nhe_O.PubSub is
       Pattern : in     Bounded_Ident;
       Sub_Id  :    out Subscriber_Id;
       Status  :    out Engine_Status)
-     with Pre  => Pattern.Length > 0,
-          Post => (if Status = Status_Ok then Broker.Subscribers (Sub_Id).Active);
+     with Global => null,
+          Always_Terminates,
+          Pre    => Pattern.Length > 0,
+          Post   => (if Status = Status_Ok then Broker.Subscribers (Sub_Id).Active);
 
    --  UNSUBSCRIBE / UNLISTEN: Deactivate a subscriber slot and clear its queue
    procedure Unsubscribe
      (Broker : in out PubSub_Broker;
       Sub_Id : in     Subscriber_Id)
-     with Post => not Broker.Subscribers (Sub_Id).Active
-                  and then Broker.Subscribers (Sub_Id).Count = 0;
+     with Global => null,
+          Always_Terminates,
+          Post   => not Broker.Subscribers (Sub_Id).Active
+                    and then Broker.Subscribers (Sub_Id).Count = 0;
 
    --  Mode 1 (Redis PUBLISH): Immediate in-memory delivery to matching subscribers
    procedure Publish
@@ -79,7 +84,9 @@ package Nhe_O.PubSub is
       Channel   : in     Bounded_Ident;
       Payload   : in     Bounded_Text;
       Delivered :    out Subscriber_Count)
-     with Pre => Channel.Length > 0;
+     with Global => null,
+          Always_Terminates,
+          Pre    => Channel.Length > 0;
 
    --  Mode 2 (PostgreSQL NOTIFY — Durable): Stage a notification inside an active transaction
    --  held behind the WAL Commit Barrier until Commit_Tx succeeds (ADR-004 / BR-005)
@@ -89,10 +96,12 @@ package Nhe_O.PubSub is
       Channel : in     Bounded_Ident;
       Payload : in     Bounded_Text;
       Status  :    out Engine_Status)
-     with Pre  => Ctx.State = Tx_Active and then Channel.Length > 0,
-          Post => (if Status = Status_Ok then
-                     Staging.Count = Staging.Count'Old + 1
-                     and then Staging.Owner_Tx = Ctx.Id);
+     with Global => null,
+          Always_Terminates,
+          Pre    => Ctx.State = Tx_Active and then Channel.Length > 0,
+          Post   => (if Status = Status_Ok then
+                       Staging.Count = Staging.Count'Old + 1
+                       and then Staging.Owner_Tx = Ctx.Id);
 
    --  Flush staged notifications across the WAL Commit Barrier ONLY after Tx_Committed
    procedure Flush_Committed_Notifications
@@ -100,15 +109,19 @@ package Nhe_O.PubSub is
       Staging         : in out Tx_Notification_Buffer;
       Broker          : in out PubSub_Broker;
       Total_Delivered :    out Natural)
-     with Pre  => Ctx.State = Tx_Committed,
-          Post => Staging.Count = 0;
+     with Global => null,
+          Always_Terminates,
+          Pre    => Ctx.State = Tx_Committed,
+          Post   => Staging.Count = 0;
 
    --  Discard staged notifications when a transaction rolls back or aborts
    procedure Discard_Staged_Notifications
      (Ctx     : in     Transaction_Context;
       Staging : in out Tx_Notification_Buffer)
-     with Pre  => Ctx.State = Tx_Aborted,
-          Post => Staging.Count = 0;
+     with Global => null,
+          Always_Terminates,
+          Pre    => Ctx.State = Tx_Aborted,
+          Post   => Staging.Count = 0;
 
    --  Dequeue oldest FIFO message from subscriber's ring buffer
    procedure Poll_Message
@@ -116,9 +129,11 @@ package Nhe_O.PubSub is
       Sub_Id : in     Subscriber_Id;
       Msg    :    out PubSub_Message;
       Found  :    out Boolean)
-     with Post => (if Found then
-                     Broker.Subscribers (Sub_Id).Count =
-                       Broker'Old.Subscribers (Sub_Id).Count - 1);
+     with Global => null,
+          Always_Terminates,
+          Post   => (if Found then
+                       Broker.Subscribers (Sub_Id).Count =
+                         Broker'Old.Subscribers (Sub_Id).Count - 1);
 
 end Nhe_O.PubSub;
 

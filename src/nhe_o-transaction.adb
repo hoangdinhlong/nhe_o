@@ -121,7 +121,7 @@ package body Nhe_O.Transaction is
    end Encode_WAL_Frame;
 
    function Verify_WAL_Frame (Frame : WAL_Frame_Buffer) return Boolean is
-      Extracted_Page : Page_Buffer := [others => 0];
+      Extracted_Page : Page_Buffer;
       Raw_Tx         : Unsigned_32;
       Raw_Page       : Unsigned_32;
       Stored_CRC     : Unsigned_32;
@@ -207,6 +207,7 @@ package body Nhe_O.Transaction is
       Status   :    out Engine_Status)
    is
       Checksum : Unsigned_32;
+      pragma Warnings (Off, Checksum);
       Frame    : WAL_Frame_Buffer;
       WAL_Ok   : Boolean;
       Page_Ok  : Boolean;
@@ -391,11 +392,12 @@ package body Nhe_O.Transaction is
    is
       Needed_Chunks : constant Positive :=
         ((Length - 1) / TOAST_Chunk_Max_Bytes) + 1;
-      Remaining     : Natural := Length;
-      Src_Pos       : Positive := 1;
-      Page          : Page_Buffer := [others => 0];
-      Frame         : WAL_Frame_Buffer := [others => 0];
+      Remaining     : Positive;
+      Src_Pos       : Positive;
+      Page          : Page_Buffer;
+      Frame         : WAL_Frame_Buffer;
       WAL_CRC       : Unsigned_32;
+      pragma Warnings (Off, WAL_CRC);
       Chunk_CRC     : Unsigned_32;
       Cur_Page_Id   : Valid_Page_Id;
       Next_Page_U32 : Unsigned_32;
@@ -411,12 +413,12 @@ package body Nhe_O.Transaction is
       );
 
       for Chunk_Idx in 1 .. Needed_Chunks loop
-         pragma Loop_Invariant
-           (Remaining in 1 .. Length
-            and then Src_Pos + Remaining - 1 = Length
-            and then Chunk_Idx in 1 .. Max_TOAST_Chunks);
+         pragma Loop_Invariant (Needed_Chunks <= Max_TOAST_Chunks);
 
+         Src_Pos     := (Chunk_Idx - 1) * TOAST_Chunk_Max_Bytes + 1;
+         Remaining   := Length - (Chunk_Idx - 1) * TOAST_Chunk_Max_Bytes;
          Cur_Page_Id := Start_Page_Id + (Chunk_Idx - 1);
+
          if Remaining > TOAST_Chunk_Max_Bytes then
             Chunk_Bytes := TOAST_Chunk_Max_Bytes;
          else
@@ -458,13 +460,6 @@ package body Nhe_O.Transaction is
             Status := Status_IO_Error;
             return;
          end if;
-
-         if Remaining > Chunk_Bytes then
-            Src_Pos   := Src_Pos + Chunk_Bytes;
-            Remaining := Remaining - Chunk_Bytes;
-         else
-            Remaining := 0;
-         end if;
       end loop;
 
       Status := Status_Ok;
@@ -479,7 +474,7 @@ package body Nhe_O.Transaction is
    is
       Cur_Page_Id : Valid_Page_Id := Ptr.Root_Overflow_Page;
       Dst_Pos     : Natural := 0;
-      Page        : Page_Buffer := [others => 0];
+      Page        : Page_Buffer;
       Read_Ok     : Boolean;
       Next_U32    : Unsigned_32;
       Chunk_U32   : Unsigned_32;
@@ -488,7 +483,6 @@ package body Nhe_O.Transaction is
       Chunk_Bytes : Positive;
    begin
       Payload := [others => 0];
-      Length  := 0;
 
       for Chunk_Idx in 1 .. Ptr.Chunk_Count loop
          pragma Loop_Invariant (Dst_Pos <= Max_TOAST_Payload_Bytes);
@@ -590,8 +584,8 @@ package body Nhe_O.Transaction is
       Max_Recovered_Tx :    out Tx_Id;
       Status           :    out Engine_Status)
    is
-      Frame     : WAL_Frame_Buffer := [others => 0];
-      Page      : Page_Buffer := [others => 0];
+      Frame     : WAL_Frame_Buffer;
+      Page      : Page_Buffer;
       Frame_Tx  : Valid_Tx_Id;
       Frame_Pg  : Valid_Page_Id;
       Read_Ok   : Boolean;

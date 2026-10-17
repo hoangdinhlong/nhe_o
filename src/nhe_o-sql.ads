@@ -34,13 +34,17 @@ package Nhe_O.SQL is
      (Query  : in     Bounded_Text;
       Result :    out Parsed_SQL_Descriptor;
       Status :    out Engine_Status)
-     with Post => (if Status = Status_Ok then Result.Kind /= Stmt_Unknown
-                   else Result.Kind = Stmt_Unknown);
+     with Global => null,
+          Always_Terminates,
+          Post   => (if Status = Status_Ok then Result.Kind /= Stmt_Unknown
+                     else Result.Kind = Stmt_Unknown);
 
    --  Resolve a PostgreSQL type keyword (e.g. "INT4", "JSONB", "VECTOR") to Pg_Data_Type
    procedure Resolve_Pg_Type
      (Type_Keyword : in     Bounded_Ident;
       Resolved     :    out Pg_Data_Type;
-      Valid        :    out Boolean);
+      Valid        :    out Boolean)
+     with Global => null,
+          Always_Terminates;
 
 end Nhe_O.SQL;

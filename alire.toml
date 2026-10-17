@@ -1,6 +1,6 @@
 name = "nhe_o"
 description = "Formally verified multi-model SQL, Vector, JSONB & KV engine in SPARK"
-version = "0.2.0"
+version = "0.3.0"
 
 authors = ["Long Hoang"]
 maintainers = ["Long Hoang <hoangdinhlong@users.noreply.github.com>"]

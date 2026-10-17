@@ -326,7 +326,11 @@ package body Nhe_O.JSON is
    is
    begin
       for I in 1 .. Doc.Count loop
-         pragma Loop_Invariant (I in 1 .. Doc.Count);
+         pragma Loop_Invariant
+           (I in 1 .. Doc.Count
+            and then (for all J in 1 .. I - 1 =>
+                        not (Doc.Fields (J).Active
+                             and then Equal_Ident (Doc.Fields (J).Key, Key))));
          if Doc.Fields (I).Active and then Equal_Ident (Doc.Fields (I).Key, Key) then
             return True;
          end if;

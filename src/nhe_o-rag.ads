@@ -66,12 +66,20 @@ package Nhe_O.RAG is
    procedure Init_RAG_Engine
      (Engine :    out RAG_Engine;
       Dim    : in     Vector_Dim)
-     with Post => Engine.Dim = Dim and then Engine.Doc_Count = 0;
+     with Global => null,
+          Always_Terminates,
+          Post   => Engine.Dim = Dim
+                    and then Engine.Vector_Graph.Dim = Dim
+                    and then Engine.Doc_Count = 0
+                    and then Engine.PK_Tree.Node_Count = 1
+                    and then Engine.PK_Tree.Root_Node = 1
+                    and then Engine.Next_TOAST_Pg = 10;
 
    --  Case-insensitive substring check for Hybrid Lexical + Vector RAG
    function Contains_Keyword
      (Text    : Bounded_Text;
-      Keyword : Bounded_Text) return Boolean;
+      Keyword : Bounded_Text) return Boolean
+     with Global => null;
 
    --  Transactional Document Ingestion:
    --  1. Persists oversized parent chunk (or 16KB 4096-D payload) to 4KB TOAST chain
@@ -93,14 +101,20 @@ package Nhe_O.RAG is
       Related_Doc_Id : in     Optional_Doc_Id;
       Layer_Hint     : in     HNSW_Layer;
       Status         :    out Engine_Status)
-     with Pre  => Ctx.State = Tx_Active
-                  and then DB_Path.Length > 0
-                  and then WAL_Path.Length > 0
-                  and then Embedding.Dim = Engine.Dim
-                  and then Engine.Vector_Graph.Dim = Engine.Dim
-                  and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
-                  and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
-                  and then Engine.Next_TOAST_Pg <= Max_Page_Id - Max_TOAST_Chunks;
+     with Global => null,
+          Always_Terminates,
+          Pre    => Ctx.State = Tx_Active
+                    and then DB_Path.Length > 0
+                    and then WAL_Path.Length > 0
+                    and then Embedding.Dim = Engine.Dim
+                    and then Engine.Vector_Graph.Dim = Engine.Dim
+                    and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
+                    and then Engine.Next_TOAST_Pg <= Max_Page_Id - Max_TOAST_Chunks,
+          Post   => Engine.Dim = Engine.Dim'Old
+                    and then Engine.Vector_Graph.Dim = Engine.Dim
+                    and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count;
 
    --  Execute a Hybrid SQL + JSONB (`@>`) + Lexical + HNSW Vector + TOAST + GraphRAG query
    procedure Execute_Hybrid_RAG_Query
@@ -118,9 +132,11 @@ package Nhe_O.RAG is
       Result            :    out RAG_Query_Result;
       Top_Parent_Chunk  :    out TOAST_Payload_Buffer;
       Status            :    out Engine_Status)
-     with Pre  => DB_Path.Length > 0
-                  and then Query_Vec.Dim = Engine.Dim
-                  and then Engine.Vector_Graph.Dim = Engine.Dim,
-          Post => Result.Count <= Top_K;
+     with Global => null,
+          Always_Terminates,
+          Pre    => DB_Path.Length > 0
+                    and then Query_Vec.Dim = Engine.Dim
+                    and then Engine.Vector_Graph.Dim = Engine.Dim,
+          Post   => Result.Count <= Top_K;
 
 end Nhe_O.RAG;
