@@ -85,3 +85,8 @@ gnatprove -P nhe_o.gpr --mode=all --level=2
 - [`docs/OPEN-QUESTIONS.md`](docs/OPEN-QUESTIONS.md) — Open architectural questions awaiting benchmarks or owner decisions.
 - [`docs/_meta/SELF-AUDIT.md`](docs/_meta/SELF-AUDIT.md) — End-of-session verification checklist.
 
+---
+
+## License
+
+Released under the [MIT License](LICENSE).

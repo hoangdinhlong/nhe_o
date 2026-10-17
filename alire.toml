@@ -4,7 +4,7 @@ version = "0.3.0"
 
 authors = ["Long Hoang"]
 maintainers = ["Long Hoang <hoangdinhlong@users.noreply.github.com>"]
-licenses = "MIT OR Apache-2.0"
+licenses = "MIT"
 website = "https://github.com/hoangdinhlong/nhe_o"
 tags = ["database", "spark", "vector", "rag", "postgresql", "redis"]
 
