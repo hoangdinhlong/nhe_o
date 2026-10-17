@@ -11,7 +11,7 @@ _Last updated: 2026-10-17_
 
 **Nhé O** (Alire crate `nhe_o`, Ada root package `Nhe_O`) — A formally verified, disk-persistent, ACID-compliant embedded database engine written in Ada/SPARK featuring PostgreSQL syntax and data types, native Vector search, JSON/JSONB processing, Redis-compatible Key-Value caching, and Pub/Sub messaging.
 
-The project has completed **Epic 01 (Scaffold and Architecture)**, **Epic 02 (B+Tree Storage, TOAST Overflow, 4096-D Quantized HNSW & Universal RAG Executor)**, and **Epic 03 (GNATprove Formal Proofs, C ABI / FFI SDK & Interactive CLI)**. Open questions `Q-001` and `Q-002` are resolved (`ADR-003`, `ADR-004`), domain invariants (`BR-001`..`BR-007`) are ratified, and the Ada 2022 / SPARK 2022 codebase (`v0.3.0`) is implemented in **100% `pragma SPARK_Mode (On);`** across all 26 source files (`src/*.ads` and `src/*.adb`), formally verified at **100% SPARK Stone, Bronze, Silver (AoRTE) + Partial Gold** with `gnatprove 16.1.0` (**1,543 / 1,543 checks proved across all 14 units — 133 Flow, 1,285 AoRTE/Loop/Range/Overflow/Float, 125 `Pre`/`Post` Integrity Contracts — 0 unproved, 0 warnings**), runtime-verified across 11 verification suites (`alr run`) plus the Python `ctypes` SDK (`bindings/python/nhe_o.py` over `lib/libnhe_o.so`), and published to GitHub (`hoangdinhlong/nhe_o`).
+The project has completed **Epic 01 (Scaffold and Architecture)**, **Epic 02 (B+Tree Storage, TOAST Overflow, 4096-D Quantized HNSW & Universal RAG Executor)**, and **Epic 03 (GNATprove Formal Proofs, C ABI / FFI SDK & Interactive CLI)**. Open questions `Q-001` and `Q-002` are resolved (`ADR-003`, `ADR-004`), `Q-003` and `Q-004` are tracked in `OPEN-QUESTIONS.md`, domain invariants (`BR-001`..`BR-007`) are ratified, and the Ada 2022 / SPARK 2022 codebase (`v0.3.0`) is implemented in **100% `pragma SPARK_Mode (On);`** across all 26 source files (`src/*.ads` and `src/*.adb`), formally verified at **100% SPARK Stone, Bronze, Silver (AoRTE) + Partial Gold** with `gnatprove 16.1.0` (**1,543 / 1,543 checks proved across all 14 units — 601 Flow [86 Data Dependencies, 402 Initialization, 113 Termination] + 942 Provers [470 Run-time Checks, 125 Assertions, 347 Functional Contracts] — 0 unproved, 0 warnings**), runtime-verified across 11 verification suites (`alr run`) plus the Python `ctypes` SDK (`bindings/python/nhe_o.py` over `lib/libnhe_o.so`), and published to GitHub (`hoangdinhlong/nhe_o`).
 
 - ✅ Monion `project-docs` R8 template applied and customized.
 - ✅ System vision, 100% `SPARK_Mode (On)` architecture, and domain invariants documented (`VISION.md`, `ARCHITECTURE.md`, `business-rules.md` `BR-001`..`BR-007`, and 5 lessons in `docs/learning/`).
@@ -30,21 +30,27 @@ The project has completed **Epic 01 (Scaffold and Architecture)**, **Epic 02 (B+
 | `01-scaffold-and-architecture` | Establish project scaffolding, 100% SPARK core & POSIX I/O subsystems | ✅ Done |
 | `02-storage-indexing-and-rag-executor` | 4KB TOAST overflow, 4096-D quantized HNSW, B+Tree, Durable Pub/Sub & Universal RAG Executor | ✅ Done |
 | `03-formal-proof-and-c-ffi-sdk` | `gnatprove` Flow & AoRTE Formal Proofs (100% Stone/Bronze/Silver + Partial Gold: 1,543/1,543 VCs), C ABI / Python SDK & Interactive CLI | ✅ Done |
-| `04-catalog-buffer-pool-and-sql-executor` | Persistent Page-0 System Catalog, Clock-Sweep 4KB Buffer Pool Manager & End-to-End SQL Execution Engine | ⏳ Planned |
+| `04-catalog-buffer-pool-and-sql-executor` | Core Hardening (`ADVERSARIAL-REVIEW.md`), Persistent Page-0 System Catalog, Clock-Sweep 4KB Buffer Pool Manager & End-to-End SQL Execution Engine | ⏳ Planned |
 
 ## Next up
 
-**Epic 04 (`04-catalog-buffer-pool-and-sql-executor`)** is defined in `docs/epics/04-catalog-buffer-pool-and-sql-executor/PROGRESS.md` and ready to begin:
+**Epic 04 (`04-catalog-buffer-pool-and-sql-executor`)** is defined in `docs/epics/04-catalog-buffer-pool-and-sql-executor/PROGRESS.md` (with adversarial audit findings cataloged in `docs/epics/04-catalog-buffer-pool-and-sql-executor/ADVERSARIAL-REVIEW.md`):
+- **Task 0**: Remediate Epics 01–03 adversarial review findings (`CRIT-02`..`CRIT-07`, `HIGH-01`..`HIGH-02`, `HIGH-05`..`HIGH-09`, `MED-01`..`MED-05`, `LOW-01`..`LOW-03`) across `BTree`, `HNSW`, `Vector`, `Transaction` (CLOG + WAL commit flag), `PubSub`, `KV`, `RAG`, and `C_API`.
 - **Task 1**: Implement `Nhe_O.Catalog` (`src/nhe_o-catalog.ad[sb]` in 100% `SPARK_Mode (On)`) for persistent table/column/index metadata (`pg_class` / `pg_attribute`) with Page-0 CRC32 serialization.
-- **Task 2**: Implement `Nhe_O.Buffer_Pool` (`src/nhe_o-buffer_pool.ad[sb]` in 100% `SPARK_Mode (On)`) with bounded 4KB frame caching, Clock-Sweep eviction, pin tracking, and WAL-before-Data flush invariants.
-- **Task 3**: Implement `Nhe_O.Executor` (`src/nhe_o-executor.ad[sb]` in 100% `SPARK_Mode (On)`) connecting `Nhe_O.SQL` ASTs to `Catalog`, `Buffer_Pool`, `Transaction` (MVCC + TOAST), `BTree`, and `HNSW` for `CREATE TABLE`, `INSERT`/`UPSERT`, `SELECT`, `UPDATE`, and `DELETE`.
-- **Task 4**: Wire stateful SQL execution into `Nhe_O.C_API` (`include/nhe_o.h`, `lib/libnhe_o.so`), Python SDK (`bindings/python/nhe_o.py`), and CLI (`src/nhe_o_main.adb` + Suite `[12/12]`).
-- **Task 5**: Prove 100% SPARK Stone, Bronze (Flow), Silver (AoRTE), and Gold contracts across `Nhe_O.Catalog`, `Nhe_O.Buffer_Pool`, `Nhe_O.Executor`, and updated units via `gnatprove -P nhe_o.gpr` (`0 unproved` checks).
-
+- **Task 2**: Implement `Nhe_O.Buffer_Pool` (`src/nhe_o-buffer_pool.ad[sb]` in 100% `SPARK_Mode (On)`) with primary 4KB slotted-page encoding (`CRIT-01`), bounded frame caching, Clock-Sweep eviction, pin tracking, and WAL-before-Data flush invariants.
+- **Task 3**: Expand `Nhe_O.SQL` & `Nhe_O.JSON` (`HIGH-03`, `HIGH-04`) and implement `Nhe_O.Executor` (`src/nhe_o-executor.ad[sb]` in 100% `SPARK_Mode (On)`) connecting SQL ASTs to `Catalog`, `Buffer_Pool`, `Transaction` (MVCC + TOAST), `BTree`, and `HNSW`.
+- **Task 4**: Wire stateful SQL execution and safe bounded C/Python buffer outputs into `Nhe_O.C_API`, `bindings/python/nhe_o.py`, and CLI (`src/nhe_o_main.adb` + Suite `[12/12]`).
+- **Task 5**: Prove 100% SPARK Stone, Bronze (Flow), Silver (AoRTE), and Gold contracts across all new and hardened units via `gnatprove -P nhe_o.gpr` (`0 unproved` checks).
 
 ## Known issues / blockers
 
-- None. Full Ada/SPARK toolchain (`alr 2.1.1`, `gnat_native 16.1.0`, `gprbuild 26.0.1`, `gnatprove 16.1.0`, `GNAT Studio 2026.2`, `als 2027.0`) is installed in `/home/long/Apps/`, compiles all 26 SPARK files cleanly (`alr build` & `gprbuild -P nhe_o_lib.gpr`) with zero warnings, and proves 100% of all 1,543 verification conditions (`gnatprove -P nhe_o.gpr`).
+- **Post-Epic-03 Adversarial Review Findings (`24` issues: `7 Critical, 9 High, 5 Medium, 3 Low`)**: Documented in full in [`docs/epics/04-catalog-buffer-pool-and-sql-executor/ADVERSARIAL-REVIEW.md`](epics/04-catalog-buffer-pool-and-sql-executor/ADVERSARIAL-REVIEW.md) and scheduled for remediation in **Epic 04 (Tasks 0–5)**:
+  - `CRIT-01`: Primary 4KB slotted-page tuple layout not yet implemented; `RAG_Engine` state (`Docs`, `PK_Tree`, `Vector_Graph`, `Toast_Ptr`) currently resides in volatile RAM.
+  - `CRIT-02` & `CRIT-03`: `Nhe_O.BTree` is hardcoded to depth 2 (failing on the 13th sequential key, leaving 26/32 nodes unused) and `Encode_Node_Page`/`Decode_Node_Page` omit `Children`, truncate 64-bit keys to 32-bit, and lack page CRC32 checks.
+  - `CRIT-04` & `CRIT-05`: `Nhe_O.Transaction` lacks a Commit Log (`CLOG`) and WAL commit-frame flag (`Is_Tuple_Visible` and `Redo_WAL_Recovery` do not filter out uncommitted/rolled-back transactions, and `Engine.Docs` overwrites `Xmin` in-place).
+  - `CRIT-06` & `CRIT-07`: `Nhe_O.HNSW.Insert_Vector` links to the first 4 nodes `1..4` and overwrites slot 4 (orphaning nodes `5..N-1`), truncates `Float32`/`Int8` vectors to 64-D (`Q-003`), ignores `Scale` in `Int8` distance, returns squared L2 in `Node_Distance`, and leaves duplicate active nodes when updating an existing `Doc_Id`.
+  - `HIGH-01`..`HIGH-09`: `Nhe_O.C_API` writes 512 bytes unconditionally to caller buffers, discards `Top_Parent` in `C_RAG_Query_3D`, and hardcodes `/tmp/nhe_o_c_api.db`; `Nhe_O.SQL` is currently a substring classifier rather than an AST parser; `Nhe_O.JSON` lacks a JSON-to-`JSONB_Document` parser; `Nhe_O.PubSub` ignores `Ctx` in `Flush_Committed_Notifications`; `Nhe_O.KV` is in-memory only (`Q-004`) and CLI `--kv` mis-indexes `SET`.
+
 
 
 ## Decisions

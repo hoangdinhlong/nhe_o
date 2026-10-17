@@ -18,8 +18,9 @@ Status legend: ☐ todo · ◐ in progress · ☑ done
 | 5 | Implement CLI command & interactive execution mode in `src/nhe_o_main.adb` (supporting SQL, KV, and Hybrid RAG CLI operations alongside the verification test suites) | ☑ | `alr build && alr run` (Suites `[1/11]`..`[11/11]`), `./bin/nhe_o_main --sql`, `./bin/nhe_o_main --kv`, `./bin/nhe_o_main --rag-demo` |
 
 ## Notes / sequencing
-- All 5 tasks of Epic 03 are complete. Every library and entrypoint unit (`src/*.ads` and `src/*.adb`, 26/26 files across 14 units) operates under `pragma SPARK_Mode (On);` and is formally proven at **100% SPARK Stone, Bronze, Silver (AoRTE) + Partial Gold** by `gnatprove 16.1.0` (`Why3` + `Z3 4.15.4` + `cvc5 1.3.2` + `Alt-Ergo 2.6.1`) with **1,543 / 1,543 checks proved (133 Flow, 1,285 AoRTE/Loop/Range/Overflow/Float, 125 `Pre`/`Post` contracts — 0 unproved, 0 warnings)**.
+- All 5 tasks of Epic 03 are complete. Every library and entrypoint unit (`src/*.ads` and `src/*.adb`, 26/26 files across 14 units) operates under `pragma SPARK_Mode (On);` and is formally proven at **100% SPARK Stone, Bronze, Silver (AoRTE) + Partial Gold** by `gnatprove 16.1.0` (`Why3` + `Z3 4.15.4` + `cvc5 1.3.2` + `Alt-Ergo 2.6.1`) with **1,543 / 1,543 checks proved (601 Flow [86 Data Dependencies, 402 Initialization, 113 Termination] + 942 Provers [470 Run-time Checks, 125 Assertions, 347 Functional Contracts] — 0 unproved, 0 warnings)**.
 
 ## Open questions
 - None.
+
 

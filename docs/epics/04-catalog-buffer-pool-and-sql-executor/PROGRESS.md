@@ -13,16 +13,17 @@ Status legend: ☐ todo · ◐ in progress · ☑ done
 
 | # | Task | Status | Tests |
 |---|------|--------|-------|
+| 0 | Remediate Epics 01–03 adversarial review findings (`ADVERSARIAL-REVIEW.md`: `CRIT-02`..`CRIT-07`, `HIGH-01`..`HIGH-02`, `HIGH-05`..`HIGH-09`, `MED-01`..`MED-05`, `LOW-01`..`LOW-03`) across `BTree`, `HNSW`, `Vector`, `Transaction` (CLOG + WAL commit flag), `PubSub`, `KV`, `RAG`, and `C_API` | ☐ | — |
 | 1 | Implement `Nhe_O.Catalog` (`src/nhe_o-catalog.ad[sb]` in 100% `SPARK_Mode (On)`) for persistent table/column/index metadata (`pg_class` / `pg_attribute`) with Page-0 CRC32 serialization | ☐ | — |
-| 2 | Implement `Nhe_O.Buffer_Pool` (`src/nhe_o-buffer_pool.ad[sb]` in 100% `SPARK_Mode (On)`) with bounded 4KB frame caching, Clock-Sweep eviction, pin tracking, and WAL-before-Data flush invariants | ☐ | — |
-| 3 | Implement `Nhe_O.Executor` (`src/nhe_o-executor.ad[sb]` in 100% `SPARK_Mode (On)`) connecting `Nhe_O.SQL` ASTs to `Catalog`, `Buffer_Pool`, `Transaction` (MVCC + TOAST), `BTree`, and `HNSW` for `CREATE TABLE`, `INSERT`/`UPSERT`, `SELECT`, `UPDATE`, and `DELETE` | ☐ | — |
-| 4 | Wire stateful SQL execution into `Nhe_O.C_API` (`include/nhe_o.h`, `lib/libnhe_o.so`), Python SDK (`bindings/python/nhe_o.py`), and CLI (`src/nhe_o_main.adb` + Suite `[12/12]`) | ☐ | — |
-| 5 | Prove 100% SPARK Stone, Bronze (Flow), Silver (AoRTE), and Gold contracts across `Nhe_O.Catalog`, `Nhe_O.Buffer_Pool`, `Nhe_O.Executor`, and updated units via `gnatprove -P nhe_o.gpr` (`0 unproved` checks) | ☐ | — |
+| 2 | Implement `Nhe_O.Buffer_Pool` (`src/nhe_o-buffer_pool.ad[sb]` in 100% `SPARK_Mode (On)`) with primary 4KB slotted-page encoding (`CRIT-01`), bounded frame caching, Clock-Sweep eviction, pin tracking, and WAL-before-Data flush invariants | ☐ | — |
+| 3 | Expand `Nhe_O.SQL` & `Nhe_O.JSON` (`HIGH-03`, `HIGH-04`) and implement `Nhe_O.Executor` (`src/nhe_o-executor.ad[sb]` in 100% `SPARK_Mode (On)`) connecting SQL ASTs to `Catalog`, `Buffer_Pool`, `Transaction` (MVCC + TOAST), `BTree`, and `HNSW` for `CREATE TABLE`, `INSERT`/`UPSERT`, `SELECT`, `UPDATE`, and `DELETE` | ☐ | — |
+| 4 | Wire stateful SQL execution and safe bounded C/Python buffer outputs (`HIGH-01`, `HIGH-02`) into `Nhe_O.C_API` (`include/nhe_o.h`, `lib/libnhe_o.so`), Python SDK (`bindings/python/nhe_o.py`), and CLI (`src/nhe_o_main.adb` + Suite `[12/12]`) | ☐ | — |
+| 5 | Prove 100% SPARK Stone, Bronze (Flow), Silver (AoRTE), and Gold contracts across `Nhe_O.Catalog`, `Nhe_O.Buffer_Pool`, `Nhe_O.Executor`, and all hardened units via `gnatprove -P nhe_o.gpr` (`0 unproved` checks) | ☐ | — |
 
 ## Notes / sequencing
-- Task 1 (`Nhe_O.Catalog`) and Task 2 (`Nhe_O.Buffer_Pool`) can be built first as foundational storage layers over `Nhe_O.Types`, `Nhe_O.Transaction`, and `Nhe_O.IO`.
-- Task 3 (`Nhe_O.Executor`) layers on top of `Nhe_O.SQL`, `Nhe_O.Catalog`, `Nhe_O.Buffer_Pool`, `Nhe_O.BTree`, and `Nhe_O.HNSW`.
-- Task 4 exposes the stateful SQL engine through the C ABI, Python SDK, and CLI, followed by full formal verification in Task 5.
+- See [`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md) for the complete catalog of 24 verified findings (`7 Critical, 9 High, 5 Medium, 3 Low`) discovered during the post-Epic-03 adversarial audit.
+- Task 0 hardens existing `BTree`, `HNSW`, `Vector`, `Transaction` (CLOG + WAL commit marker), `PubSub`, `RAG`, and `C_API` subsystems before layering `Nhe_O.Catalog` (Task 1), `Nhe_O.Buffer_Pool` (Task 2), and `Nhe_O.Executor` (Task 3).
 
 ## Open questions
-- None.
+- Promoted to `docs/OPEN-QUESTIONS.md` (`Q-003` and `Q-004`).
+

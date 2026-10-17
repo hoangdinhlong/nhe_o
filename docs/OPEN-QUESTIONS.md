@@ -40,3 +40,18 @@ Status: `Open` · `Answered → <where the answer now lives>` · `No longer rele
 * **Opened**: 2026-10-16
 * **Status**: Answered → `ADR-004` (`docs/DECISIONS.md`), `BR-005` (`docs/domain/business-rules.md`), and Epic 02 (`docs/epics/02-storage-indexing-and-rag-executor/PROGRESS.md`). Support both default fast in-memory ring-buffer delivery (Redis) and optional `Durable` WAL-committed notification dispatch (PostgreSQL `LISTEN`/`NOTIFY`).
 
+### Q-003: Should `Nhe_O.HNSW` / `Nhe_O.RAG` store full 4096-D `Float32` embeddings in 4KB TOAST chains for Stage-2 exact re-ranking, or formalize the 64-D Matryoshka `Float32`/`Int8` prefix + full 4096-D `Binary` design?
+* **Detail**: During the post-Epic-03 adversarial review (`CRIT-07` in `docs/epics/04-catalog-buffer-pool-and-sql-executor/ADVERSARIAL-REVIEW.md`), we found that `HNSW_Node` stores full 4096-D bit-packed `Binary` vectors (`Bin_Vec`) alongside a 64-D prefix (`Float_Pref (1..64)` and `Int8_Pref (1..64)`), while `Ingest_Document` currently writes only `Parent_Payload` text to 4KB TOAST overflow chains. Should Epic 04 also persist full 4096-D `Float32` vectors in TOAST for Stage-2 exact re-ranking, or formalize the 64-D Matryoshka prefix + 4096-D Binary quantization architecture in `ADR-003`?
+* **Impact**: Determines on-disk TOAST layout and Stage-2 re-ranking logic in Epic 04 (`Nhe_O.HNSW`, `Nhe_O.RAG`, `Nhe_O.Executor`).
+* **Waiting on**: Owner decision (Long).
+* **Opened**: 2026-10-17
+* **Status**: Open
+
+### Q-004: Should `Nhe_O.KV` remain a pure in-memory low-latency cache (Redis cache mode) or optionally append mutations to the WAL?
+* **Detail**: `VISION.md` and `ADR-001` mention transparent WAL persistence for KV alongside sub-microsecond in-memory caching, whereas `Nhe_O.KV` (`HIGH-08` in `ADVERSARIAL-REVIEW.md`) currently operates as a pure in-memory LRU/TTL cache without disk I/O. Should `Nhe_O.KV` remain pure in-memory for sub-microsecond speed (updating `VISION.md`/`ADR-001` accordingly) or add optional WAL-backed KV persistence in Epic 04?
+* **Impact**: Shapes whether `Nhe_O.KV` remains `Global => null` in-memory or takes a WAL file path in Epic 04.
+* **Waiting on**: Owner decision (Long).
+* **Opened**: 2026-10-17
+* **Status**: Open
+
+
