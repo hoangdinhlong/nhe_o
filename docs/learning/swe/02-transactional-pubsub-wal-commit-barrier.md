@@ -67,18 +67,20 @@ In **Nhé O**, a bounded transactional notification staging buffer in `SPARK_Mod
    procedure Stage_Notify
      (Ctx     : in     Transaction_Context;
       Staging : in out Tx_Notification_Buffer;
-      Channel : in     Bounded_Key;
+      Channel : in     Bounded_Ident;
       Payload : in     Bounded_Text;
       Status  :    out Engine_Status)
-     with Pre  => Ctx.State = Tx_Active,
+     with Pre  => Ctx.State = Tx_Active and then Channel.Length > 0,
           Post => (if Status = Status_Ok then
-                     Staging.Count = Staging.Count'Old + 1);
+                     Staging.Count = Staging.Count'Old + 1
+                     and then Staging.Owner_Tx = Ctx.Id);
 
    --  Flush staged notifications to Pub/Sub Broker ONLY after Tx_Committed
    procedure Flush_Committed_Notifications
-     (Ctx     : in     Transaction_Context;
-      Staging : in out Tx_Notification_Buffer;
-      Broker  : in out PubSub_Broker)
+     (Ctx             : in     Transaction_Context;
+      Staging         : in out Tx_Notification_Buffer;
+      Broker          : in out PubSub_Broker;
+      Total_Delivered :    out Natural)
      with Pre  => Ctx.State = Tx_Committed,
           Post => Staging.Count = 0;
 

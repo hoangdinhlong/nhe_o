@@ -1,4 +1,5 @@
---  Formally verified Multi-Page B+Tree Index with Deterministic Node Splitting
+--  Formally verified Multi-Page B+Tree Index with Multi-Level Node Splitting
+--  (CRIT-02, CRIT-03, MED-03)
 pragma SPARK_Mode (On);
 
 with Interfaces; use Interfaces;
@@ -15,6 +16,7 @@ package Nhe_O.BTree is
    subtype Child_Slot_Index is Positive range 1 .. Max_Children_Per_Node;
 
    Max_BTree_Nodes : constant := 32;
+   Max_BTree_Depth : constant := 8;
    subtype BTree_Node_Id is Positive range 1 .. Max_BTree_Nodes;
    subtype BTree_Node_Count is Natural range 0 .. Max_BTree_Nodes;
    subtype Optional_Node_Id is Natural range 0 .. Max_BTree_Nodes;
@@ -51,6 +53,13 @@ package Nhe_O.BTree is
       Nodes       : BTree_Node_Pool  := [others => (others => <>)];
    end record;
 
+   --  Structural invariant functions for B+Tree nodes and index (MED-03)
+   function Is_Valid_Node (Node : BTree_Node) return Boolean is
+     (if Node.Kind = Node_Internal then Node.Next_Leaf = 0 else True);
+
+   function Is_Valid_Tree (Tree : BTree_Index) return Boolean is
+     (Tree.Node_Count >= 1 and then Tree.Root_Node <= Tree.Node_Count);
+
    Max_Scan_Results : constant := 64;
    subtype Scan_Result_Index is Positive range 1 .. Max_Scan_Results;
    subtype Scan_Result_Count is Natural range 0 .. Max_Scan_Results;
@@ -74,9 +83,11 @@ package Nhe_O.BTree is
           Post   => Tree.Node_Count = 1
                     and then Tree.Root_Node = 1
                     and then Tree.Total_Keys = 0
-                    and then Tree.Split_Count = 0;
+                    and then Tree.Split_Count = 0
+                    and then Is_Valid_Tree (Tree);
 
-   --  Insert or update a key -> record pointer in the B+Tree, splitting leaf/root nodes when full
+   --  Insert or update a key -> record pointer in the B+Tree, splitting leaf
+   --  and internal nodes bottom-up and promoting a new root when full (CRIT-02)
    procedure Insert_Key
      (Tree   : in out BTree_Index;
       Key    : in     Integer_64;
@@ -109,21 +120,25 @@ package Nhe_O.BTree is
      with Global => null,
           Always_Terminates,
           Pre    => Tree.Node_Count in 1 .. Max_BTree_Nodes
-                    and then Min_Key <= Max_Key;
+                    and then Tree.Root_Node in 1 .. Tree.Node_Count
+                    and then Min_Key <= Max_Key,
+          Post   => Results.Count <= Max_Scan_Results;
 
-   --  Serialize a B+Tree node into a 4096-byte Slotted Page buffer with Magic "BTRE"
+   --  Serialize a B+Tree node into a 4096-byte Slotted Page buffer with Magic "BTRE",
+   --  full 64-bit keys, internal child pointers, and IEEE 802.3 CRC32 (CRIT-03)
    procedure Encode_Node_Page
      (Node : in     BTree_Node;
       Page :    out Page_Buffer)
      with Global => null,
           Always_Terminates;
 
-   --  Deserialize a B+Tree node from a 4096-byte Slotted Page buffer
+   --  Deserialize and CRC32-verify a B+Tree node from a 4096-byte Slotted Page buffer
    procedure Decode_Node_Page
      (Page  : in     Page_Buffer;
       Node  :    out BTree_Node;
       Valid :    out Boolean)
      with Global => null,
-          Always_Terminates;
+          Always_Terminates,
+          Post   => (if Valid then Is_Valid_Node (Node));
 
 end Nhe_O.BTree;

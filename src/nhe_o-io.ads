@@ -64,7 +64,17 @@ package Nhe_O.IO is
           Always_Terminates,
           Pre    => File_Path.Length > 0;
 
-   --  Append a CRC32-framed WAL record to the Write-Ahead Log and fsync to disk
+   --  Write a CRC32-framed WAL record at exact 0-based index Frame_Idx via positional pwrite
+   procedure Write_WAL_Frame
+     (WAL_Path  : in     Bounded_Text;
+      Frame_Idx : in     Valid_Page_Id;
+      Frame     : in     WAL_Frame_Buffer;
+      Success   :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => WAL_Path.Length > 0;
+
+   --  Append a CRC32-framed WAL record at a frame-aligned offset via positional pwrite + fsync
    procedure Append_WAL_Frame
      (WAL_Path : in     Bounded_Text;
       Frame    : in     WAL_Frame_Buffer;
@@ -82,6 +92,19 @@ package Nhe_O.IO is
      with Global => null,
           Always_Terminates,
           Pre    => WAL_Path.Length > 0;
+
+   --  Read a WAL frame at 0-based index Frame_Idx, distinguishing clean EOF (0 bytes at
+   --  exact frame boundary) from torn frames or I/O errors (HIGH-06)
+   procedure Read_WAL_Frame
+     (WAL_Path  : in     Bounded_Text;
+      Frame_Idx : in     Valid_Page_Id;
+      Frame     :    out WAL_Frame_Buffer;
+      Success   :    out Boolean;
+      Is_EOF    :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => WAL_Path.Length > 0,
+          Post   => not (Success and Is_EOF);
 
    --  Delete a database or WAL file if present on disk
    pragma Warnings (GNATprove, Off, "subprogram ""Delete_File_If_Exists"" has no effect",
@@ -109,6 +132,17 @@ package Nhe_O.IO is
       Found :    out Boolean)
      with Global => null,
           Always_Terminates;
+
+   --  Read command-line argument at 1-based position Index, reporting whether an
+   --  argument was present but exceeded Max_Text_Len (512 bytes) (HIGH-06)
+   procedure Read_CLI_Arg
+     (Index    : in     Positive;
+      Arg      :    out Bounded_Text;
+      Found    :    out Boolean;
+      Too_Long :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Post   => not (Found and Too_Long);
    pragma Warnings (GNATprove, On, "subprogram ""Read_CLI_Arg"" has no effect");
 
    --  Mark process exit status as Failure (non-zero) on runtime verification failure

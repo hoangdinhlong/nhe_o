@@ -2,6 +2,13 @@ pragma SPARK_Mode (On);
 
 package body Nhe_O.JSON is
 
+   function Is_Whitespace (C : Character) return Boolean is
+     (C = ' ' or else C = ASCII.HT or else C = ASCII.LF or else C = ASCII.CR);
+
+   -------------------------------------------------------------------------
+   --  Is_Valid_JSON (RFC 8259 Objects, Arrays, and Scalar Roots, HIGH-04)
+   -------------------------------------------------------------------------
+
    function Is_Valid_JSON (Raw : Bounded_Text) return Boolean is
       type Expect_State is
         (St_Root,
@@ -42,7 +49,7 @@ package body Nhe_O.JSON is
       Num_Has_Exp   : Boolean      := False;
       Consumed      : Boolean;
    begin
-      if Raw.Length < 2 then
+      if Raw.Length < 1 then
          return False;
       end if;
 
@@ -51,9 +58,7 @@ package body Nhe_O.JSON is
            (I in 1 .. Raw.Length and then Depth <= Max_Text_Len);
          declare
             C     : constant Character := Raw.Data (I);
-            Is_WS : constant Boolean   :=
-              (C = ' ' or else C = ASCII.HT
-               or else C = ASCII.LF or else C = ASCII.CR);
+            Is_WS : constant Boolean   := Is_Whitespace (C);
          begin
             Consumed := True;
 
@@ -159,53 +164,7 @@ package body Nhe_O.JSON is
             --  2. Outside lexical tokens: skip whitespace and advance grammar state
             if not Consumed and then not Is_WS then
                case State is
-                  when St_Root =>
-                     if C = '{' then
-                        Depth     := 1;
-                        Stack (1) := '{';
-                        State     := St_Obj_Key_Or_End;
-                     elsif C = '[' then
-                        Depth     := 1;
-                        Stack (1) := '[';
-                        State     := St_Arr_Val_Or_End;
-                     else
-                        return False;
-                     end if;
-
-                  when St_Obj_Key_Or_End =>
-                     if C = '}' then
-                        if Depth = 0 or else Stack (Depth) /= '{' then
-                           return False;
-                        end if;
-                        Depth := Depth - 1;
-                        State := St_After_Val;
-                     elsif C = '"' then
-                        String_Is_Key := True;
-                        Escaped       := False;
-                        Hex_Needed    := 0;
-                        Lex           := Lex_String;
-                     else
-                        return False;
-                     end if;
-
-                  when St_Obj_Key =>
-                     if C = '"' then
-                        String_Is_Key := True;
-                        Escaped       := False;
-                        Hex_Needed    := 0;
-                        Lex           := Lex_String;
-                     else
-                        return False;
-                     end if;
-
-                  when St_Obj_Colon =>
-                     if C = ':' then
-                        State := St_Val;
-                     else
-                        return False;
-                     end if;
-
-                  when St_Arr_Val_Or_End | St_Val =>
+                  when St_Root | St_Arr_Val_Or_End | St_Val =>
                      if State = St_Arr_Val_Or_End and then C = ']' then
                         if Depth = 0 or else Stack (Depth) /= '[' then
                            return False;
@@ -253,9 +212,42 @@ package body Nhe_O.JSON is
                         return False;
                      end if;
 
+                  when St_Obj_Key_Or_End =>
+                     if C = '}' then
+                        if Depth = 0 or else Stack (Depth) /= '{' then
+                           return False;
+                        end if;
+                        Depth := Depth - 1;
+                        State := St_After_Val;
+                     elsif C = '"' then
+                        String_Is_Key := True;
+                        Escaped       := False;
+                        Hex_Needed    := 0;
+                        Lex           := Lex_String;
+                     else
+                        return False;
+                     end if;
+
+                  when St_Obj_Key =>
+                     if C = '"' then
+                        String_Is_Key := True;
+                        Escaped       := False;
+                        Hex_Needed    := 0;
+                        Lex           := Lex_String;
+                     else
+                        return False;
+                     end if;
+
+                  when St_Obj_Colon =>
+                     if C = ':' then
+                        State := St_Val;
+                     else
+                        return False;
+                     end if;
+
                   when St_After_Val =>
                      if Depth = 0 then
-                        --  Root container already closed: reject trailing tokens or `{}{}`
+                        --  Root value/container already closed: reject trailing tokens
                         return False;
                      elsif C = ',' then
                         if Stack (Depth) = '{' then
@@ -281,6 +273,14 @@ package body Nhe_O.JSON is
          end;
       end loop;
 
+      --  If a root scalar number ended at EOF, finalize it
+      if Depth = 0
+        and then (Lex = Lex_Num_Zero or else Lex = Lex_Num_Has_Digit)
+      then
+         Lex   := Lex_None;
+         State := St_After_Val;
+      end if;
+
       return State = St_After_Val
         and then Lex = Lex_None
         and then Depth = 0
@@ -288,37 +288,59 @@ package body Nhe_O.JSON is
         and then Hex_Needed = 0;
    end Is_Valid_JSON;
 
-   procedure Put_Field
-     (Doc    : in out JSONB_Document;
-      Key    : in     Bounded_Ident;
-      Val    : in     Bounded_Text;
-      Kind   : in     JSONB_Value_Kind;
-      Status :    out Engine_Status)
-   is
+   -------------------------------------------------------------------------
+   --  Is_Valid_Field_Value (HIGH-04)
+   -------------------------------------------------------------------------
+
+   function First_Non_WS_Char (Val : Bounded_Text) return Character is
    begin
-      for I in 1 .. Doc.Count loop
-         pragma Loop_Invariant (I in 1 .. Doc.Count);
-         if Doc.Fields (I).Active and then Equal_Ident (Doc.Fields (I).Key, Key) then
-            Doc.Fields (I).Val  := Val;
-            Doc.Fields (I).Kind := Kind;
-            Status := Status_Ok;
-            return;
+      for I in 1 .. Val.Length loop
+         if not Is_Whitespace (Val.Data (I)) then
+            return Val.Data (I);
          end if;
       end loop;
+      return ' ';
+   end First_Non_WS_Char;
 
-      if Doc.Count < Max_JSON_Fields then
-         Doc.Count := Doc.Count + 1;
-         Doc.Fields (Doc.Count) := (
-            Key    => Key,
-            Val    => Val,
-            Kind   => Kind,
-            Active => True
-         );
-         Status := Status_Ok;
-      else
-         Status := Status_Capacity_Exceeded;
-      end if;
-   end Put_Field;
+   function Is_Valid_Field_Value
+     (Val  : Bounded_Text;
+      Kind : JSONB_Value_Kind) return Boolean
+   is
+      First_C : constant Character := First_Non_WS_Char (Val);
+   begin
+      case Kind is
+         when JSONB_String =>
+            --  Reject raw control characters inside JSONB string values
+            return (for all I in 1 .. Val.Length =>
+                      Character'Pos (Val.Data (I)) >= 32);
+
+         when JSONB_Null =>
+            return Val.Length = 0 or else Equal_Text (Val, Make_Text ("null"));
+
+         when JSONB_Boolean =>
+            return Equal_Text (Val, Make_Text ("true"))
+              or else Equal_Text (Val, Make_Text ("false"));
+
+         when JSONB_Number =>
+            return Val.Length >= 1
+              and then (First_C = '-' or else First_C in '0' .. '9')
+              and then Is_Valid_JSON (Val);
+
+         when JSONB_Object =>
+            return Val.Length >= 2
+              and then First_C = '{'
+              and then Is_Valid_JSON (Val);
+
+         when JSONB_Array =>
+            return Val.Length >= 2
+              and then First_C = '['
+              and then Is_Valid_JSON (Val);
+      end case;
+   end Is_Valid_Field_Value;
+
+   -------------------------------------------------------------------------
+   --  Has_Key & Put_Field
+   -------------------------------------------------------------------------
 
    function Has_Key
      (Doc : JSONB_Document;
@@ -338,6 +360,281 @@ package body Nhe_O.JSON is
       return False;
    end Has_Key;
 
+   procedure Put_Field
+     (Doc    : in out JSONB_Document;
+      Key    : in     Bounded_Ident;
+      Val    : in     Bounded_Text;
+      Kind   : in     JSONB_Value_Kind;
+      Status :    out Engine_Status)
+   is
+      Norm_Val : Bounded_Text := Val;
+   begin
+      if not Is_Valid_Field_Value (Val, Kind) then
+         Status := Status_Invalid_Syntax;
+         return;
+      end if;
+
+      if Kind = JSONB_Null and then Norm_Val.Length = 0 then
+         Norm_Val := Make_Text ("null");
+      end if;
+
+      for I in 1 .. Doc.Count loop
+         pragma Loop_Invariant (I in 1 .. Doc.Count);
+         pragma Loop_Invariant (Doc.Count = Doc.Count'Loop_Entry);
+         if Doc.Fields (I).Active and then Equal_Ident (Doc.Fields (I).Key, Key) then
+            Doc.Fields (I).Val  := Norm_Val;
+            Doc.Fields (I).Kind := Kind;
+            pragma Assert
+              (Doc.Fields (I).Active
+               and then Equal_Ident (Doc.Fields (I).Key, Key));
+            Status := Status_Ok;
+            return;
+         end if;
+      end loop;
+
+      if Doc.Count < Max_JSON_Fields then
+         Doc.Count := Doc.Count + 1;
+         Doc.Fields (Doc.Count) := (
+            Key    => Key,
+            Val    => Norm_Val,
+            Kind   => Kind,
+            Active => True
+         );
+         pragma Assert
+           (Doc.Fields (Doc.Count).Active
+            and then Equal_Ident (Doc.Fields (Doc.Count).Key, Key));
+         Status := Status_Ok;
+      else
+         Status := Status_Capacity_Exceeded;
+      end if;
+   end Put_Field;
+
+   -------------------------------------------------------------------------
+   --  Parse_JSONB (Decompose JSON object string into JSONB_Document, LOW-01)
+   -------------------------------------------------------------------------
+
+   procedure Parse_JSONB
+     (Raw    : in     Bounded_Text;
+      Doc    :    out JSONB_Document;
+      Status :    out Engine_Status)
+   is
+      Pos      : Positive := 1;
+      Key_Id   : Bounded_Ident;
+      Val_Text : Bounded_Text;
+      Val_Kind : JSONB_Value_Kind;
+      Sub_Stat : Engine_Status;
+      Brace_D  : Natural;
+      In_Str   : Boolean;
+      Esc      : Boolean;
+   begin
+      Doc := (others => <>);
+
+      if not Is_Valid_JSON (Raw) or else First_Non_WS_Char (Raw) /= '{' then
+         Status := Status_Invalid_Syntax;
+         return;
+      end if;
+
+      --  Skip leading whitespace and opening '{'
+      while Pos <= Raw.Length and then Raw.Data (Pos) /= '{' loop
+         pragma Loop_Invariant (Pos in 1 .. Raw.Length);
+         pragma Loop_Variant (Increases => Pos);
+         Pos := Pos + 1;
+      end loop;
+
+      if Pos >= Raw.Length then
+         Status := Status_Invalid_Syntax;
+         return;
+      end if;
+      Pos := Pos + 1;
+
+      --  Parse up to Max_JSON_Fields top-level key/value entries
+      for Field_Step in 1 .. Max_JSON_Fields + 1 loop
+         pragma Loop_Invariant (Pos in 1 .. Raw.Length + 1);
+
+         while Pos <= Raw.Length
+           and then (Is_Whitespace (Raw.Data (Pos)) or else Raw.Data (Pos) = ',')
+         loop
+            pragma Loop_Invariant (Pos in 1 .. Raw.Length);
+            pragma Loop_Variant (Increases => Pos);
+            Pos := Pos + 1;
+         end loop;
+
+         if Pos > Raw.Length or else Raw.Data (Pos) = '}' then
+            Status := Status_Ok;
+            return;
+         end if;
+
+         if Raw.Data (Pos) /= '"' or else Pos = Raw.Length then
+            Status := Status_Invalid_Syntax;
+            return;
+         end if;
+         Pos := Pos + 1;
+
+         --  Extract key string
+         Key_Id := (Length => 0, Data => [others => ' ']);
+         Esc    := False;
+         while Pos <= Raw.Length loop
+            pragma Loop_Invariant (Pos in 1 .. Raw.Length);
+            pragma Loop_Invariant (Key_Id.Length <= Max_Ident_Len);
+            pragma Loop_Variant (Increases => Pos);
+            if Esc then
+               Esc := False;
+               if Key_Id.Length < Max_Ident_Len then
+                  Key_Id.Length := Key_Id.Length + 1;
+                  Key_Id.Data (Key_Id.Length) := Raw.Data (Pos);
+               else
+                  Status := Status_Invalid_Syntax;
+                  return;
+               end if;
+            elsif Raw.Data (Pos) = '\' then
+               Esc := True;
+            elsif Raw.Data (Pos) = '"' then
+               Pos := Pos + 1;
+               exit;
+            else
+               if Key_Id.Length < Max_Ident_Len then
+                  Key_Id.Length := Key_Id.Length + 1;
+                  Key_Id.Data (Key_Id.Length) := Raw.Data (Pos);
+               else
+                  Status := Status_Invalid_Syntax;
+                  return;
+               end if;
+            end if;
+            Pos := Pos + 1;
+         end loop;
+
+         if Key_Id.Length = 0 then
+            Status := Status_Invalid_Syntax;
+            return;
+         end if;
+
+         --  Skip whitespace and ':'
+         while Pos <= Raw.Length
+           and then (Is_Whitespace (Raw.Data (Pos)) or else Raw.Data (Pos) = ':')
+         loop
+            pragma Loop_Invariant (Pos in 1 .. Raw.Length);
+            pragma Loop_Variant (Increases => Pos);
+            Pos := Pos + 1;
+         end loop;
+
+         if Pos > Raw.Length then
+            Status := Status_Invalid_Syntax;
+            return;
+         end if;
+
+         Val_Text := (Length => 0, Data => [others => ' ']);
+
+         if Raw.Data (Pos) = '"' then
+            Val_Kind := JSONB_String;
+            if Pos < Raw.Length then
+               Pos := Pos + 1;
+            end if;
+            Esc := False;
+            while Pos <= Raw.Length loop
+               pragma Loop_Invariant (Pos in 1 .. Raw.Length);
+               pragma Loop_Invariant (Val_Text.Length <= Max_Text_Len);
+               pragma Loop_Variant (Increases => Pos);
+               if Esc then
+                  Esc := False;
+                  if Val_Text.Length < Max_Text_Len then
+                     Val_Text.Length := Val_Text.Length + 1;
+                     Val_Text.Data (Val_Text.Length) := Raw.Data (Pos);
+                  end if;
+               elsif Raw.Data (Pos) = '\' then
+                  Esc := True;
+               elsif Raw.Data (Pos) = '"' then
+                  Pos := Pos + 1;
+                  exit;
+               else
+                  if Val_Text.Length < Max_Text_Len then
+                     Val_Text.Length := Val_Text.Length + 1;
+                     Val_Text.Data (Val_Text.Length) := Raw.Data (Pos);
+                  end if;
+               end if;
+               Pos := Pos + 1;
+            end loop;
+         elsif Raw.Data (Pos) = '{' or else Raw.Data (Pos) = '[' then
+            Val_Kind := (if Raw.Data (Pos) = '{' then JSONB_Object else JSONB_Array);
+            Brace_D  := 0;
+            In_Str   := False;
+            Esc      := False;
+            while Pos <= Raw.Length loop
+               pragma Loop_Invariant (Pos in 1 .. Raw.Length);
+               pragma Loop_Invariant (Val_Text.Length <= Max_Text_Len);
+               pragma Loop_Invariant (Brace_D <= Max_Text_Len);
+               pragma Loop_Variant (Increases => Pos);
+
+               if Val_Text.Length < Max_Text_Len then
+                  Val_Text.Length := Val_Text.Length + 1;
+                  Val_Text.Data (Val_Text.Length) := Raw.Data (Pos);
+               end if;
+
+               if In_Str then
+                  if Esc then
+                     Esc := False;
+                  elsif Raw.Data (Pos) = '\' then
+                     Esc := True;
+                  elsif Raw.Data (Pos) = '"' then
+                     In_Str := False;
+                  end if;
+               else
+                  if Raw.Data (Pos) = '"' then
+                     In_Str := True;
+                  elsif Raw.Data (Pos) = '{' or else Raw.Data (Pos) = '[' then
+                     if Brace_D < Max_Text_Len then
+                        Brace_D := Brace_D + 1;
+                     end if;
+                  elsif Raw.Data (Pos) = '}' or else Raw.Data (Pos) = ']' then
+                     if Brace_D > 0 then
+                        Brace_D := Brace_D - 1;
+                     end if;
+                     if Brace_D = 0 then
+                        Pos := Pos + 1;
+                        exit;
+                     end if;
+                  end if;
+               end if;
+               Pos := Pos + 1;
+            end loop;
+         else
+            if Raw.Data (Pos) = 't' or else Raw.Data (Pos) = 'f' then
+               Val_Kind := JSONB_Boolean;
+            elsif Raw.Data (Pos) = 'n' then
+               Val_Kind := JSONB_Null;
+            else
+               Val_Kind := JSONB_Number;
+            end if;
+
+            while Pos <= Raw.Length
+              and then not Is_Whitespace (Raw.Data (Pos))
+              and then Raw.Data (Pos) /= ','
+              and then Raw.Data (Pos) /= '}'
+            loop
+               pragma Loop_Invariant (Pos in 1 .. Raw.Length);
+               pragma Loop_Invariant (Val_Text.Length <= Max_Text_Len);
+               pragma Loop_Variant (Increases => Pos);
+               if Val_Text.Length < Max_Text_Len then
+                  Val_Text.Length := Val_Text.Length + 1;
+                  Val_Text.Data (Val_Text.Length) := Raw.Data (Pos);
+               end if;
+               Pos := Pos + 1;
+            end loop;
+         end if;
+
+         Put_Field (Doc, Key_Id, Val_Text, Val_Kind, Sub_Stat);
+         if Sub_Stat /= Status_Ok then
+            Status := Sub_Stat;
+            return;
+         end if;
+      end loop;
+
+      Status := Status_Capacity_Exceeded;
+   end Parse_JSONB;
+
+   -------------------------------------------------------------------------
+   --  Get_Field (`->`) & Get_Field_Text (`->>`) (HIGH-04)
+   -------------------------------------------------------------------------
+
    procedure Get_Field
      (Doc   : in     JSONB_Document;
       Key   : in     Bounded_Ident;
@@ -345,17 +642,43 @@ package body Nhe_O.JSON is
       Val   :    out Bounded_Text;
       Kind  :    out JSONB_Value_Kind)
    is
+      Raw_Val : Bounded_Text;
    begin
       Val   := (Length => 0, Data => [others => ' ']);
       Kind  := JSONB_Null;
       Found := False;
       for I in 1 .. Doc.Count loop
          pragma Loop_Invariant
-           (I in 1 .. Doc.Count and not Found);
+           (I in 1 .. Doc.Count
+            and then not Found
+            and then (for all J in 1 .. I - 1 =>
+                        not (Doc.Fields (J).Active
+                             and then Equal_Ident (Doc.Fields (J).Key, Key))));
          if Doc.Fields (I).Active and then Equal_Ident (Doc.Fields (I).Key, Key) then
-            Val   := Doc.Fields (I).Val;
-            Kind  := Doc.Fields (I).Kind;
-            Found := True;
+            Raw_Val := Doc.Fields (I).Val;
+            Kind    := Doc.Fields (I).Kind;
+            Found   := True;
+
+            --  PostgreSQL `->` returns valid JSON (strings wrapped in quotes)
+            if Kind = JSONB_String then
+               if Raw_Val.Length >= 2
+                 and then Raw_Val.Data (1) = '"'
+                 and then Raw_Val.Data (Raw_Val.Length) = '"'
+               then
+                  Val := Raw_Val;
+               elsif Raw_Val.Length <= Max_Text_Len - 2 then
+                  Val.Length   := Raw_Val.Length + 2;
+                  Val.Data (1) := '"';
+                  for K in 1 .. Raw_Val.Length loop
+                     Val.Data (K + 1) := Raw_Val.Data (K);
+                  end loop;
+                  Val.Data (Raw_Val.Length + 2) := '"';
+               else
+                  Val := Raw_Val;
+               end if;
+            else
+               Val := Raw_Val;
+            end if;
             return;
          end if;
       end loop;
@@ -367,10 +690,42 @@ package body Nhe_O.JSON is
       Found :    out Boolean;
       Val   :    out Bounded_Text)
    is
-      Ignored_Kind : JSONB_Value_Kind;
+      Raw_Val : Bounded_Text;
    begin
-      Get_Field (Doc, Key, Found, Val, Ignored_Kind);
+      Val   := (Length => 0, Data => [others => ' ']);
+      Found := False;
+      for I in 1 .. Doc.Count loop
+         pragma Loop_Invariant
+           (I in 1 .. Doc.Count
+            and then not Found
+            and then (for all J in 1 .. I - 1 =>
+                        not (Doc.Fields (J).Active
+                             and then Equal_Ident (Doc.Fields (J).Key, Key))));
+         if Doc.Fields (I).Active and then Equal_Ident (Doc.Fields (I).Key, Key) then
+            Raw_Val := Doc.Fields (I).Val;
+            Found   := True;
+
+            --  PostgreSQL `->>` returns unquoted text for JSONB_String
+            if Doc.Fields (I).Kind = JSONB_String
+              and then Raw_Val.Length >= 2
+              and then Raw_Val.Data (1) = '"'
+              and then Raw_Val.Data (Raw_Val.Length) = '"'
+            then
+               Val.Length := Raw_Val.Length - 2;
+               for K in 1 .. Val.Length loop
+                  Val.Data (K) := Raw_Val.Data (K + 1);
+               end loop;
+            else
+               Val := Raw_Val;
+            end if;
+            return;
+         end if;
+      end loop;
    end Get_Field_Text;
+
+   -------------------------------------------------------------------------
+   --  Contains (`@>`)
+   -------------------------------------------------------------------------
 
    function Contains
      (Left, Right : JSONB_Document) return Boolean

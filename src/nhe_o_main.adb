@@ -19,6 +19,9 @@ with Nhe_O.C_API;       use Nhe_O.C_API;
 
 procedure Nhe_O_Main is
 
+   pragma Warnings (GNATprove, Off, "is set by");
+   pragma Warnings (GNATprove, Off, "statement has no effect");
+
    All_Passed : Boolean := True;
 
    procedure Check (Cond : in Boolean)
@@ -32,6 +35,52 @@ procedure Nhe_O_Main is
       end if;
    end Check;
 
+   --  Parse positive integer TTL from Bounded_Text (fallback Default_TTL on empty/invalid)
+   procedure Parse_Positive_Int
+     (Text    : in     Bounded_Text;
+      Default : in     Integer_64;
+      Result  :    out Integer_64;
+      Valid   :    out Boolean)
+     with Global => null,
+          Always_Terminates
+   is
+      Acc   : Integer_64 := 0;
+      Digit : Integer_64;
+   begin
+      if Text.Length = 0 or else Text.Length > 9 then
+         Result := Default;
+         Valid  := False;
+         return;
+      end if;
+      for I in 1 .. Text.Length loop
+         pragma Loop_Invariant (Acc in 0 .. 1_000_000_000);
+         declare
+            Ch : constant Character := Text.Data (I);
+         begin
+            if Ch not in '0' .. '9' then
+               Result := Default;
+               Valid  := False;
+               return;
+            end if;
+            Digit := Integer_64 (Character'Pos (Ch) - Character'Pos ('0'));
+            if Acc <= (1_000_000_000 - Digit) / 10 then
+               Acc := Acc * 10 + Digit;
+            else
+               Result := Default;
+               Valid  := False;
+               return;
+            end if;
+         end;
+      end loop;
+      if Acc >= 1 then
+         Result := Acc;
+         Valid  := True;
+      else
+         Result := Default;
+         Valid  := False;
+      end if;
+   end Parse_Positive_Int;
+
    --  Execute CLI command mode (--sql, --kv, --rag-demo)
    procedure Run_CLI_Command
      (Arg1 : in     Bounded_Text;
@@ -40,8 +89,20 @@ procedure Nhe_O_Main is
    is
       Arg2      : Bounded_Text;
       Arg3      : Bounded_Text;
+      Arg4      : Bounded_Text;
+      Arg5      : Bounded_Text;
       Has_Arg2  : Boolean;
       Has_Arg3  : Boolean;
+      Has_Arg4  : Boolean;
+      Has_Arg5  : Boolean;
+      Long_Arg2 : Boolean;
+      Long_Arg3 : Boolean;
+      Long_Arg4 : Boolean;
+      Long_Arg5 : Boolean;
+      Key_Arg   : Bounded_Text;
+      Val_Arg   : Bounded_Text;
+      TTL_Val   : Integer_64 := 300;
+      TTL_Valid : Boolean;
       Desc      : Parsed_SQL_Descriptor;
       Status    : Engine_Status;
       C_Rc      : int;
@@ -56,7 +117,13 @@ procedure Nhe_O_Main is
       Graph_Hit : int;
    begin
       if Equal_Text (Arg1, Make_Text ("--sql")) then
-         Read_CLI_Arg (2, Arg2, Has_Arg2);
+         Read_CLI_Arg (2, Arg2, Has_Arg2, Long_Arg2);
+         if Long_Arg2 then
+            Print_Line ("[CLI --sql] Error: argument exceeds 512-byte Bounded_Text capacity.");
+            Check (False);
+            Done := True;
+            return;
+         end if;
          if not Has_Arg2 then
             Arg2 := Make_Text ("SELECT id FROM docs WHERE meta @> $1::jsonb ORDER BY emb <-> $2;");
          end if;
@@ -68,25 +135,48 @@ procedure Nhe_O_Main is
          Check (Status = Status_Ok);
          Done := True;
       elsif Equal_Text (Arg1, Make_Text ("--kv")) then
-         Read_CLI_Arg (2, Arg2, Has_Arg2);
-         Read_CLI_Arg (3, Arg3, Has_Arg3);
-         if not Has_Arg2 or else Arg2.Length = 0 or else Arg2.Length > Max_Ident_Len then
-            Arg2 := Make_Text ("cli:default:key");
+         Read_CLI_Arg (2, Arg2, Has_Arg2, Long_Arg2);
+         Read_CLI_Arg (3, Arg3, Has_Arg3, Long_Arg3);
+         Read_CLI_Arg (4, Arg4, Has_Arg4, Long_Arg4);
+         Read_CLI_Arg (5, Arg5, Has_Arg5, Long_Arg5);
+         if Long_Arg2 or else Long_Arg3 or else Long_Arg4 or else Long_Arg5 then
+            Print_Line ("[CLI --kv] Error: CLI argument exceeds 512-byte capacity.");
+            Check (False);
+            Done := True;
+            return;
          end if;
-         if not Has_Arg3 then
-            Arg3 := Make_Text ("verified_spark_value");
+
+         --  Support both `--kv SET <key> <val> [ttl]` and `--kv <key> <val> [ttl]`
+         if Has_Arg2 and then (Equal_Text (Arg2, Make_Text ("SET")) or else Equal_Text (Arg2, Make_Text ("set"))) then
+            Key_Arg := (if Has_Arg3 then Arg3 else Make_Text ("cli:default:key"));
+            Val_Arg := (if Has_Arg4 then Arg4 else Make_Text ("verified_spark_value"));
+            if Has_Arg5 then
+               Parse_Positive_Int (Arg5, 300, TTL_Val, TTL_Valid);
+               Check (TTL_Valid);
+            end if;
+         else
+            Key_Arg := (if Has_Arg2 then Arg2 else Make_Text ("cli:default:key"));
+            Val_Arg := (if Has_Arg3 then Arg3 else Make_Text ("verified_spark_value"));
+            if Has_Arg4 then
+               Parse_Positive_Int (Arg4, 300, TTL_Val, TTL_Valid);
+               Check (TTL_Valid);
+            end if;
          end if;
-         for I in 1 .. Arg2.Length loop
-            K_Buf (size_t (I)) := To_C (Arg2.Data (I));
+
+         if Key_Arg.Length = 0 or else Key_Arg.Length > Max_Ident_Len then
+            Key_Arg := Make_Text ("cli:default:key");
+         end if;
+         for I in 1 .. Key_Arg.Length loop
+            K_Buf (size_t (I)) := To_C (Key_Arg.Data (I));
          end loop;
-         for I in 1 .. Arg3.Length loop
-            V_Buf (size_t (I)) := To_C (Arg3.Data (I));
+         for I in 1 .. Val_Arg.Length loop
+            V_Buf (size_t (I)) := To_C (Val_Arg.Data (I));
          end loop;
          C_Init (C_Rc);
-         C_KV_Set (K_Buf, int (Arg2.Length), V_Buf, int (Arg3.Length), 1000, 300, C_Rc);
-         C_KV_Get (K_Buf, int (Arg2.Length), 1010, Out_V_Buf, Out_V_Len, C_Rc);
+         C_KV_Set (K_Buf, int (Key_Arg.Length), V_Buf, int (Val_Arg.Length), 1000, TTL_Val, C_Rc);
+         C_KV_Get (K_Buf, int (Key_Arg.Length), 1010, Out_V_Buf, Out_V_Len, C_Rc);
          Print_Line ("[CLI --kv] Stored & Retrieved Length : " & int'Image (Out_V_Len));
-         Check (C_Rc = C_Status_Ok and then Out_V_Len = int (Arg3.Length));
+         Check (C_Rc = C_Status_Ok and then Out_V_Len = int (Val_Arg.Length));
          Done := True;
       elsif Equal_Text (Arg1, Make_Text ("--rag-demo")) then
          C_Init (C_Rc);
@@ -113,6 +203,7 @@ procedure Nhe_O_Main is
    --  CLI argument state
    CLI_Arg1     : Bounded_Text;
    Has_CLI_Arg1 : Boolean;
+   Long_Arg1    : Boolean;
    CLI_Handled  : Boolean;
 
    --  1. PostgreSQL SQL & Type variables
@@ -129,39 +220,61 @@ procedure Nhe_O_Main is
    SQL_Create_Idx : constant Bounded_Text := Make_Text (
      "CREATE INDEX idx_vec ON my_table (vec);"
    );
+   SQL_Create_Tbl : constant Bounded_Text := Make_Text (
+     "CREATE TABLE docs (id BIGINT, view_count INT, index_ref INT, emb VECTOR(4096));"
+   );
+   SQL_Tight_QMark : constant Bounded_Text := Make_Text (
+     "SELECT id FROM docs WHERE meta?'title';"
+   );
+   SQL_Bad_Quote : constant Bounded_Text := Make_Text (
+     "SELECT id FROM docs WHERE note = 'unterminated;"
+   );
+   SQL_Bad_Comment : constant Bounded_Text := Make_Text (
+     "SELECT id /* unclosed comment FROM docs;"
+   );
    SQL_Desc   : Parsed_SQL_Descriptor;
    SQL_Status : Engine_Status;
    Resolved_T : Pg_Data_Type;
    Type_Valid : Boolean;
 
    --  2. Vector Database & 4096-D Quantization variables
-   Vec_A      : constant Vector_Value := Make_Vector_3D (1.0, 0.0, 0.0);
-   Vec_B      : constant Vector_Value := Make_Vector_3D (1.0, 0.0, 0.0);
-   Vec_C      : constant Vector_Value := Make_Vector_3D (0.0, 3.0, 4.0);
-   Vec_Max    : constant Vector_Value := Make_Vector_3D (Max_Component, 0.0, 0.0);
-   Vec_Small  : constant Vector_Value := Make_Vector_3D (1.0e-7, 0.0, 0.0);
-   Vec_Zero   : constant Vector_Value := Make_Vector_3D (0.0, 0.0, 0.0);
-   Vec_4096_A : constant Vector_Value := (Dim => 4096, Elements => [1 => 1.0, 2048 => -1.0, 4096 => 0.5, others => 0.25]);
-   Vec_4096_B : constant Vector_Value := (Dim => 4096, Elements => [1 => 1.0, 2048 =>  1.0, 4096 => -0.5, others => 0.25]);
-   Q_Int8_A   : Quantized_Int8_Vector;
-   Q_Int8_B   : Quantized_Int8_Vector;
-   Deq_Vec_A  : Vector_Value;
-   Q_Bin_A    : Quantized_Binary_Vector;
-   Q_Bin_B    : Quantized_Binary_Vector;
-   Ham_Dist   : Natural;
-   Int8_Dist  : Natural;
-   L2_AB      : Non_Negative_Float;
-   L2_AC      : Non_Negative_Float;
-   L2_Max     : Non_Negative_Float;
-   Cos_AB     : Float;
-   Cos_Max    : Float;
-   Cos_Small  : Float;
-   NIP_AC     : Float;
+   Vec_A         : constant Vector_Value := Make_Vector_3D (1.0, 0.0, 0.0);
+   Vec_B         : constant Vector_Value := Make_Vector_3D (1.0, 0.0, 0.0);
+   Vec_C         : constant Vector_Value := Make_Vector_3D (0.0, 3.0, 4.0);
+   Vec_Max       : constant Vector_Value := Make_Vector_3D (Max_Component, 0.0, 0.0);
+   Vec_Small     : constant Vector_Value := Make_Vector_3D (1.0e-7, 0.0, 0.0);
+   Vec_Zero      : constant Vector_Value := Make_Vector_3D (0.0, 0.0, 0.0);
+   Vec_4096_A    : constant Vector_Value := (Dim => 4096, Elements => [1 => 1.0, 2048 => -1.0, 4096 => 0.5, others => 0.25]);
+   Vec_4096_B    : constant Vector_Value := (Dim => 4096, Elements => [1 => 1.0, 2048 =>  1.0, 4096 => -0.5, others => 0.25]);
+   Q_Int8_A      : Quantized_Int8_Vector;
+   Q_Int8_B      : Quantized_Int8_Vector;
+   Q_Int8_Sat    : Quantized_Int8_Vector;
+   Deq_Vec_A     : Vector_Value;
+   Deq_Vec_Sat   : Vector_Value;
+   Q_Bin_A       : Quantized_Binary_Vector;
+   Q_Bin_B       : Quantized_Binary_Vector;
+   Ham_Dist      : Natural;
+   Int8_Dist     : Natural;
+   Int8_Scaled   : Non_Negative_Float;
+   L2_AB         : Non_Negative_Float;
+   L2_AC         : Non_Negative_Float;
+   L2_Max        : Non_Negative_Float;
+   Cos_AB        : Float;
+   Cos_Max       : Float;
+   Cos_Small     : Float;
+   NIP_AC        : Float;
+   Vec_Toast_Buf : TOAST_Payload_Buffer;
+   Vec_Toast_Len : Valid_TOAST_Length;
+   Vec_Dec_4096  : Vector_Value;
+   Vec_Dec_Ok    : Boolean;
 
    --  3. PostgreSQL JSON / JSONB variables
    Raw_JSON     : constant Bounded_Text := Make_Text (
      "{""engine"":""Nhe_O"",""verified"":true,""dims"":[3,4096],""meta"":{""v"":0.3}}"
    );
+   Scalar_True  : constant Bounded_Text := Make_Text ("true");
+   Scalar_Num   : constant Bounded_Text := Make_Text ("42.5");
+   Scalar_Str   : constant Bounded_Text := Make_Text ("""rfc8259_scalar""");
    Bad_JSON_1   : constant Bounded_Text := Make_Text ("{[}]{}");
    Bad_JSON_2   : constant Bounded_Text := Make_Text ("{""a"":1}{""b"":2}");
    Bad_JSON_3   : constant Bounded_Text := Make_Text ("{:}");
@@ -170,6 +283,7 @@ procedure Nhe_O_Main is
    Bad_JSON_6   : constant Bounded_Text := Make_Text ("{123:456}");
    Bad_JSON_7   : constant Bounded_Text := Make_Text ("{$$$}");
    Doc_Main     : JSONB_Document;
+   Doc_Parsed   : JSONB_Document;
    Doc_Filter   : JSONB_Document;
    JSON_Stat    : Engine_Status;
    Field_Hit    : Boolean;
@@ -179,26 +293,40 @@ procedure Nhe_O_Main is
    --  4 & 5. ACID Transaction, MVCC, WAL Recovery & 4KB TOAST Overflow variables
    Next_Tx       : Valid_Tx_Id := 1;
    Tx_1          : Transaction_Context;
+   Tx_Uncomm     : Transaction_Context;
    Tx_Toast      : Transaction_Context;
    Tuple_1       : MVCC_Tuple_Header;
+   Tuple_Uncomm  : MVCC_Tuple_Header;
+   CLOG_Test     : Commit_Log := [others => Tx_Active];
+   Slot_Page_In  : Slotted_Page;
+   Slot_Page_Out : Slotted_Page;
+   Slot_Buf      : Page_Buffer;
+   Slot_Dec_Ok   : Boolean;
    Page_Out      : constant Page_Buffer := [1 => 16#4E#, 2 => 16#48#, 3 => 16#45#, 4 => 16#4F#, others => 0];
-   Page_In       : Page_Buffer := [others => 0];
-   Dec_Page      : Page_Buffer := [others => 0];
-   WAL_In        : WAL_Frame_Buffer := [others => 0];
+   Page_Uncomm   : constant Page_Buffer := [1 => 16#DE#, 2 => 16#AD#, others => 0];
+   Page_In       : Page_Buffer;
+   Dec_Page      : Page_Buffer;
+   WAL_In        : WAL_Frame_Buffer;
+   WAL_Uncomm    : WAL_Frame_Buffer;
+   WAL_Crc       : Unsigned_32;
    Dec_Tx        : Valid_Tx_Id;
    Dec_Page_Id   : Valid_Page_Id;
+   Dec_Kind      : WAL_Frame_Kind;
    DB_File       : constant Bounded_Text := Make_Text ("/tmp/nhe_o_verify.nhe_o");
    WAL_File      : constant Bounded_Text := Make_Text ("/tmp/nhe_o_verify.nhe_o.wal");
+   KV_WAL_File   : constant Bounded_Text := Make_Text ("/tmp/nhe_o_kv.nhe_o.wal");
    NUL_Path      : Bounded_Text := Make_Text ("/tmp/nhe_o_bad");
    Tx_Status     : Engine_Status;
    Read_Ok       : Boolean;
    WAL_Read_Ok   : Boolean;
+   WAL_EOF       : Boolean;
+   WAL_App_Ok    : Boolean;
    NUL_Write_Ok  : Boolean;
    CRC_Before    : Unsigned_32;
    CRC_After     : Unsigned_32;
    Toast_Out     : constant TOAST_Payload_Buffer :=
      [1 => 16#51#, 4081 => 16#57#, 8161 => 16#45#, 10000 => 16#4E#, others => 16#2A#];
-   Toast_In      : TOAST_Payload_Buffer := [others => 0];
+   Toast_In      : TOAST_Payload_Buffer;
    Toast_Len_Out : TOAST_Payload_Length;
    Toast_Ptr     : TOAST_Pointer;
    Toast_Bytes   : TOAST_Pointer_Bytes;
@@ -216,6 +344,7 @@ procedure Nhe_O_Main is
    BTree_Page    : Page_Buffer;
    BTree_Dec_Nd  : BTree_Node;
    BTree_Dec_Ok  : Boolean;
+   Big_Key_Base  : constant Integer_64 := 5_000_000_000;
 
    --  7. Multi-Layer HNSW Graph Index variables
    Graph_Idx     : HNSW_Index;
@@ -226,10 +355,12 @@ procedure Nhe_O_Main is
 
    --  8. Redis-Compatible Key-Value Cache variables
    Cache      : KV_Store;
+   Cache_Rec  : KV_Store;
    KV_Val     : Bounded_Text;
    KV_Status  : Engine_Status;
    KV_Removed : Boolean;
    Counter_V  : Integer_64;
+   KV_Rec_Cnt : Natural;
 
    --  9. Dual-Mode Pub/Sub Broker & WAL Commit Barrier variables
    Broker      : PubSub_Broker;
@@ -247,7 +378,9 @@ procedure Nhe_O_Main is
 
    --  10. Universal Local LLM RAG & Hybrid SQL Query Executor variables
    RAG_Store      : RAG_Engine;
+   RAG_Recovered  : RAG_Engine;
    Tx_RAG         : Transaction_Context;
+   Tx_RAG_Aborted : Transaction_Context;
    RAG_Staging    : Tx_Notification_Buffer;
    Meta_Doc_1     : JSONB_Document;
    Meta_Doc_2     : JSONB_Document;
@@ -257,7 +390,7 @@ procedure Nhe_O_Main is
       5000 => Character'Pos ('!'), others => Character'Pos (' ')];
    Parent_Chunk_2 : constant TOAST_Payload_Buffer :=
      [1 => Character'Pos ('A'), 2 => Character'Pos ('d'), 3 => Character'Pos ('a'), others => Character'Pos ('.')];
-   Fetched_Chunk  : TOAST_Payload_Buffer := [others => 0];
+   Fetched_Chunk  : TOAST_Payload_Buffer;
    RAG_Res        : RAG_Query_Result;
    RAG_Status     : Engine_Status;
 
@@ -276,11 +409,21 @@ procedure Nhe_O_Main is
    C_Hit_Cnt     : int;
    C_Top_Doc     : int;
    C_Top_Dist    : C_float;
-   C_Par_Bytes   : int;
    C_Graph_Hit   : int;
+   C_Exists_Flag : int;
+   C_Updated_Flg : int;
+   C_Rem_TTL     : Integer_64;
+   C_Vec_ND_A    : constant C_Vec_Buf := [1 => 1.0, 2 => 0.0, 3 => 0.0, 4 => 0.0, others => 0.0];
+   C_Vec_ND_B    : constant C_Vec_Buf := [1 => 0.0, 2 => 3.0, 3 => 4.0, 4 => 0.0, others => 0.0];
+   C_Top_Par_Buf : C_Text_Buf         := [others => nul];
+   C_Top_Par_Len : int;
 
 begin
-   Read_CLI_Arg (1, CLI_Arg1, Has_CLI_Arg1);
+   Read_CLI_Arg (1, CLI_Arg1, Has_CLI_Arg1, Long_Arg1);
+   if Long_Arg1 then
+      Set_Exit_Failure;
+      return;
+   end if;
    if Has_CLI_Arg1 and then not Equal_Text (CLI_Arg1, Make_Text ("--verify")) then
       Run_CLI_Command (CLI_Arg1, CLI_Handled);
       if CLI_Handled then
@@ -303,9 +446,13 @@ begin
    Check (SQL_Desc.Has_Pg_Type_Cast);
    Check (SQL_Desc.Has_Vector_Operator);
    Check (SQL_Desc.Has_JSONB_Operator);
+   Check (SQL_Desc.Has_Where and then SQL_Desc.Has_Order_By and then SQL_Desc.Has_Limit);
+   Check (SQL_Desc.Limit_Value = 5);
+   Check (Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("documents")));
 
    Analyze_SQL (SQL_Vec_Only, SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Ok and then not SQL_Desc.Has_JSONB_Operator);
+   Check (SQL_Desc.Limit_Value = 10);
 
    Analyze_SQL (SQL_Quoted_Noise, SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Ok and then not SQL_Desc.Has_Vector_Operator);
@@ -313,13 +460,30 @@ begin
    Analyze_SQL (SQL_Create_Idx, SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Invalid_Syntax);
 
+   Analyze_SQL (SQL_Create_Tbl, SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Kind = Stmt_Create_Table);
+   Check (SQL_Desc.Column_Count = 4);
+
+   Analyze_SQL (SQL_Tight_QMark, SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Has_JSONB_Operator);
+
+   Analyze_SQL (SQL_Bad_Quote, SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+
+   Analyze_SQL (SQL_Bad_Comment, SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+
    Resolve_Pg_Type (Make_Ident ("JSONB"), Resolved_T, Type_Valid);
    Check (Type_Valid and then Resolved_T = Pg_JSONB);
    Resolve_Pg_Type (Make_Ident ("VECTOR(4096)"), Resolved_T, Type_Valid);
    Check (Type_Valid and then Resolved_T = Pg_Vector);
+   Resolve_Pg_Type (Make_Ident ("VECTOR(0)"), Resolved_T, Type_Valid);
+   Check (not Type_Valid);
+   Resolve_Pg_Type (Make_Ident ("VECTOR(9999)"), Resolved_T, Type_Valid);
+   Check (not Type_Valid);
    Resolve_Pg_Type (Make_Ident ("NUMERIC(10,2)"), Resolved_T, Type_Valid);
    Check (Type_Valid and then Resolved_T = Pg_Numeric);
-   Print_Line ("  => Passed: PostgreSQL SELECT with $1::vector, VECTOR(4096), <->, ->>, and @> parsed.");
+   Print_Line ("  => Passed: PostgreSQL SELECT/DDL, comment/quote sanitization, and VECTOR(1..4096) verified.");
 
    --  2. Verify Vector Similarity & 4096-D Int8 / Binary Quantization (`ADR-003`)
    Print_Line ("[2/11] Verifying 4096-D Vector Engine & Int8/Binary Quantization (Nhe_O.Vector)...");
@@ -337,24 +501,42 @@ begin
    Check (NIP_AC >= -0.001 and then NIP_AC <= 0.001);
 
    --  Verify 4096-D Scalar (Int8) and Binary (1-bit Hamming) quantization
-   Q_Int8_A  := Quantize_To_Int8 (Vec_4096_A);
-   Q_Int8_B  := Quantize_To_Int8 (Vec_4096_B);
-   Deq_Vec_A := Dequantize_From_Int8 (Q_Int8_A);
-   Int8_Dist := Int8_L2_Distance_Squared (Q_Int8_A, Q_Int8_B);
+   Q_Int8_A    := Quantize_To_Int8 (Vec_4096_A);
+   Q_Int8_B    := Quantize_To_Int8 (Vec_4096_B);
+   Deq_Vec_A   := Dequantize_From_Int8 (Q_Int8_A);
+   Int8_Dist   := Int8_L2_Distance_Squared (Q_Int8_A, Q_Int8_B);
+   Int8_Scaled := Int8_L2_Distance (Q_Int8_A, Q_Int8_B);
    Check (Q_Int8_A.Dim = 4096 and then Deq_Vec_A.Dim = 4096);
-   Check (Int8_Dist > 0);
+   Check (Int8_Dist > 0 and then Int8_Scaled > 0.0);
    Check (Int8_Inner_Product (Q_Int8_A, Q_Int8_A) > 0);
+
+   --  Verify saturation on extreme scale in Dequantize_From_Int8 (CRIT-07)
+   Q_Int8_Sat := (Dim => 3, Scale => Max_Component / 100.0, Elements => [1 => 127, 2 => -127, others => 0]);
+   Deq_Vec_Sat := Dequantize_From_Int8 (Q_Int8_Sat);
+   Check (Deq_Vec_Sat.Elements (1) >= Max_Component - 1.0
+          and then Deq_Vec_Sat.Elements (2) <= -Max_Component + 1.0);
+
+   --  Verify 4096-D Float32 TOAST serialization round-trip (Q-003)
+   Encode_Vector_TOAST (Vec_4096_A, Vec_Toast_Buf, Vec_Toast_Len);
+   Check (Vec_Toast_Len = 4096 * 4);
+   Decode_Vector_TOAST (Vec_Toast_Buf, Vec_Toast_Len, 4096, Vec_Dec_4096, Vec_Dec_Ok);
+   Check (Vec_Dec_Ok and then Vec_Dec_4096.Dim = 4096);
+   Check (abs (Vec_Dec_4096.Elements (1) - 1.0) < 0.0001
+          and then abs (Vec_Dec_4096.Elements (2048) - (-1.0)) < 0.0001);
 
    Q_Bin_A  := Quantize_To_Binary (Vec_4096_A);
    Q_Bin_B  := Quantize_To_Binary (Vec_4096_B);
    Ham_Dist := Hamming_Distance (Q_Bin_A, Q_Bin_B);
    Check (Ham_Dist = 2);
    Check (Hamming_Distance (Q_Bin_A, Q_Bin_A) = 0);
-   Print_Line ("  => Passed: 4096-D Float32, Int8 (SQ8 4x), and Binary (1-bit Hamming 32x) verified.");
+   Print_Line ("  => Passed: 4096-D Float32, SQ8 scale-aware L2, Binary Hamming, and Vector TOAST verified.");
 
    --  3. Verify PostgreSQL JSON / JSONB Engine (`->`, `->>`, `@>`, `?`)
    Print_Line ("[3/11] Verifying PostgreSQL JSON/JSONB Engine (Nhe_O.JSON)...");
    Check (Is_Valid_JSON (Raw_JSON));
+   Check (Is_Valid_JSON (Scalar_True));
+   Check (Is_Valid_JSON (Scalar_Num));
+   Check (Is_Valid_JSON (Scalar_Str));
    Check (not Is_Valid_JSON (Bad_JSON_1));
    Check (not Is_Valid_JSON (Bad_JSON_2));
    Check (not Is_Valid_JSON (Bad_JSON_3));
@@ -362,6 +544,17 @@ begin
    Check (not Is_Valid_JSON (Bad_JSON_5));
    Check (not Is_Valid_JSON (Bad_JSON_6));
    Check (not Is_Valid_JSON (Bad_JSON_7));
+
+   Parse_JSONB (Raw_JSON, Doc_Parsed, JSON_Stat);
+   Check (JSON_Stat = Status_Ok and then Doc_Parsed.Count = 4);
+   Get_Field (Doc_Parsed, Make_Ident ("engine"), Field_Hit, Field_Val, Field_Kind);
+   Check (Field_Hit and then Field_Kind = JSONB_String and then Equal_Text (Field_Val, Make_Text ("""Nhe_O""")));
+   Get_Field_Text (Doc_Parsed, Make_Ident ("engine"), Field_Hit, Field_Val);
+   Check (Field_Hit and then Equal_Text (Field_Val, Make_Text ("Nhe_O")));
+
+   Put_Field (Doc_Main, Make_Ident ("bad_num"), Make_Text ("not_a_number"), JSONB_Number, JSON_Stat);
+   Check (JSON_Stat = Status_Invalid_Syntax);
+
    Put_Field (Doc_Main, Make_Ident ("engine"), Make_Text ("Nhe_O"), JSONB_String, JSON_Stat);
    Check (JSON_Stat = Status_Ok);
    Put_Field (Doc_Main, Make_Ident ("lang"), Make_Text ("vi"), JSONB_String, JSON_Stat);
@@ -370,20 +563,44 @@ begin
    Check (JSON_Stat = Status_Ok);
    Check (Has_Key (Doc_Main, Make_Ident ("engine")));
    Get_Field (Doc_Main, Make_Ident ("engine"), Field_Hit, Field_Val, Field_Kind);
-   Check (Field_Hit and then Field_Kind = JSONB_String);
+   Check (Field_Hit and then Field_Kind = JSONB_String and then Equal_Text (Field_Val, Make_Text ("""Nhe_O""")));
    Get_Field_Text (Doc_Main, Make_Ident ("engine"), Field_Hit, Field_Val);
    Check (Field_Hit and then Equal_Text (Field_Val, Make_Text ("Nhe_O")));
    Check (Contains (Doc_Main, Doc_Filter));
-   Print_Line ("  => Passed: JSON syntax check and JSONB `?`, `->`, `->>`, `@>` operators verified.");
+   Print_Line ("  => Passed: RFC 8259 JSON validator, Parse_JSONB, and `?`, `->`, `->>`, `@>` verified.");
 
-   --  4. Verify ACID MVCC Visibility & Disk WAL/Page Persistence
-   Print_Line ("[4/11] Verifying ACID Transactions, MVCC & Disk WAL I/O (Nhe_O.Transaction / Nhe_O.IO)...");
+   --  4. Verify ACID MVCC Visibility, CLOG, Slotted Page & Disk WAL/Page Persistence
+   Print_Line ("[4/11] Verifying ACID Transactions, CLOG MVCC, Slotted Page & WAL I/O...");
    Delete_File_If_Exists (DB_File);
    Delete_File_If_Exists (WAL_File);
 
    Begin_Tx (Next_Tx, Tx_1);
    Tuple_1 := (Xmin => Tx_1.Id, Xmax => 0);
    Check (Is_Tuple_Visible (Tuple_1, Tx_1.Snapshot));
+
+   --  Verify CLOG rejects uncommitted/aborted tuple from another transaction (CRIT-04)
+   Begin_Tx (Next_Tx, Tx_Uncomm);
+   Tuple_Uncomm := (Xmin => Tx_1.Id, Xmax => 0);
+   Check (not Is_Tuple_Visible (Tuple_Uncomm, Tx_Uncomm.Snapshot, CLOG_Test));
+   Set_CLOG_State (CLOG_Test, Tx_1.Id, Tx_Committed);
+   Check (Is_Tuple_Visible (Tuple_Uncomm, Tx_Uncomm.Snapshot, CLOG_Test));
+
+   --  Verify Slotted_Page 4KB encode/decode with CRC32 (CRIT-01)
+   Slot_Page_Out := (others => <>);
+   Slot_Page_Out.Page_Id     := 1;
+   Slot_Page_Out.Page_LSN_Tx := 1;
+   Slot_Page_Out.Slot_Count  := 1;
+   Slot_Page_Out.Tuples (1)  :=
+     (Occupied    => True,
+      Row_Id      => 42,
+      Tuple_Hdr   => Tuple_1,
+      Toast_Ptr   => (Root_Overflow_Page => 2, Total_Byte_Length => 4080, Chunk_Count => 1, Payload_CRC32 => 0),
+      Related_Id  => 7,
+      Inline_Len  => 5,
+      Inline_Data => [1 => 16#4E#, 2 => 16#68#, 3 => 16#65#, 4 => 16#5F#, 5 => 16#4F#, others => 0]);
+   Encode_Slotted_Page (Slot_Page_Out, Slot_Buf);
+   Decode_Slotted_Page (Slot_Buf, Slot_Page_In, Slot_Dec_Ok);
+   Check (Slot_Dec_Ok and then Slot_Page_In.Slot_Count = 1 and then Slot_Page_In.Tuples (1).Row_Id = 42);
 
    CRC_Before := Compute_CRC32 (Page_Out);
    Commit_Tx (Tx_1, DB_File, WAL_File, 0, Page_Out, Tx_Status);
@@ -393,10 +610,11 @@ begin
    CRC_After := Compute_CRC32 (Page_In);
    Check (Read_Ok and then CRC_Before = CRC_After);
 
-   Read_WAL_Frame (WAL_File, 0, WAL_In, WAL_Read_Ok);
-   if WAL_Read_Ok and then Verify_WAL_Frame (WAL_In) then
+   Read_WAL_Frame (WAL_File, 0, WAL_In, WAL_Read_Ok, WAL_EOF);
+   if WAL_Read_Ok and then not WAL_EOF and then Verify_WAL_Frame (WAL_In) then
+      Dec_Kind := Get_WAL_Frame_Kind (WAL_In);
       Decode_WAL_Frame (WAL_In, Dec_Tx, Dec_Page_Id, Dec_Page);
-      Check (Dec_Tx = Tx_1.Id and then Dec_Page_Id = 0);
+      Check (Dec_Tx = Tx_1.Id and then Dec_Page_Id = 0 and then Dec_Kind = WAL_Frame_Commit);
       Check (Compute_CRC32 (Dec_Page) = CRC_Before);
    else
       Check (False);
@@ -407,10 +625,10 @@ begin
    NUL_Path.Data (6) := ASCII.NUL;
    Write_Page (NUL_Path, 0, Page_Out, NUL_Write_Ok);
    Check (not NUL_Write_Ok);
-   Print_Line ("  => Passed: MVCC snapshot visibility, WAL frame append, and 4KB page CRC32 verified.");
+   Print_Line ("  => Passed: CLOG MVCC visibility, 4KB Slotted_Page, and positional WAL I/O verified.");
 
-   --  5. Verify 4KB TOAST Overflow Page Chains & WAL Crash Recovery (`ADR-003` / `BR-006`)
-   Print_Line ("[5/11] Verifying 4KB TOAST Overflow Page Chains & WAL Recovery (Nhe_O.Transaction)...");
+   --  5. Verify 4KB TOAST Overflow Page Chains & 2-Pass Committed-Only WAL Recovery (`CRIT-05`)
+   Print_Line ("[5/11] Verifying 4KB TOAST Overflow Page Chains & 2-Pass WAL Recovery...");
    Begin_Tx (Next_Tx, Tx_Toast);
    Write_TOAST_Chain
      (Ctx           => Tx_Toast,
@@ -430,6 +648,14 @@ begin
    Decode_TOAST_Pointer (Toast_Bytes, Toast_Dec_Ptr, Toast_Ptr_Ok);
    Check (Toast_Ptr_Ok and then Toast_Dec_Ptr = Toast_Ptr);
 
+   --  Verify Decode_TOAST_Pointer rejects inconsistent Chunk_Count (LOW-01)
+   Toast_Bytes (9) := 1;
+   Decode_TOAST_Pointer (Toast_Bytes, Toast_Dec_Ptr, Toast_Ptr_Ok);
+   Check (not Toast_Ptr_Ok);
+   Encode_TOAST_Pointer (Toast_Ptr, Toast_Bytes);
+   Decode_TOAST_Pointer (Toast_Bytes, Toast_Dec_Ptr, Toast_Ptr_Ok);
+   Check (Toast_Ptr_Ok);
+
    if Toast_Dec_Ptr.Total_Byte_Length in 1 .. Max_TOAST_Payload_Bytes
      and then Toast_Dec_Ptr.Chunk_Count in 1 .. Max_TOAST_Chunks
    then
@@ -441,13 +667,26 @@ begin
       Check (False);
    end if;
 
-   --  Simulate crash recovery by deleting DB_File and replaying WAL frames via Redo_WAL_Recovery
+   --  Commit Tx_Toast so its frames have a WAL_Frame_Commit marker
+   Commit_Tx (Tx_Toast, DB_File, WAL_File, 0, Page_Out, Tx_Status);
+   Check (Tx_Status = Status_Ok);
+
+   --  Append an UNCOMMITTED WAL frame from Tx_Uncomm for Page 0 and verify 2-pass Redo skips it (CRIT-05)
+   Encode_WAL_Frame (Tx_Uncomm.Id, 0, Page_Uncomm, WAL_Crc, WAL_Uncomm, WAL_Frame_Data);
+   Append_WAL_Frame (WAL_File, WAL_Uncomm, WAL_App_Ok);
+   Check (WAL_App_Ok);
+   Rollback_Tx (Tx_Uncomm);
+
+   --  Simulate crash recovery by deleting DB_File and replaying only committed WAL frames
    Delete_File_If_Exists (DB_File);
    Redo_WAL_Recovery (DB_File, WAL_File, 16, Replayed_Cnt, Max_Rec_Tx, Tx_Status);
-   Check (Tx_Status = Status_Ok and then Replayed_Cnt = 4);
+   Check (Tx_Status = Status_Ok and then Replayed_Cnt = 5);
    Check (Max_Rec_Tx = Tx_Toast.Id);
 
-   Toast_In := [others => 0];
+   --  Verify Page 0 has committed Page_Out, NOT uncommitted Page_Uncomm
+   Read_Page (DB_File, 0, Page_In, Read_Ok);
+   Check (Read_Ok and then Page_In (1) = 16#4E# and then Page_In (2) = 16#48#);
+
    if Toast_Dec_Ptr.Total_Byte_Length in 1 .. Max_TOAST_Payload_Bytes
      and then Toast_Dec_Ptr.Chunk_Count in 1 .. Max_TOAST_Chunks
    then
@@ -457,51 +696,78 @@ begin
    else
       Check (False);
    end if;
-   Commit_Tx (Tx_Toast, DB_File, WAL_File, 0, Page_Out, Tx_Status);
-   Check (Tx_Status = Status_Ok);
-   Print_Line ("  => Passed: 16-byte TOAST pointer, 3-page 4KB overflow chain, and WAL Redo verified.");
+   Print_Line ("  => Passed: 16-byte TOAST pointer, 3-page chain, and 2-pass committed-only WAL Redo verified.");
 
-   --  6. Verify Multi-Page B+Tree Index with Deterministic Node Splitting (`Nhe_O.BTree`)
-   Print_Line ("[6/11] Verifying Multi-Page B+Tree Index & Leaf Splitting (Nhe_O.BTree)...");
+   --  6. Verify Multi-Page B+Tree Index with Multi-Level Splitting (`Nhe_O.BTree`)
+   Print_Line ("[6/11] Verifying Multi-Page B+Tree Index & Multi-Level Splitting (Nhe_O.BTree)...");
    Init_BTree (Tree_Idx);
-   for K in 1 .. 10 loop
+   for K in 1 .. 20 loop
       pragma Loop_Invariant
         (Tree_Idx.Node_Count in 1 .. Max_BTree_Nodes
          and then Tree_Idx.Root_Node in 1 .. Tree_Idx.Node_Count);
       Insert_Key
         (Tree   => Tree_Idx,
-         Key    => Integer_64 (K * 10),
+         Key    => Big_Key_Base + Integer_64 (K * 10),
          Ptr    => (Target_Page => K,
                     Target_Slot => K,
                     TOAST_Root  => K + 100),
          Status => BTree_Stat);
       Check (BTree_Stat = Status_Ok);
    end loop;
-   Check (Tree_Idx.Total_Keys = 10);
-   Check (Tree_Idx.Split_Count >= 2);
+   Check (Tree_Idx.Total_Keys = 20);
+   Check (Tree_Idx.Split_Count >= 5);
    Check (Tree_Idx.Nodes (Tree_Idx.Root_Node).Kind = Node_Internal);
 
-   Search_Key (Tree_Idx, 70, BTree_Hit, BTree_Ptr);
-   Check (BTree_Hit and then BTree_Ptr.Target_Page = 7 and then BTree_Ptr.TOAST_Root = 107);
+   for K in 1 .. 20 loop
+      pragma Loop_Invariant (K in 1 .. 20);
+      Search_Key (Tree_Idx, Big_Key_Base + Integer_64 (K * 10), BTree_Hit, BTree_Ptr);
+      Check (BTree_Hit and then BTree_Ptr.Target_Page = K and then BTree_Ptr.TOAST_Root = K + 100);
+   end loop;
 
-   Range_Scan (Tree_Idx, 30, 80, BTree_Scan);
-   Check (BTree_Scan.Count = 6);
-   Check (BTree_Scan.Items (1).Key = 30 and then BTree_Scan.Items (6).Key = 80);
 
-   Encode_Node_Page (Tree_Idx.Nodes (1), BTree_Page);
+   Range_Scan (Tree_Idx, Big_Key_Base + 30, Big_Key_Base + 120, BTree_Scan);
+   Check (BTree_Scan.Count = 10);
+   Check (BTree_Scan.Items (1).Key = Big_Key_Base + 30
+          and then BTree_Scan.Items (10).Key = Big_Key_Base + 120);
+
+   Encode_Node_Page (Tree_Idx.Nodes (Tree_Idx.Root_Node), BTree_Page);
    Decode_Node_Page (BTree_Page, BTree_Dec_Nd, BTree_Dec_Ok);
-   Check (BTree_Dec_Ok and then BTree_Dec_Nd.Num_Keys = Tree_Idx.Nodes (1).Num_Keys);
-   Print_Line ("  => Passed: B+Tree leaf/root splits, key lookup, range scan, and 4KB page encoding verified.");
+   Check (BTree_Dec_Ok
+          and then BTree_Dec_Nd.Num_Keys = Tree_Idx.Nodes (Tree_Idx.Root_Node).Num_Keys
+          and then BTree_Dec_Nd.Keys (1) = Tree_Idx.Nodes (Tree_Idx.Root_Node).Keys (1)
+          and then BTree_Dec_Nd.Children (1) = Tree_Idx.Nodes (Tree_Idx.Root_Node).Children (1));
+   BTree_Page (25) := BTree_Page (25) xor 16#FF#;
+   Decode_Node_Page (BTree_Page, BTree_Dec_Nd, BTree_Dec_Ok);
+   Check (not BTree_Dec_Ok);
+   Print_Line ("  => Passed: 20-key multi-level B+Tree splits, 64-bit keys, range scan, and CRC32 page verified.");
 
    --  7. Verify Multi-Layer HNSW Graph Index (`Nhe_O.HNSW`)
    Print_Line ("[7/11] Verifying Multi-Layer HNSW Vector Graph Index (Nhe_O.HNSW)...");
    Init_HNSW (Graph_Idx, Dim => 3);
-   Insert_Vector (Graph_Idx, Doc_Id => 1, Vec => Make_Vector_3D (1.0, 0.0, 0.0), TOAST_Root => 10, Layer_Hint => 3, Status => HNSW_Stat);
+   Insert_Vector (Graph_Idx, Doc_Id => 1, Vec => Make_Vector_3D (10.0, 0.0, 0.0), TOAST_Root => 10, Layer_Hint => 3, Status => HNSW_Stat);
    Check (HNSW_Stat = Status_Ok);
+   --  Verify Doc_Id deduplication updates in-place without duplicating node (CRIT-06)
+   Insert_Vector (Graph_Idx, Doc_Id => 1, Vec => Make_Vector_3D (1.0, 0.0, 0.0), TOAST_Root => 10, Layer_Hint => 3, Status => HNSW_Stat);
+   Check (HNSW_Stat = Status_Ok and then Graph_Idx.Node_Count = 1);
+
    Insert_Vector (Graph_Idx, Doc_Id => 2, Vec => Make_Vector_3D (0.9, 0.1, 0.0), TOAST_Root => 11, Layer_Hint => 2, Status => HNSW_Stat);
    Check (HNSW_Stat = Status_Ok);
    Insert_Vector (Graph_Idx, Doc_Id => 3, Vec => Make_Vector_3D (-1.0, -1.0, -1.0), TOAST_Root => 12, Layer_Hint => 1, Status => HNSW_Stat);
    Check (HNSW_Stat = Status_Ok);
+   for D in 4 .. 10 loop
+      pragma Loop_Invariant
+        (Graph_Idx.Dim = 3
+         and then Graph_Idx.Node_Count <= Max_HNSW_Nodes);
+      Insert_Vector
+        (Graph_Idx,
+         Doc_Id     => D,
+         Vec        => Make_Vector_3D (0.0, Float (D), Float (D)),
+         TOAST_Root => Valid_Page_Id (D + 10),
+         Layer_Hint => 1,
+         Status     => HNSW_Stat);
+      Check (HNSW_Stat = Status_Ok);
+   end loop;
+   Check (Graph_Idx.Node_Count = 10);
 
    Search_KNN (Graph_Idx, Make_Vector_3D (1.0, 0.0, 0.0), Encoding_Float32, K => 2, Results => KNN_Float_Res);
    Check (KNN_Float_Res.Count = 2 and then KNN_Float_Res.Items (1).Doc_Id = 1);
@@ -511,10 +777,11 @@ begin
 
    Search_KNN (Graph_Idx, Make_Vector_3D (1.0, 0.0, 0.0), Encoding_Binary_1Bit, K => 2, Results => KNN_Bin_Res);
    Check (KNN_Bin_Res.Count = 2 and then KNN_Bin_Res.Items (1).Doc_Id in 1 .. 2);
-   Print_Line ("  => Passed: Multi-layer HNSW ANN search verified across Float32, Int8, and Binary modes.");
+   Print_Line ("  => Passed: 10-node HNSW graph, Doc_Id dedup, and Float32/Int8-SQ8/Binary recall verified.");
 
-   --  8. Verify Redis-Compatible Key-Value Cache & TTL Expiration
-   Print_Line ("[8/11] Verifying Redis-Compatible Key-Value Cache & TTL (Nhe_O.KV)...");
+   --  8. Verify Redis-Compatible Key-Value Cache, TTL & WAL Persistence (`Q-004`)
+   Print_Line ("[8/11] Verifying Redis-Compatible Key-Value Cache, TTL & WAL Recovery (Nhe_O.KV)...");
+   Delete_File_If_Exists (KV_WAL_File);
    Set (Cache, Make_Ident ("session:42"), Make_Text ("user_long"), Now => 1000, Has_TTL => True, TTL_Sec => 60);
    Check (Exists (Cache, Make_Ident ("session:42"), Now => 1030));
    Check (Remaining_TTL (Cache, Make_Ident ("session:42"), Now => 1030) = 30);
@@ -532,7 +799,22 @@ begin
    Check (KV_Status = Status_Ok and then Counter_V = 15);
    Del (Cache, Make_Ident ("metrics:hits"), KV_Removed);
    Check (KV_Removed);
-   Print_Line ("  => Passed: Redis SETEX, GET, DEL, TTL lazy expiration, and atomic INCRBY verified.");
+
+   --  Verify optional WAL-backed KV durability and recovery (Q-004)
+   Set_Durable (Cache, KV_WAL_File, 1, Make_Ident ("durable:k1"), Make_Text ("v1"), 2000, True, 500, KV_Status);
+   Check (KV_Status = Status_Ok);
+   Set_Durable (Cache, KV_WAL_File, 2, Make_Ident ("durable:k2"), Make_Text ("v2"), 2000, False, 0, KV_Status);
+   Check (KV_Status = Status_Ok);
+   Del_Durable (Cache, KV_WAL_File, 3, Make_Ident ("durable:k2"), KV_Removed, KV_Status);
+   Check (KV_Removed and then KV_Status = Status_Ok);
+
+   Recover_KV_From_WAL (Cache_Rec, KV_WAL_File, 2100, 8, KV_Rec_Cnt, KV_Status);
+   Check (KV_Status = Status_Ok and then KV_Rec_Cnt = 3);
+   Get (Cache_Rec, Make_Ident ("durable:k1"), Now => 2100, Val => KV_Val, Status => KV_Status);
+   Check (KV_Status = Status_Ok and then Equal_Text (KV_Val, Make_Text ("v1")));
+   Check (not Exists (Cache_Rec, Make_Ident ("durable:k2"), Now => 2100));
+   Delete_File_If_Exists (KV_WAL_File);
+   Print_Line ("  => Passed: Redis SETEX, GET, DEL, TTL, INCRBY, and optional KV WAL recovery verified.");
 
    --  9. Verify Dual-Mode Pub/Sub & WAL Commit Barrier (`ADR-004` / `BR-005`)
    Print_Line ("[9/11] Verifying Dual-Mode Pub/Sub & WAL Commit Barrier (Nhe_O.PubSub)...");
@@ -552,7 +834,12 @@ begin
 
    Begin_Tx (Next_Tx, Tx_Notify_1);
    Stage_Notify (Tx_Notify_1, Staging_Buf, Make_Ident ("rag.abort"), Make_Text ("phantom_doc"), Sub_Stat);
-   Check (Sub_Stat = Status_Ok and then Staging_Buf.Count = 1);
+   Check (Sub_Stat = Status_Ok and then Staging_Buf.Count = 1 and then Staging_Buf.Owner_Tx = Tx_Notify_1.Id);
+   --  Verify Owner_Tx mismatch is rejected (HIGH-07)
+   Begin_Tx (Next_Tx, Tx_Notify_2);
+   Stage_Notify (Tx_Notify_2, Staging_Buf, Make_Ident ("rag.hijack"), Make_Text ("bad"), Sub_Stat);
+   Check (Sub_Stat = Status_Tx_Aborted);
+
    Poll_Message (Broker, Sub_Durable, Msg_Out, Msg_Found);
    Check (not Msg_Found);
    Rollback_Tx (Tx_Notify_1);
@@ -561,7 +848,6 @@ begin
    Poll_Message (Broker, Sub_Durable, Msg_Out, Msg_Found);
    Check (not Msg_Found);
 
-   Begin_Tx (Next_Tx, Tx_Notify_2);
    Stage_Notify (Tx_Notify_2, Staging_Buf, Make_Ident ("rag.commit"), Make_Text ("doc_id=1"), Sub_Stat);
    Check (Sub_Stat = Status_Ok);
    Commit_Tx (Tx_Notify_2, DB_File, WAL_File, 0, Page_Out, Tx_Status);
@@ -573,10 +859,12 @@ begin
    end if;
    Poll_Message (Broker, Sub_Durable, Msg_Out, Msg_Found);
    Check (Msg_Found and then Equal_Text (Msg_Out.Payload, Make_Text ("doc_id=1")));
-   Print_Line ("  => Passed: Immediate PUBLISH and WAL-Commit-Gated DURABLE NOTIFY verified.");
+   Print_Line ("  => Passed: Immediate PUBLISH, Owner_Tx guard, and WAL-Commit-Gated NOTIFY verified.");
 
    --  10. Verify Universal Local LLM RAG & Hybrid SQL Query Executor (`Nhe_O.RAG`)
    Print_Line ("[10/11] Verifying Universal Local LLM RAG & Hybrid SQL Executor (Nhe_O.RAG)...");
+   Delete_File_If_Exists (DB_File);
+   Delete_File_If_Exists (WAL_File);
    Init_RAG_Engine (RAG_Store, Dim => 3);
    Put_Field (Meta_Doc_1, Make_Ident ("lang"), Make_Text ("vi"), JSONB_String, JSON_Stat);
    Put_Field (Meta_Doc_1, Make_Ident ("model"), Make_Text ("qwen-3.8-35b-a3b"), JSONB_String, JSON_Stat);
@@ -601,7 +889,7 @@ begin
       Status         => RAG_Status);
    Check (RAG_Status = Status_Ok);
 
-   if RAG_Store.Next_TOAST_Pg <= Max_Page_Id - Max_TOAST_Chunks then
+   if RAG_Store.Next_TOAST_Pg <= Max_Safe_TOAST_Page then
       Ingest_Document
         (Engine         => RAG_Store,
          Ctx            => Tx_RAG,
@@ -622,21 +910,48 @@ begin
       Check (False);
    end if;
 
-   Commit_Tx (Tx_RAG, DB_File, WAL_File, 0, Page_Out, Tx_Status);
+   Build_RAG_Slotted_Page (RAG_Store, Tx_RAG.Id, Slot_Buf);
+   Commit_Tx (Tx_RAG, DB_File, WAL_File, 1, Slot_Buf, Tx_Status);
    if Tx_Status = Status_Ok and then Tx_RAG.State = Tx_Committed then
+      Set_CLOG_State (RAG_Store.CLOG, Tx_RAG.Id, Tx_Committed);
       Flush_Committed_Notifications (Tx_RAG, RAG_Staging, Broker, Total_Deliv);
       Check (Total_Deliv = 2);
    else
       Check (False);
    end if;
 
+   --  Ingest an aborted update to Doc_Id = 1 and verify MVCC prior-version preservation (CRIT-04)
+   Begin_Tx (Next_Tx, Tx_RAG_Aborted);
+   if RAG_Store.Next_TOAST_Pg <= Max_Safe_TOAST_Page then
+      Ingest_Document
+        (Engine         => RAG_Store,
+         Ctx            => Tx_RAG_Aborted,
+         DB_Path        => DB_File,
+         WAL_Path       => WAL_File,
+         Staging        => RAG_Staging,
+         Doc_Id         => 1,
+         Metadata       => Meta_Doc_1,
+         Summary_Text   => Make_Text ("Uncommitted dirty update"),
+         Embedding      => Make_Vector_3D (0.0, 1.0, 0.0),
+         Parent_Payload => Parent_Chunk_2,
+         Parent_Length  => 4_200,
+         Related_Doc_Id => 2,
+         Layer_Hint     => 3,
+         Status         => RAG_Status);
+      Check (RAG_Status = Status_Ok);
+   end if;
+   Rollback_Tx (Tx_RAG_Aborted);
+   Set_CLOG_State (RAG_Store.CLOG, Tx_RAG_Aborted.Id, Tx_Aborted);
+   Discard_Staged_Notifications (Tx_RAG_Aborted, RAG_Staging);
+
+   --  Query with Encoding_Int8_SQ8 to exercise Stage-2 TOAST Exact Re-Ranking (Q-003) and MVCC fallback
    Execute_Hybrid_RAG_Query
      (Engine            => RAG_Store,
-      Snapshot          => Tx_RAG.Id,
+      Snapshot          => Tx_RAG_Aborted.Id,
       DB_Path           => DB_File,
       SQL_Query         => SQL_Query,
       Query_Vec         => Make_Vector_3D (0.95, 0.05, 0.0),
-      Encoding          => Encoding_Float32,
+      Encoding          => Encoding_Int8_SQ8,
       Use_Meta_Filter   => True,
       Filter_Meta       => Meta_RAG_Query,
       Use_Keyword_Boost => True,
@@ -653,12 +968,16 @@ begin
    Check (RAG_Res.Graph_Neighbor_Hit);
    Check (Fetched_Chunk (1) = Character'Pos ('Q') and then Fetched_Chunk (5000) = Character'Pos ('!'));
 
+   --  Verify Recover_RAG_Engine from Primary Slotted Page 1 + TOAST chains (CRIT-01)
+   Recover_RAG_Engine (RAG_Recovered, 3, DB_File, WAL_File, RAG_Status);
+   Check (RAG_Status = Status_Ok and then RAG_Recovered.Doc_Count = 2);
+
    Unsubscribe (Broker, Sub_Exact);
    Unsubscribe (Broker, Sub_Wild);
    Unsubscribe (Broker, Sub_Durable);
    Delete_File_If_Exists (DB_File);
    Delete_File_If_Exists (WAL_File);
-   Print_Line ("  => Passed: Hybrid SQL + JSONB `@>` + Lexical + HNSW + 6KB TOAST Chunk + GraphRAG verified.");
+   Print_Line ("  => Passed: Hybrid SQL + JSONB + Stage-2 TOAST Re-Rank + Slotted Page Recovery verified.");
 
    --  11. Verify Formally Proven C ABI / FFI SDK (`Nhe_O.C_API`)
    Print_Line ("[11/11] Verifying C ABI / FFI SDK & Defensive Boundary Contracts (Nhe_O.C_API)...");
@@ -672,23 +991,49 @@ begin
    C_Vector_Distance_3D (1.0, 2.0, 2.0, 4.0, 6.0, 2.0, C_L2_Dist, C_Cos_Dist, C_Ham_Dist, C_Rc);
    Check (C_Rc = C_Status_Ok and then C_L2_Dist >= 4.99 and then C_L2_Dist <= 5.01);
 
+   C_Vector_Distance_ND (C_Vec_ND_A, C_Vec_ND_B, 4, C_L2_Dist, C_Cos_Dist, C_Ham_Dist, C_Rc);
+   Check (C_Rc = C_Status_Ok and then C_L2_Dist >= 5.09 and then C_L2_Dist <= 5.11);
+
+   --  Verify negative TTL rejection (HIGH-08)
+   C_KV_Set (C_Key_Buf, 3, C_Val_Buf, 2, 1000, -10, C_Rc);
+   Check (C_Rc = C_Status_Invalid_Arg);
+
    C_KV_Set (C_Key_Buf, 3, C_Val_Buf, 2, 1000, 60, C_Rc);
    Check (C_Rc = C_Status_Ok);
+   C_KV_Exists (C_Key_Buf, 3, 1020, C_Exists_Flag, C_Rc);
+   Check (C_Rc = C_Status_Ok and then C_Exists_Flag = 1);
+   C_KV_TTL (C_Key_Buf, 3, 1020, C_Rem_TTL, C_Rc);
+   Check (C_Rc = C_Status_Ok and then C_Rem_TTL = 40);
+   C_KV_Expire (C_Key_Buf, 3, 1020, 120, C_Updated_Flg, C_Rc);
+   Check (C_Rc = C_Status_Ok and then C_Updated_Flg = 1);
    C_KV_Get (C_Key_Buf, 3, 1020, C_Out_Val_Buf, C_Out_Val_Len, C_Rc);
    Check (C_Rc = C_Status_Ok and then C_Out_Val_Len = 2);
 
-   C_RAG_Ingest_3D (1, C_Val_Buf, 2, 1.0, 0.0, 0.0, 2, C_Rc);
+   --  Verify invalid C_Init_With_Paths resets G_Initialized and subsequent calls return C_Status_Not_Initialized
+   C_Init_With_Paths (C_Val_Buf, 0, C_Val_Buf, 0, 4, C_Rc);
+   Check (C_Rc = C_Status_Invalid_Arg);
+   C_KV_Set (C_Key_Buf, 3, C_Val_Buf, 2, 1000, 60, C_Rc);
+   Check (C_Rc = C_Status_Not_Initialized);
+
+   C_Init (C_Rc);
    Check (C_Rc = C_Status_Ok);
-   C_RAG_Ingest_3D (2, C_Val_Buf, 2, 0.9, 0.1, 0.0, 1, C_Rc);
+   C_RAG_Ingest_ND (1, C_Val_Buf, 2, C_Vec_ND_A, 3, 2, C_Rc);
    Check (C_Rc = C_Status_Ok);
-   C_RAG_Query_3D (1.0, 0.0, 0.0, 0, C_Val_Buf, 2, 2, C_Hit_Cnt, C_Top_Doc, C_Top_Dist, C_Par_Bytes, C_Graph_Hit, C_Rc);
-   Check (C_Rc = C_Status_Ok and then C_Hit_Cnt = 2 and then C_Top_Doc = 1 and then C_Graph_Hit = 1);
-   Print_Line ("  => Passed: C ABI / FFI exports, defensive range guards, and RAG FFI verified.");
+   C_RAG_Ingest_ND (2, C_Val_Buf, 2, C_Vec_ND_B, 3, 1, C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   C_RAG_Query_ND
+     (C_Vec_ND_A, 3, 0, C_Val_Buf, 2, 2,
+      C_Hit_Cnt, C_Top_Doc, C_Top_Dist, C_Top_Par_Buf, C_Top_Par_Len, C_Graph_Hit, C_Rc);
+   Check (C_Rc = C_Status_Ok and then C_Hit_Cnt = 2 and then C_Top_Doc = 1
+          and then C_Graph_Hit = 1 and then C_Top_Par_Len = 2);
+   Print_Line ("  => Passed: C ABI / FFI exports, N-D vector/RAG FFI, and defensive boundary guards verified.");
 
    Print_Blank_Line;
    if All_Passed then
-      Print_Line ("ALL 11 Nhe_O SPARK/Ada Verification Suites (Epics 01, 02 & 03) Passed Successfully.");
+      Print_Line ("ALL 11 Nhe_O SPARK/Ada Verification Suites (Epics 01..04) Passed Successfully.");
    else
       Print_Line ("[ERROR] One or more Nhe_O verification checks failed.");
    end if;
+   pragma Warnings (GNATprove, On, "statement has no effect");
+   pragma Warnings (GNATprove, On, "is set by");
 end Nhe_O_Main;

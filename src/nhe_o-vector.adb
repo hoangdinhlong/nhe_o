@@ -1,5 +1,7 @@
 pragma SPARK_Mode (On);
 
+with Nhe_O.IO; use Nhe_O.IO;
+
 package body Nhe_O.Vector is
 
    function Make_Vector_3D
@@ -246,17 +248,26 @@ package body Nhe_O.Vector is
    end Quantize_To_Int8;
 
    function Dequantize_From_Int8 (Q : Quantized_Int8_Vector) return Vector_Value is
-      Res     : Vector_Value;
-      Raw_Val : Float;
+      Res      : Vector_Value;
+      Raw_Val  : Float;
+      Abs_Elem : Float;
    begin
       Res.Dim      := Q.Dim;
       Res.Elements := [others => 0.0];
 
       for I in 1 .. Q.Dim loop
-         if Q.Scale <= Max_Component / 127.0 then
+         if Q.Elements (I) = 0 or else Q.Scale <= 0.0 then
+            Raw_Val := 0.0;
+         elsif Q.Scale <= Max_Component / 127.0 then
             Raw_Val := Float (Q.Elements (I)) * Q.Scale;
          else
-            Raw_Val := 0.0;
+            Abs_Elem := Float (abs Integer (Q.Elements (I)));
+            if Q.Scale >= Max_Component / Abs_Elem then
+               Raw_Val :=
+                 (if Q.Elements (I) > 0 then Max_Component else -Max_Component);
+            else
+               Raw_Val := Float (Q.Elements (I)) * Q.Scale;
+            end if;
          end if;
 
          if Raw_Val > Max_Component then
@@ -288,6 +299,15 @@ package body Nhe_O.Vector is
       end loop;
       return Sum;
    end Int8_L2_Distance_Squared;
+
+   function Int8_L2_Distance
+     (A, B : Quantized_Int8_Vector) return Non_Negative_Float
+   is
+      FA : constant Vector_Value := Dequantize_From_Int8 (A);
+      FB : constant Vector_Value := Dequantize_From_Int8 (B);
+   begin
+      return L2_Distance (FA, FB);
+   end Int8_L2_Distance;
 
    function Int8_Inner_Product
      (A, B : Quantized_Int8_Vector) return Integer
@@ -348,5 +368,119 @@ package body Nhe_O.Vector is
       return Dist;
    end Hamming_Distance;
 
-end Nhe_O.Vector;
+   -------------------------------------------------------------------------
+   --  4096-D Vector TOAST Serialization / Deserialization (Q-003)
+   -------------------------------------------------------------------------
 
+   procedure Encode_Vector_TOAST
+     (V       : in     Vector_Value;
+      Payload :    out TOAST_Payload_Buffer;
+      Length  :    out Valid_TOAST_Length)
+   is
+      use Interfaces;
+      Base       : TOAST_Payload_Index;
+      Comp       : Vector_Component;
+      Abs_C      : Non_Negative_Float;
+      Sign_Bit   : Unsigned_32;
+      Range_Bit  : Unsigned_32;
+      Scaled     : Float;
+      Mag_Int    : Integer;
+      Word       : Unsigned_32;
+   begin
+      Payload := [others => 0];
+      Length  := V.Dim * 4;
+
+      for I in 1 .. V.Dim loop
+         Base     := (I - 1) * 4 + 1;
+         Comp     := V.Elements (I);
+         Sign_Bit := (if Comp < 0.0 then 16#8000_0000# else 0);
+         Abs_C    := abs Comp;
+
+         if Abs_C <= 1000.0 then
+            Range_Bit := 0;
+            Scaled    := Abs_C * 1.0e6;
+         else
+            Range_Bit := 16#4000_0000#;
+            Scaled    := Abs_C * 1.0e3;
+         end if;
+
+         if Scaled >= 1.0e9 then
+            Mag_Int := 1_000_000_000;
+         elsif Scaled <= 0.0 then
+            Mag_Int := 0;
+         else
+            Mag_Int := Integer (Scaled);
+            if Mag_Int > 1_000_000_000 then
+               Mag_Int := 1_000_000_000;
+            elsif Mag_Int < 0 then
+               Mag_Int := 0;
+            end if;
+         end if;
+
+         Word := Sign_Bit or Range_Bit or Unsigned_32 (Mag_Int);
+
+         Payload (Base)     := Byte (Shift_Right (Word, 24) and 16#FF#);
+         Payload (Base + 1) := Byte (Shift_Right (Word, 16) and 16#FF#);
+         Payload (Base + 2) := Byte (Shift_Right (Word, 8)  and 16#FF#);
+         Payload (Base + 3) := Byte (Word and 16#FF#);
+      end loop;
+   end Encode_Vector_TOAST;
+
+   procedure Decode_Vector_TOAST
+     (Payload : in     TOAST_Payload_Buffer;
+      Length  : in     Valid_TOAST_Length;
+      Dim     : in     Vector_Dim;
+      V       :    out Vector_Value;
+      Valid   :    out Boolean)
+   is
+      use Interfaces;
+      Base       : TOAST_Payload_Index;
+      Word       : Unsigned_32;
+      Is_Neg     : Boolean;
+      High_Range : Boolean;
+      Mag        : Unsigned_32;
+      Val_Abs    : Float;
+   begin
+      V := (Dim => Dim, Elements => [others => 0.0]);
+
+      if Length /= Dim * 4 then
+         Valid := False;
+         return;
+      end if;
+
+      for I in 1 .. Dim loop
+         Base := (I - 1) * 4 + 1;
+         Word := Shift_Left (Unsigned_32 (Payload (Base)), 24)
+           or Shift_Left (Unsigned_32 (Payload (Base + 1)), 16)
+           or Shift_Left (Unsigned_32 (Payload (Base + 2)), 8)
+           or Unsigned_32 (Payload (Base + 3));
+
+         Is_Neg     := (Word and 16#8000_0000#) /= 0;
+         High_Range := (Word and 16#4000_0000#) /= 0;
+         Mag        := Word and 16#3FFF_FFFF#;
+
+         if Mag > 1_000_000_000 then
+            V     := (Dim => Dim, Elements => [others => 0.0]);
+            Valid := False;
+            return;
+         end if;
+
+         if High_Range then
+            Val_Abs := Float (Mag) * 1.0e-3;
+         else
+            Val_Abs := Float (Mag) * 1.0e-6;
+         end if;
+
+         if Val_Abs > Max_Component then
+            Val_Abs := Max_Component;
+         elsif Val_Abs < 0.0 then
+            Val_Abs := 0.0;
+         end if;
+
+         V.Elements (I) := (if Is_Neg then -Val_Abs else Val_Abs);
+      end loop;
+
+      Valid := True;
+   end Decode_Vector_TOAST;
+
+end Nhe_O.Vector;

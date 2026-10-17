@@ -44,6 +44,13 @@ the only thing standing between "self-maintaining docs" and docs that quietly ro
 When an appealing but not-yet-committed idea arises, file it under `docs/ideas/` (not
 `DECISIONS.md`). It graduates into an ADR + epic when you commit to building it.
 
+## Epic cadence: Feature Epic → Grooming Epic
+
+Every **Feature Epic** (or group of feature epics) must be followed by a dedicated **Grooming & Hardening Epic** before starting the next major feature epic:
+1. Run an adversarial audit (`ADVERSARIAL-REVIEW.md`) across all specs, bodies, FFI boundaries, and docs landed in the preceding feature epic(s).
+2. Remediate all Critical, High, Medium, and Low findings (functional edge cases, persistence gaps, contract strength, build hygiene, and doc drift).
+3. Resolve open questions (`docs/OPEN-QUESTIONS.md`) surfaced during the audit and re-verify `gnatprove` (`0 unproved` checks, `0 warnings`) before advancing to the next feature epic.
+
 ## Core rule
 
 Reference docs are *not authoritative*. If work in a session contradicts a reference doc, the agent

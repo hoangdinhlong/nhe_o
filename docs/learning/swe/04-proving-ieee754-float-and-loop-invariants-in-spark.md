@@ -97,12 +97,12 @@ With `pragma Loop_Invariant (for all J in 1 .. I - 1 => not (...))` inside `Exis
 
 ## 3. A concrete example: Newton-Raphson `Sqrt_Bounded` in Pure SPARK
 
-In [`src/nhe_o-vector.adb`](../../../src/nhe_o-vector.adb), `Sqrt_Bounded` computes $\sqrt{X}$ using 16 Newton-Raphson iterations (`Guess := 0.5 * (Guess + X / Guess)`). To prove that `Guess + X / Guess` never overflows `Float'Last` and `X / Guess` never divides by zero across all 16 iterations, we split the computation into two half-terms (`Term1 := 0.5 * Guess` and `Term2 := 0.5 * (X / Guess)`) and clamp `Guess` to the invariant range `[1.0 .. X]` (for `X >= 1.0`) or `[X .. 1.0]` (for `X < 1.0`):
+In [`src/nhe_o-vector.adb`](../../../src/nhe_o-vector.adb), `Sqrt_Bounded` computes $\sqrt{X}$ using 80 Newton-Raphson iterations (`Guess := 0.5 * (Guess + X / Guess)`). To prove that `Guess + X / Guess` never overflows `Float'Last` and `X / Guess` never divides by zero across all 80 iterations, we split the computation into two half-terms (`Term1 := 0.5 * Guess` and `Term2 := 0.5 * (X / Guess)`) and clamp `Guess` to the invariant range `[1.0 .. X]` (for `X >= 1.0`) or `[X .. 1.0]` (for `X < 1.0`):
 
 ```ada
       if X >= 1.0 then
          Guess := X;
-         for Iter in 1 .. 16 loop
+         for Iter in 1 .. 80 loop
             pragma Loop_Invariant (Guess in 1.0 .. X);
             Term1 := 0.5 * Guess;
             Term2 := 0.5 * (X / Guess);

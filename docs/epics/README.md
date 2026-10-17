@@ -11,6 +11,7 @@ committed yet doesn't belong here: it lives in `../ideas/` until it graduates.
 - Each folder holds a `PROGRESS.md`, copied from `_TEMPLATE/PROGRESS.md`.
 - Keep the **Tests** column current as tasks land — it's what tells a future session whether a
   "done" task was actually verified.
+- **Feature Epic → Grooming Epic Cadence**: After completing a Feature Epic (or major capability milestone), schedule a dedicated **Grooming & Hardening Epic** (`ADVERSARIAL-REVIEW.md` audit + full remediation of Critical/High/Medium/Low findings + `gnatprove` re-verification) before starting the next Feature Epic.
 
 ## Creating an epic
 

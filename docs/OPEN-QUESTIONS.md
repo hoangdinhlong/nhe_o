@@ -41,17 +41,15 @@ Status: `Open` · `Answered → <where the answer now lives>` · `No longer rele
 * **Status**: Answered → `ADR-004` (`docs/DECISIONS.md`), `BR-005` (`docs/domain/business-rules.md`), and Epic 02 (`docs/epics/02-storage-indexing-and-rag-executor/PROGRESS.md`). Support both default fast in-memory ring-buffer delivery (Redis) and optional `Durable` WAL-committed notification dispatch (PostgreSQL `LISTEN`/`NOTIFY`).
 
 ### Q-003: Should `Nhe_O.HNSW` / `Nhe_O.RAG` store full 4096-D `Float32` embeddings in 4KB TOAST chains for Stage-2 exact re-ranking, or formalize the 64-D Matryoshka `Float32`/`Int8` prefix + full 4096-D `Binary` design?
-* **Detail**: During the post-Epic-03 adversarial review (`CRIT-07` in `docs/epics/04-catalog-buffer-pool-and-sql-executor/ADVERSARIAL-REVIEW.md`), we found that `HNSW_Node` stores full 4096-D bit-packed `Binary` vectors (`Bin_Vec`) alongside a 64-D prefix (`Float_Pref (1..64)` and `Int8_Pref (1..64)`), while `Ingest_Document` currently writes only `Parent_Payload` text to 4KB TOAST overflow chains. Should Epic 04 also persist full 4096-D `Float32` vectors in TOAST for Stage-2 exact re-ranking, or formalize the 64-D Matryoshka prefix + 4096-D Binary quantization architecture in `ADR-003`?
-* **Impact**: Determines on-disk TOAST layout and Stage-2 re-ranking logic in Epic 04 (`Nhe_O.HNSW`, `Nhe_O.RAG`, `Nhe_O.Executor`).
+* **Detail**: During the post-Epic-03 adversarial review (`CRIT-07` in `docs/epics/04-post-epic-03-grooming-and-hardening/ADVERSARIAL-REVIEW.md`), we found that `HNSW_Node` stores full 4096-D bit-packed `Binary` vectors (`Bin_Vec`) alongside a 64-D prefix (`Float_Pref (1..64)` and `Int8_Pref (1..64)`), while `Ingest_Document` previously wrote only `Parent_Payload` text to 4KB TOAST overflow chains. Should Epic 04 also persist full 4096-D `Float32` vectors in TOAST for Stage-2 exact re-ranking, or formalize the 64-D Matryoshka prefix + 4096-D Binary quantization architecture in `ADR-003`?
+* **Impact**: Determines on-disk TOAST layout and Stage-2 re-ranking logic in Epic 04 (`Nhe_O.Vector`, `Nhe_O.HNSW`, `Nhe_O.RAG`).
 * **Waiting on**: Owner decision (Long).
 * **Opened**: 2026-10-17
-* **Status**: Open
+* **Status**: Answered → `ADR-006` (`docs/DECISIONS.md`), `BR-003` & `BR-006` (`docs/domain/business-rules.md`), and Epic 04 (`docs/epics/04-post-epic-03-grooming-and-hardening/PROGRESS.md`). Support **both**: `HNSW_Node` keeps inline 64-D Matryoshka `Float32`/`Int8` prefixes (`Int8_Scale` preserved) + 4096-D `Binary` words for fast Stage-1 HNSW routing, while `Nhe_O.Vector.Encode_Vector_TOAST` / `Decode_Vector_TOAST` and `Nhe_O.RAG` (`Vec_Toast_Ptr`) persist full `Dim > 64` `Float32` embeddings in 4KB TOAST chains and perform Stage-2 Exact L2 Re-Ranking on top candidates.
 
 ### Q-004: Should `Nhe_O.KV` remain a pure in-memory low-latency cache (Redis cache mode) or optionally append mutations to the WAL?
-* **Detail**: `VISION.md` and `ADR-001` mention transparent WAL persistence for KV alongside sub-microsecond in-memory caching, whereas `Nhe_O.KV` (`HIGH-08` in `ADVERSARIAL-REVIEW.md`) currently operates as a pure in-memory LRU/TTL cache without disk I/O. Should `Nhe_O.KV` remain pure in-memory for sub-microsecond speed (updating `VISION.md`/`ADR-001` accordingly) or add optional WAL-backed KV persistence in Epic 04?
-* **Impact**: Shapes whether `Nhe_O.KV` remains `Global => null` in-memory or takes a WAL file path in Epic 04.
+* **Detail**: `VISION.md` and `ADR-001` mention transparent WAL persistence for KV alongside sub-microsecond in-memory caching, whereas `Nhe_O.KV` (`HIGH-08` in `ADVERSARIAL-REVIEW.md`) previously operated only as an in-memory LRU/TTL cache without disk I/O. Should `Nhe_O.KV` remain pure in-memory for sub-microsecond speed or add optional WAL-backed KV persistence in Epic 04?
+* **Impact**: Shapes whether `Nhe_O.KV` supports both `Global => null` in-memory operations and WAL-backed durable mutations in Epic 04.
 * **Waiting on**: Owner decision (Long).
 * **Opened**: 2026-10-17
-* **Status**: Open
-
-
+* **Status**: Answered → `ADR-007` (`docs/DECISIONS.md`), `BR-004` (`docs/domain/business-rules.md`), and Epic 04 (`docs/epics/04-post-epic-03-grooming-and-hardening/PROGRESS.md`). Support dual-mode KV: default `Global => null` sub-microsecond in-memory `Set`/`Get`/`Del` (`Redis` cache mode) plus optional WAL-backed `Set_Durable`, `Del_Durable`, and `Recover_KV_From_WAL` (`WAL_Frame_KV`, `"KVMG"` magic + CRC32).

@@ -14,9 +14,10 @@
 extern "C" {
 #endif
 
-/* Fixed buffer capacities matching Nhe_O.Types */
-#define NHE_O_MAX_IDENT_LEN 64
-#define NHE_O_MAX_TEXT_LEN  512
+/* Fixed buffer capacities matching Nhe_O.Types and Nhe_O.Vector */
+#define NHE_O_MAX_IDENT_LEN  64
+#define NHE_O_MAX_TEXT_LEN   512
+#define NHE_O_MAX_VECTOR_DIM 4096
 
 /* Status codes returned in *out_status */
 typedef enum {
@@ -29,7 +30,8 @@ typedef enum {
     NHE_O_STATUS_CAPACITY_EXCEEDED  = 6,
     NHE_O_STATUS_TX_ABORTED         = 7,
     NHE_O_STATUS_IO_ERROR           = 8,
-    NHE_O_STATUS_INVALID_ARG        = 9
+    NHE_O_STATUS_INVALID_ARG        = 9,
+    NHE_O_STATUS_NOT_INITIALIZED    = 10
 } nhe_o_status_t;
 
 /* Vector quantization modes for HNSW / Hybrid RAG queries */
@@ -43,8 +45,18 @@ typedef enum {
 int nhe_o_version_major(void);
 int nhe_o_version_minor(void);
 
-/* Initialize / reset embedded Nhe_O runtime state */
+/* Initialize / reset embedded Nhe_O runtime state (default paths, 3D vectors) */
 void nhe_o_init(int *out_status);
+
+/* Initialize / reset embedded Nhe_O runtime state with custom DB/WAL paths & dimension (1..4096) */
+void nhe_o_init_with_paths(
+    const char *db_path_buf,
+    int         db_path_len,
+    const char *wal_path_buf,
+    int         wal_path_len,
+    int         dim,
+    int        *out_status
+);
 
 /* Analyze a PostgreSQL-dialect SQL statement */
 void nhe_o_analyze_sql(
@@ -64,6 +76,17 @@ void nhe_o_vector_distance_3d(
     float *out_cos_dist,
     int   *out_hamming,
     int   *out_status
+);
+
+/* Compute N-D (1..4096) L2 distance (<->), Cosine distance (<=>), and 1-bit Hamming distance */
+void nhe_o_vector_distance_nd(
+    const float *a_buf,
+    const float *b_buf,
+    int          dim,
+    float       *out_l2_dist,
+    float       *out_cos_dist,
+    int         *out_hamming,
+    int         *out_status
 );
 
 /* Redis-compatible Key-Value Cache operations */
@@ -93,6 +116,31 @@ void nhe_o_kv_del(
     int        *out_status
 );
 
+void nhe_o_kv_exists(
+    const char *key_buf,
+    int         key_len,
+    int64_t     now_sec,
+    int        *out_exists,
+    int        *out_status
+);
+
+void nhe_o_kv_expire(
+    const char *key_buf,
+    int         key_len,
+    int64_t     now_sec,
+    int64_t     ttl_sec,
+    int        *out_updated,
+    int        *out_status
+);
+
+void nhe_o_kv_ttl(
+    const char *key_buf,
+    int         key_len,
+    int64_t     now_sec,
+    int64_t    *out_ttl,
+    int        *out_status
+);
+
 void nhe_o_kv_incr_by(
     const char *key_buf,
     int         key_len,
@@ -108,6 +156,11 @@ void nhe_o_pubsub_subscribe(
     int         pattern_len,
     int        *out_sub_id,
     int        *out_status
+);
+
+void nhe_o_pubsub_unsubscribe(
+    int  sub_id,
+    int *out_status
 );
 
 void nhe_o_pubsub_publish(
@@ -141,6 +194,16 @@ void nhe_o_rag_ingest_3d(
     int        *out_status
 );
 
+void nhe_o_rag_ingest_nd(
+    int          doc_id,
+    const char  *summary_buf,
+    int          summary_len,
+    const float *vec_buf,
+    int          dim,
+    int          related_doc_id,
+    int         *out_status
+);
+
 void nhe_o_rag_query_3d(
     float       qx,
     float       qy,
@@ -155,6 +218,22 @@ void nhe_o_rag_query_3d(
     int        *out_parent_bytes,
     int        *out_graph_hit,
     int        *out_status
+);
+
+void nhe_o_rag_query_nd(
+    const float *query_vec_buf,
+    int          dim,
+    int          encoding_mode,
+    const char  *keyword_buf,
+    int          keyword_len,
+    int          top_k,
+    int         *out_hit_count,
+    int         *out_top_doc_id,
+    float       *out_top_distance,
+    char        *out_parent_buf,
+    int         *out_parent_len,
+    int         *out_graph_hit,
+    int         *out_status
 );
 
 #ifdef __cplusplus

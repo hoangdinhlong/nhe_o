@@ -15,14 +15,14 @@ package body Nhe_O.IO is
 
    use type Interfaces.Integer_64;
 
-   --  POSIX open(2) flags and file mode (0600 octal = S_IRUSR | S_IWUSR)
-   O_RDONLY   : constant int      := 8#0#;
-   O_WRONLY   : constant int      := 8#1#;
-   O_RDWR     : constant int      := 8#2#;
-   O_CREAT    : constant int      := 8#100#;
-   O_APPEND   : constant int      := 8#2000#;
-   O_CLOEXEC  : constant int      := 8#2000000#;
-   Mode_0600  : constant unsigned := 8#600#;
+   --  POSIX open(2) / lseek(2) flags for x86_64-linux-gnu target (0600 octal = S_IRUSR | S_IWUSR)
+   O_RDONLY       : constant int      := 8#0#;
+   O_RDWR         : constant int      := 8#2#;
+   O_CREAT        : constant int      := 8#100#;
+   O_CLOEXEC      : constant int      := 8#2000000#;
+   Mode_0600      : constant unsigned := 8#600#;
+   SEEK_END       : constant int      := 2;
+   Max_IO_Retries : constant Positive := 3;
 
    --  Contract-bound POSIX kernel syscall bindings (never raise Ada exceptions)
    function Posix_Open
@@ -60,16 +60,17 @@ package body Nhe_O.IO is
           Convention    => C,
           External_Name => "pread";
 
-   function Posix_Write_WAL
-     (Fd    : int;
-      Buf   : WAL_Frame_Buffer;
-      Count : size_t) return Ssize_T
+   function Posix_Pwrite_WAL
+     (Fd     : int;
+      Buf    : WAL_Frame_Buffer;
+      Count  : size_t;
+      Offset : Off_T) return Ssize_T
      with Side_Effects,
           Global        => null,
           Always_Terminates,
           Import        => True,
           Convention    => C,
-          External_Name => "write";
+          External_Name => "pwrite";
 
    function Posix_Pread_WAL
      (Fd     : int;
@@ -82,6 +83,17 @@ package body Nhe_O.IO is
           Import        => True,
           Convention    => C,
           External_Name => "pread";
+
+   function Posix_Lseek
+     (Fd     : int;
+      Offset : Off_T;
+      Whence : int) return Off_T
+     with Side_Effects,
+          Global        => null,
+          Always_Terminates,
+          Import        => True,
+          Convention    => C,
+          External_Name => "lseek";
 
    function Posix_Fsync (Fd : int) return int
      with Side_Effects,
@@ -158,7 +170,11 @@ package body Nhe_O.IO is
          return;
       end if;
 
-      Written := Posix_Pwrite (Fd, Buffer, size_t (Nhe_O.Page_Size), Offset);
+      for Attempt in 1 .. Max_IO_Retries loop
+         Written := Posix_Pwrite (Fd, Buffer, size_t (Nhe_O.Page_Size), Offset);
+         exit when Written = Ssize_T (Nhe_O.Page_Size);
+      end loop;
+
       Sync_Rc := Posix_Fsync (Fd);
       Close_R := Posix_Close (Fd);
 
@@ -192,7 +208,11 @@ package body Nhe_O.IO is
          return;
       end if;
 
-      N_Read  := Posix_Pread (Fd, Buffer, size_t (Nhe_O.Page_Size), Offset);
+      for Attempt in 1 .. Max_IO_Retries loop
+         N_Read := Posix_Pread (Fd, Buffer, size_t (Nhe_O.Page_Size), Offset);
+         exit when N_Read >= 0;
+      end loop;
+
       Close_R := Posix_Close (Fd);
 
       if N_Read = Ssize_T (Nhe_O.Page_Size) and then Close_R = 0 then
@@ -203,13 +223,15 @@ package body Nhe_O.IO is
       end if;
    end Read_Page;
 
-   procedure Append_WAL_Frame
-     (WAL_Path : in     Bounded_Text;
-      Frame    : in     WAL_Frame_Buffer;
-      Success  :    out Boolean)
+   procedure Write_WAL_Frame
+     (WAL_Path  : in     Bounded_Text;
+      Frame_Idx : in     Valid_Page_Id;
+      Frame     : in     WAL_Frame_Buffer;
+      Success   :    out Boolean)
    is
       C_Path  : C_Path_String;
       Fd      : int;
+      Offset  : constant Off_T := Off_T (Frame_Idx) * Off_T (WAL_Frame_Size);
       Written : Ssize_T;
       Sync_Rc : int;
       Close_R : int;
@@ -220,13 +242,77 @@ package body Nhe_O.IO is
       end if;
 
       To_C_Path (WAL_Path, C_Path);
-      Fd := Posix_Open (C_Path, O_WRONLY + O_CREAT + O_APPEND + O_CLOEXEC, Mode_0600);
+      Fd := Posix_Open (C_Path, O_RDWR + O_CREAT + O_CLOEXEC, Mode_0600);
       if Fd < 0 then
          Success := False;
          return;
       end if;
 
-      Written := Posix_Write_WAL (Fd, Frame, size_t (WAL_Frame_Size));
+      for Attempt in 1 .. Max_IO_Retries loop
+         Written := Posix_Pwrite_WAL (Fd, Frame, size_t (WAL_Frame_Size), Offset);
+         exit when Written = Ssize_T (WAL_Frame_Size);
+      end loop;
+
+      Sync_Rc := Posix_Fsync (Fd);
+      Close_R := Posix_Close (Fd);
+
+      Success := (Written = Ssize_T (WAL_Frame_Size))
+                 and then (Sync_Rc = 0)
+                 and then (Close_R = 0);
+   end Write_WAL_Frame;
+
+   procedure Append_WAL_Frame
+     (WAL_Path : in     Bounded_Text;
+      Frame    : in     WAL_Frame_Buffer;
+      Success  :    out Boolean)
+   is
+      C_Path         : C_Path_String;
+      Fd             : int;
+      End_Pos        : Off_T;
+      Frame_Count    : Off_T;
+      Aligned_Offset : Off_T;
+      Written        : Ssize_T;
+      Sync_Rc        : int;
+      Close_R        : int;
+      pragma Warnings (Off, Close_R);
+   begin
+      if Has_Embedded_NUL (WAL_Path) then
+         Success := False;
+         return;
+      end if;
+
+      To_C_Path (WAL_Path, C_Path);
+      Fd := Posix_Open (C_Path, O_RDWR + O_CREAT + O_CLOEXEC, Mode_0600);
+      if Fd < 0 then
+         Success := False;
+         return;
+      end if;
+
+      End_Pos := Posix_Lseek (Fd, 0, SEEK_END);
+      if End_Pos < 0 then
+         pragma Warnings (GNATprove, Off, "statement has no effect");
+         Close_R := Posix_Close (Fd);
+         pragma Warnings (GNATprove, On, "statement has no effect");
+         Success := False;
+         return;
+      end if;
+
+      --  Ensure positional pwrite always lands on an exact WAL_Frame_Size boundary
+      Frame_Count := End_Pos / Off_T (WAL_Frame_Size);
+      if Frame_Count > Off_T (Max_Page_Id) then
+         pragma Warnings (GNATprove, Off, "statement has no effect");
+         Close_R := Posix_Close (Fd);
+         pragma Warnings (GNATprove, On, "statement has no effect");
+         Success := False;
+         return;
+      end if;
+
+      Aligned_Offset := Frame_Count * Off_T (WAL_Frame_Size);
+      for Attempt in 1 .. Max_IO_Retries loop
+         Written := Posix_Pwrite_WAL (Fd, Frame, size_t (WAL_Frame_Size), Aligned_Offset);
+         exit when Written = Ssize_T (WAL_Frame_Size);
+      end loop;
+
       Sync_Rc := Posix_Fsync (Fd);
       Close_R := Posix_Close (Fd);
 
@@ -239,7 +325,8 @@ package body Nhe_O.IO is
      (WAL_Path  : in     Bounded_Text;
       Frame_Idx : in     Valid_Page_Id;
       Frame     :    out WAL_Frame_Buffer;
-      Success   :    out Boolean)
+      Success   :    out Boolean;
+      Is_EOF    :    out Boolean)
    is
       C_Path  : C_Path_String;
       Fd      : int;
@@ -247,28 +334,51 @@ package body Nhe_O.IO is
       N_Read  : Ssize_T;
       Close_R : int;
    begin
-      Frame := [others => 0];
+      Frame   := [others => 0];
+      Success := False;
+      Is_EOF  := False;
+
       if Has_Embedded_NUL (WAL_Path) then
-         Success := False;
          return;
       end if;
 
       To_C_Path (WAL_Path, C_Path);
       Fd := Posix_Open (C_Path, O_RDONLY + O_CLOEXEC, 0);
       if Fd < 0 then
-         Success := False;
          return;
       end if;
 
-      N_Read  := Posix_Pread_WAL (Fd, Frame, size_t (WAL_Frame_Size), Offset);
+      for Attempt in 1 .. Max_IO_Retries loop
+         N_Read := Posix_Pread_WAL (Fd, Frame, size_t (WAL_Frame_Size), Offset);
+         exit when N_Read >= 0;
+      end loop;
+
       Close_R := Posix_Close (Fd);
 
       if N_Read = Ssize_T (WAL_Frame_Size) and then Close_R = 0 then
          Success := True;
+         Is_EOF  := False;
+      elsif N_Read = 0 and then Close_R = 0 then
+         Frame   := [others => 0];
+         Success := False;
+         Is_EOF  := True;
       else
          Frame   := [others => 0];
          Success := False;
+         Is_EOF  := False;
       end if;
+   end Read_WAL_Frame;
+
+   procedure Read_WAL_Frame
+     (WAL_Path  : in     Bounded_Text;
+      Frame_Idx : in     Valid_Page_Id;
+      Frame     :    out WAL_Frame_Buffer;
+      Success   :    out Boolean)
+   is
+      Ignored_EOF : Boolean;
+      pragma Warnings (Off, Ignored_EOF);
+   begin
+      Read_WAL_Frame (WAL_Path, Frame_Idx, Frame, Success, Ignored_EOF);
    end Read_WAL_Frame;
 
    procedure Delete_File_If_Exists
@@ -298,15 +408,19 @@ package body Nhe_O.IO is
 
    pragma Warnings (GNATprove, Off, "no Global contract available",
                     Reason => "Ada.Command_Line is read-only over OS process argv");
+   pragma Warnings (GNATprove, Off, "no Always_Terminates aspect available",
+                    Reason => "Ada.Command_Line.Set_Exit_Status always terminates");
    procedure Read_CLI_Arg
-     (Index : in     Positive;
-      Arg   :    out Bounded_Text;
-      Found :    out Boolean)
+     (Index    : in     Positive;
+      Arg      :    out Bounded_Text;
+      Found    :    out Boolean;
+      Too_Long :    out Boolean)
    is
       Count : constant Natural := Ada.Command_Line.Argument_Count;
    begin
-      Arg   := (Length => 0, Data => [others => ' ']);
-      Found := False;
+      Arg      := (Length => 0, Data => [others => ' ']);
+      Found    := False;
+      Too_Long := False;
       if Index <= Count then
          declare
             Raw : constant String := Ada.Command_Line.Argument (Index);
@@ -314,15 +428,29 @@ package body Nhe_O.IO is
             if Raw'Length <= Max_Text_Len then
                Arg   := Make_Text (Raw);
                Found := True;
+            else
+               Too_Long := True;
             end if;
          end;
       end if;
+   end Read_CLI_Arg;
+
+   procedure Read_CLI_Arg
+     (Index : in     Positive;
+      Arg   :    out Bounded_Text;
+      Found :    out Boolean)
+   is
+      Ignored_Too_Long : Boolean;
+      pragma Warnings (Off, Ignored_Too_Long);
+   begin
+      Read_CLI_Arg (Index, Arg, Found, Ignored_Too_Long);
    end Read_CLI_Arg;
 
    procedure Set_Exit_Failure is
    begin
       Ada.Command_Line.Set_Exit_Status (Ada.Command_Line.Failure);
    end Set_Exit_Failure;
+   pragma Warnings (GNATprove, On, "no Always_Terminates aspect available");
    pragma Warnings (GNATprove, On, "no Global contract available");
 
 end Nhe_O.IO;

@@ -30,28 +30,20 @@ The project has completed **Epic 01 (Scaffold and Architecture)**, **Epic 02 (B+
 | `01-scaffold-and-architecture` | Establish project scaffolding, 100% SPARK core & POSIX I/O subsystems | ✅ Done |
 | `02-storage-indexing-and-rag-executor` | 4KB TOAST overflow, 4096-D quantized HNSW, B+Tree, Durable Pub/Sub & Universal RAG Executor | ✅ Done |
 | `03-formal-proof-and-c-ffi-sdk` | `gnatprove` Flow & AoRTE Formal Proofs (100% Stone/Bronze/Silver + Partial Gold: 1,543/1,543 VCs), C ABI / Python SDK & Interactive CLI | ✅ Done |
-| `04-catalog-buffer-pool-and-sql-executor` | Core Hardening (`ADVERSARIAL-REVIEW.md`), Persistent Page-0 System Catalog, Clock-Sweep 4KB Buffer Pool Manager & End-to-End SQL Execution Engine | ⏳ Planned |
+| `04-post-epic-03-grooming-and-hardening` | Post-Epic-03 Grooming & Core Hardening: Remediate all 24 `ADVERSARIAL-REVIEW.md` findings, resolve `Q-003` & `Q-004`, codify `storage-and-wal-format.md`, and re-prove 100% SPARK (`Tasks 1–5 Done`, `Task 6` in progress: `2,638/2,647` VCs proved) | 🚧 Active |
+| `05-catalog-buffer-pool-and-sql-executor` | Persistent Page-0 System Catalog, Clock-Sweep 4KB Buffer Pool Manager & End-to-End SQL Execution Engine | ⏳ Planned |
 
 ## Next up
 
-**Epic 04 (`04-catalog-buffer-pool-and-sql-executor`)** is defined in `docs/epics/04-catalog-buffer-pool-and-sql-executor/PROGRESS.md` (with adversarial audit findings cataloged in `docs/epics/04-catalog-buffer-pool-and-sql-executor/ADVERSARIAL-REVIEW.md`):
-- **Task 0**: Remediate Epics 01–03 adversarial review findings (`CRIT-02`..`CRIT-07`, `HIGH-01`..`HIGH-02`, `HIGH-05`..`HIGH-09`, `MED-01`..`MED-05`, `LOW-01`..`LOW-03`) across `BTree`, `HNSW`, `Vector`, `Transaction` (CLOG + WAL commit flag), `PubSub`, `KV`, `RAG`, and `C_API`.
-- **Task 1**: Implement `Nhe_O.Catalog` (`src/nhe_o-catalog.ad[sb]` in 100% `SPARK_Mode (On)`) for persistent table/column/index metadata (`pg_class` / `pg_attribute`) with Page-0 CRC32 serialization.
-- **Task 2**: Implement `Nhe_O.Buffer_Pool` (`src/nhe_o-buffer_pool.ad[sb]` in 100% `SPARK_Mode (On)`) with primary 4KB slotted-page encoding (`CRIT-01`), bounded frame caching, Clock-Sweep eviction, pin tracking, and WAL-before-Data flush invariants.
-- **Task 3**: Expand `Nhe_O.SQL` & `Nhe_O.JSON` (`HIGH-03`, `HIGH-04`) and implement `Nhe_O.Executor` (`src/nhe_o-executor.ad[sb]` in 100% `SPARK_Mode (On)`) connecting SQL ASTs to `Catalog`, `Buffer_Pool`, `Transaction` (MVCC + TOAST), `BTree`, and `HNSW`.
-- **Task 4**: Wire stateful SQL execution and safe bounded C/Python buffer outputs into `Nhe_O.C_API`, `bindings/python/nhe_o.py`, and CLI (`src/nhe_o_main.adb` + Suite `[12/12]`).
-- **Task 5**: Prove 100% SPARK Stone, Bronze (Flow), Silver (AoRTE), and Gold contracts across all new and hardened units via `gnatprove -P nhe_o.gpr` (`0 unproved` checks).
+**Active Epic: `04-post-epic-03-grooming-and-hardening` (`docs/epics/04-post-epic-03-grooming-and-hardening/PROGRESS.md`)**
+- ✅ **Tasks 1–5 Completed**: All 24 adversarial review findings (`CRIT-01`..`CRIT-07`, `HIGH-01`..`HIGH-09`, `MED-01`..`MED-05`, `LOW-01`..`LOW-03`) and open questions `Q-003` (`ADR-006`) and `Q-004` (`ADR-007`) are implemented in code, documented in `docs/domain/storage-and-wal-format.md`, and verified at runtime across all 11 Ada suites (`alr build && alr run`) and the Python `ctypes` SDK (`python3 bindings/python/nhe_o.py`).
+- ◐ **Next Task (Task 6 — Final `gnatprove` VC Discharge to Resume Next Session)**:
+  - Out of **2,647 total `gnatprove` checks**, **2,638 (`99.66%`)** are already proved (`10 / 14` units at 100% including `Nhe_O.Transaction`, `Nhe_O.Vector`, `Nhe_O.JSON`, `Nhe_O.KV`, `Nhe_O.PubSub`, `Nhe_O.SQL`, `Nhe_O.IO`, and `Nhe_O.C_API`).
+  - Discharge the remaining **9 VCs** (`BTree.Insert_Key` [1], `HNSW.Add_Edge_Pruned` [1], `HNSW.Node_Distance` [2], `RAG.Delete_Document` [1 flow], `Nhe_O_Main` [3], `Nhe_O_Main.Parse_Positive_Int` [1]) and silence the 7 `-gnatwa` membership warnings in `nhe_o-transaction.adb` / `nhe_o_main.adb` to close Epic 04 and advance to **Epic 05 (`05-catalog-buffer-pool-and-sql-executor`)**.
 
 ## Known issues / blockers
 
-- **Post-Epic-03 Adversarial Review Findings (`24` issues: `7 Critical, 9 High, 5 Medium, 3 Low`)**: Documented in full in [`docs/epics/04-catalog-buffer-pool-and-sql-executor/ADVERSARIAL-REVIEW.md`](epics/04-catalog-buffer-pool-and-sql-executor/ADVERSARIAL-REVIEW.md) and scheduled for remediation in **Epic 04 (Tasks 0–5)**:
-  - `CRIT-01`: Primary 4KB slotted-page tuple layout not yet implemented; `RAG_Engine` state (`Docs`, `PK_Tree`, `Vector_Graph`, `Toast_Ptr`) currently resides in volatile RAM.
-  - `CRIT-02` & `CRIT-03`: `Nhe_O.BTree` is hardcoded to depth 2 (failing on the 13th sequential key, leaving 26/32 nodes unused) and `Encode_Node_Page`/`Decode_Node_Page` omit `Children`, truncate 64-bit keys to 32-bit, and lack page CRC32 checks.
-  - `CRIT-04` & `CRIT-05`: `Nhe_O.Transaction` lacks a Commit Log (`CLOG`) and WAL commit-frame flag (`Is_Tuple_Visible` and `Redo_WAL_Recovery` do not filter out uncommitted/rolled-back transactions, and `Engine.Docs` overwrites `Xmin` in-place).
-  - `CRIT-06` & `CRIT-07`: `Nhe_O.HNSW.Insert_Vector` links to the first 4 nodes `1..4` and overwrites slot 4 (orphaning nodes `5..N-1`), truncates `Float32`/`Int8` vectors to 64-D (`Q-003`), ignores `Scale` in `Int8` distance, returns squared L2 in `Node_Distance`, and leaves duplicate active nodes when updating an existing `Doc_Id`.
-  - `HIGH-01`..`HIGH-09`: `Nhe_O.C_API` writes 512 bytes unconditionally to caller buffers, discards `Top_Parent` in `C_RAG_Query_3D`, and hardcodes `/tmp/nhe_o_c_api.db`; `Nhe_O.SQL` is currently a substring classifier rather than an AST parser; `Nhe_O.JSON` lacks a JSON-to-`JSONB_Document` parser; `Nhe_O.PubSub` ignores `Ctx` in `Flush_Committed_Notifications`; `Nhe_O.KV` is in-memory only (`Q-004`) and CLI `--kv` mis-indexes `SET`.
-
-
+- **Epic 04 Task 6 Checkpoint (9 remaining `gnatprove` VCs out of 2,647)**: Code remediation for all 24 findings in [`docs/epics/04-post-epic-03-grooming-and-hardening/ADVERSARIAL-REVIEW.md`](epics/04-post-epic-03-grooming-and-hardening/ADVERSARIAL-REVIEW.md) is complete and passes all runtime suites; only the 9 VCs listed in **Next up** remain to be discharged at the start of the next session.
 
 ## Decisions
 
@@ -61,7 +53,10 @@ See `DECISIONS.md`.
 - `ADR-003`: 4KB Slotted Pages with TOAST Overflow Chains, 4096-D Vectors & Quantization for Universal RAG.
 - `ADR-004`: Dual-Mode Pub/Sub: Fast In-Memory Ring Buffers + Optional `DURABLE` WAL-Committed Dispatch.
 - `ADR-005`: Formally Verified C ABI / FFI Boundary via Precondition-Free Defensive Subprograms in 100% SPARK.
+- `ADR-006`: Two-Stage 4096-D Hybrid RAG (HNSW RAM Stage-1 + TOAST Full-Vector Stage-2 Exact Re-Ranking) & Primary 4KB `"SLOT"` Pages (`Q-003`).
+- `ADR-007`: Two-Pass Committed-Only WAL Recovery (`CLOG`), Positional `pwrite` WAL Appends & Optional Durable KV WAL (`Q-004`).
 
 Pre-decision ideas live in `ideas/`. Questions still waiting on an answer live in
 `OPEN-QUESTIONS.md`.
+
 

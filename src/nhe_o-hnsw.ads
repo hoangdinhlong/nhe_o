@@ -1,5 +1,6 @@
 --  Formally verified Hierarchical Navigable Small World (HNSW) Vector Graph Index
---  Supports Float32, Int8 (SQ8), and 4096-D Binary (1-bit Hamming) ANN Search (ADR-003)
+--  Supports Float32, Int8 (SQ8), and 4096-D Binary (1-bit Hamming) ANN Search
+--  (ADR-003, CRIT-06, CRIT-07, MED-03)
 pragma SPARK_Mode (On);
 
 with Nhe_O.Types;  use Nhe_O.Types;
@@ -40,6 +41,7 @@ package Nhe_O.HNSW is
       TOAST_Root  : Valid_Page_Id           := 0;
       Top_Level   : HNSW_Layer              := 1;
       Prefix_Len  : Matryoshka_Index        := 1;
+      Int8_Scale  : Non_Negative_Float      := 1.0;
       Float_Pref  : Matryoshka_Float_Array  := [others => 0.0];
       Int8_Pref   : Matryoshka_Int8_Array   := [others => 0];
       Bin_Vec     : Quantized_Binary_Vector := (others => <>);
@@ -55,6 +57,10 @@ package Nhe_O.HNSW is
       Top_Layer  : HNSW_Layer      := 1;
       Nodes      : HNSW_Node_Pool  := [others => (others => <>)];
    end record;
+
+   --  Structural invariant check for an HNSW_Index (MED-03)
+   function Is_Valid_HNSW (Index : HNSW_Index) return Boolean is
+     (if Index.Node_Count > 0 then Index.Entry_Node <= Index.Node_Count else True);
 
    Max_KNN_Results : constant := 16;
    subtype KNN_Result_Index is Positive range 1 .. Max_KNN_Results;
@@ -83,10 +89,12 @@ package Nhe_O.HNSW is
           Always_Terminates,
           Post   => Index.Dim = Dim
                     and then Index.Node_Count = 0
-                    and then Index.Entry_Node = 1;
+                    and then Index.Entry_Node = 1
+                    and then Is_Valid_HNSW (Index);
 
-   --  Insert a vector into the HNSW graph, automatically computing Binary (1-bit),
-   --  Int8 (SQ8), and Matryoshka Float32 representations and linking small-world edges
+   --  Insert or update a vector in the HNSW graph, computing Binary (1-bit),
+   --  scale-preserving Int8 (SQ8), and Matryoshka Float32 representations and
+   --  linking distance-pruned small-world edges (CRIT-06, CRIT-07)
    procedure Insert_Vector
      (Index      : in out HNSW_Index;
       Doc_Id     : in     Positive;
@@ -100,11 +108,16 @@ package Nhe_O.HNSW is
                     and then Index.Node_Count <= Max_HNSW_Nodes,
           Post   => Index.Dim = Index.Dim'Old
                     and then (if Status = Status_Ok then
-                                Index.Node_Count = Index.Node_Count'Old + 1
+                                Index.Node_Count >= 1
+                                and then Index.Node_Count >= Index.Node_Count'Old
+                                and then (if Index.Node_Count'Old < Max_HNSW_Nodes then
+                                            Index.Node_Count <= Index.Node_Count'Old + 1
+                                          else
+                                            Index.Node_Count = Max_HNSW_Nodes)
                                 and then Index.Entry_Node in 1 .. Index.Node_Count);
 
-   --  Compute distance between a query vector and an HNSW node using the selected
-   --  encoding mode (Float32, Int8 SQ8, or 4096-D 1-bit Binary Hamming)
+   --  Compute metric distance between a query vector and an HNSW node using the
+   --  selected encoding mode (Float32 L2, scale-aware Int8 SQ8 L2, or 1-bit Hamming)
    function Node_Distance
      (Node     : HNSW_Node;
       Q_Float  : Vector_Value;
@@ -117,7 +130,7 @@ package Nhe_O.HNSW is
                     and then Q_Int8.Dim = Q_Binary.Dim;
 
    --  Hierarchical ANN search: greedy upper-layer descent (Top_Layer .. 2) followed by
-   --  layer-1 small-world beam expansion and sorted Top-K candidate selection
+   --  layer-1 greedy descent + multi-wave small-world beam expansion (CRIT-06)
    procedure Search_KNN
      (Index    : in     HNSW_Index;
       Query    : in     Vector_Value;

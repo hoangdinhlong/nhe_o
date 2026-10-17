@@ -1,9 +1,9 @@
---  Formally verified C ABI / FFI SDK Implementation Body for Nhe_O (Epic 03 / ADR-005)
+--  Formally verified C ABI / FFI SDK Implementation Body for Nhe_O
+--  (Epic 03 / ADR-005 / HIGH-01 / HIGH-02 / HIGH-08)
 pragma SPARK_Mode (On);
 
 with Nhe_O.IO;     use Nhe_O.IO;
 with Nhe_O.SQL;    use Nhe_O.SQL;
-with Nhe_O.Vector; use Nhe_O.Vector;
 with Nhe_O.JSON;   use Nhe_O.JSON;
 with Nhe_O.BTree;  use Nhe_O.BTree;
 with Nhe_O.HNSW;   use Nhe_O.HNSW;
@@ -26,22 +26,21 @@ package body Nhe_O.C_API is
       return Res;
    end To_Bounded_Ident;
 
-   --  Convert Bounded_Ident into C_Ident_Buf
+   --  Copy Bounded_Ident into C_Ident_Buf writing ONLY 1 .. Id.Length (+ trailing NUL if room)
    procedure From_Bounded_Ident
      (Id      : in     Bounded_Ident;
-      Out_Buf :    out C_Ident_Buf;
+      Out_Buf : in out C_Ident_Buf;
       Out_Len :    out int)
      with Global => null,
           Always_Terminates
    is
    begin
-      Out_Buf := [others => nul];
       for I in 1 .. Id.Length loop
-         Res_Loop : declare
-         begin
-            Out_Buf (size_t (I)) := To_C (Id.Data (I));
-         end Res_Loop;
+         Out_Buf (size_t (I)) := To_C (Id.Data (I));
       end loop;
+      if Id.Length < Max_Ident_Len then
+         Out_Buf (size_t (Id.Length + 1)) := nul;
+      end if;
       Out_Len := int (Id.Length);
    end From_Bounded_Ident;
 
@@ -61,20 +60,22 @@ package body Nhe_O.C_API is
       return Res;
    end To_Bounded_Text;
 
-   --  Convert Bounded_Text into C_Text_Buf
+   --  Copy Bounded_Text into C_Text_Buf writing ONLY 1 .. Txt.Length (+ trailing NUL if room)
    procedure From_Bounded_Text
      (Txt     : in     Bounded_Text;
-      Out_Buf :    out C_Text_Buf;
+      Out_Buf : in out C_Text_Buf;
       Out_Len :    out int)
      with Global => null,
           Always_Terminates
    is
    begin
-      Out_Buf := [others => nul];
       for I in 1 .. Txt.Length loop
          pragma Loop_Invariant (I in 1 .. Txt.Length);
          Out_Buf (size_t (I)) := To_C (Txt.Data (I));
       end loop;
+      if Txt.Length < Max_Text_Len then
+         Out_Buf (size_t (Txt.Length + 1)) := nul;
+      end if;
       Out_Len := int (Txt.Length);
    end From_Bounded_Text;
 
@@ -98,11 +99,11 @@ package body Nhe_O.C_API is
    function C_Version_Minor return int is (3);
 
    procedure C_Init (Out_Status : out int) is
-      DB_Path  : constant Bounded_Text := Make_Text ("/tmp/nhe_o_c_api.db");
-      WAL_Path : constant Bounded_Text := Make_Text ("/tmp/nhe_o_c_api.wal");
    begin
-      Delete_File_If_Exists (DB_Path);
-      Delete_File_If_Exists (WAL_Path);
+      G_DB_Path  := Make_Text ("/tmp/nhe_o_c_api.db");
+      G_WAL_Path := Make_Text ("/tmp/nhe_o_c_api.wal");
+      Delete_File_If_Exists (G_DB_Path);
+      Delete_File_If_Exists (G_WAL_Path);
       G_Next_Tx     := 1;
       G_KV_Store    := (others => <>);
       G_Broker      := (others => <>);
@@ -110,6 +111,50 @@ package body Nhe_O.C_API is
       G_Initialized := True;
       Out_Status    := C_Status_Ok;
    end C_Init;
+
+   procedure C_Init_With_Paths
+     (DB_Path_Buf  : in     C_Text_Buf;
+      DB_Path_Len  : in     int;
+      WAL_Path_Buf : in     C_Text_Buf;
+      WAL_Path_Len : in     int;
+      Dim          : in     int;
+      Out_Status   :    out int)
+   is
+      DB_P  : Bounded_Text;
+      WAL_P : Bounded_Text;
+   begin
+      G_Initialized := False;
+      G_Next_Tx     := 1;
+      G_DB_Path     := Make_Text ("/tmp/nhe_o_c_api.db");
+      G_WAL_Path    := Make_Text ("/tmp/nhe_o_c_api.wal");
+      G_KV_Store    := (others => <>);
+      G_Broker      := (others => <>);
+      Init_RAG_Engine (G_RAG_Engine, 3);
+
+      if DB_Path_Len <= 0 or else DB_Path_Len > int (Max_Text_Len)
+        or else WAL_Path_Len <= 0 or else WAL_Path_Len > int (Max_Text_Len)
+        or else Dim not in 1 .. int (Max_Vector_Dim)
+      then
+         Out_Status := C_Status_Invalid_Arg;
+         return;
+      end if;
+
+      DB_P  := To_Bounded_Text (DB_Path_Buf, Text_Length (DB_Path_Len));
+      WAL_P := To_Bounded_Text (WAL_Path_Buf, Text_Length (WAL_Path_Len));
+
+      if Has_Embedded_NUL (DB_P) or else Has_Embedded_NUL (WAL_P) then
+         Out_Status := C_Status_Invalid_Arg;
+         return;
+      end if;
+
+      G_DB_Path  := DB_P;
+      G_WAL_Path := WAL_P;
+      Delete_File_If_Exists (G_DB_Path);
+      Delete_File_If_Exists (G_WAL_Path);
+      Init_RAG_Engine (G_RAG_Engine, Vector_Dim (Dim));
+      G_Initialized := True;
+      Out_Status    := C_Status_Ok;
+   end C_Init_With_Paths;
 
    procedure C_Analyze_SQL
      (Query_Buf      : in     C_Text_Buf;
@@ -179,11 +224,68 @@ package body Nhe_O.C_API is
       BB  := Quantize_To_Binary (VB);
       Ham := Hamming_Distance (BA, BB);
 
-      Out_L2_Dist  := C_float (L2);
+      if L2 <= 1.0e30 then
+         Out_L2_Dist := C_float (L2);
+      end if;
       Out_Cos_Dist := C_float (Cos);
       Out_Hamming  := int (Ham);
       Out_Status   := C_Status_Ok;
    end C_Vector_Distance_3D;
+
+   procedure C_Vector_Distance_ND
+     (A_Buf        : in     C_Vec_Buf;
+      B_Buf        : in     C_Vec_Buf;
+      Dim          : in     int;
+      Out_L2_Dist  :    out C_float;
+      Out_Cos_Dist :    out C_float;
+      Out_Hamming  :    out int;
+      Out_Status   :    out int)
+   is
+      VA, VB : Vector_Value;
+      BA, BB : Quantized_Binary_Vector;
+      L2     : Non_Negative_Float;
+      Cos    : Float;
+      Ham    : Natural;
+      D      : Vector_Dim;
+   begin
+      Out_L2_Dist  := 0.0;
+      Out_Cos_Dist := 0.0;
+      Out_Hamming  := 0;
+
+      if Dim not in 1 .. int (Max_Vector_Dim) then
+         Out_Status := C_Status_Invalid_Arg;
+         return;
+      end if;
+
+      D      := Vector_Dim (Dim);
+      VA.Dim := D;
+      VB.Dim := D;
+
+      for I in 1 .. D loop
+         pragma Loop_Invariant (VA.Dim = D and then VB.Dim = D);
+         if not (A_Buf (size_t (I)) in -1.0e6 .. 1.0e6
+                 and then B_Buf (size_t (I)) in -1.0e6 .. 1.0e6)
+         then
+            Out_Status := C_Status_Invalid_Arg;
+            return;
+         end if;
+         VA.Elements (I) := Float (A_Buf (size_t (I)));
+         VB.Elements (I) := Float (B_Buf (size_t (I)));
+      end loop;
+
+      L2  := L2_Distance (VA, VB);
+      Cos := Cosine_Distance (VA, VB);
+      BA  := Quantize_To_Binary (VA);
+      BB  := Quantize_To_Binary (VB);
+      Ham := Hamming_Distance (BA, BB);
+
+      if L2 <= 1.0e30 then
+         Out_L2_Dist := C_float (L2);
+      end if;
+      Out_Cos_Dist := C_float (Cos);
+      Out_Hamming  := int (Ham);
+      Out_Status   := C_Status_Ok;
+   end C_Vector_Distance_ND;
 
    procedure C_KV_Set
      (Key_Buf    : in     C_Ident_Buf;
@@ -199,9 +301,15 @@ package body Nhe_O.C_API is
       Has_TTL : Boolean;
       TTL_Val : Epoch_Seconds;
    begin
+      if not G_Initialized then
+         Out_Status := C_Status_Not_Initialized;
+         return;
+      end if;
+
       if Key_Len <= 0 or else Key_Len > int (Max_Ident_Len)
         or else Val_Len < 0 or else Val_Len > int (Max_Text_Len)
         or else Now_Sec < 0
+        or else TTL_Sec < 0
       then
          Out_Status := C_Status_Invalid_Arg;
          return;
@@ -230,7 +338,7 @@ package body Nhe_O.C_API is
      (Key_Buf     : in     C_Ident_Buf;
       Key_Len     : in     int;
       Now_Sec     : in     Integer_64;
-      Out_Val_Buf :    out C_Text_Buf;
+      Out_Val_Buf : in out C_Text_Buf;
       Out_Val_Len :    out int;
       Out_Status  :    out int)
    is
@@ -238,8 +346,12 @@ package body Nhe_O.C_API is
       Val    : Bounded_Text;
       Status : Engine_Status;
    begin
-      Out_Val_Buf := [others => nul];
       Out_Val_Len := 0;
+
+      if not G_Initialized then
+         Out_Status := C_Status_Not_Initialized;
+         return;
+      end if;
 
       if Key_Len <= 0 or else Key_Len > int (Max_Ident_Len)
         or else Now_Sec < 0
@@ -267,6 +379,12 @@ package body Nhe_O.C_API is
       Removed : Boolean;
    begin
       Out_Removed := 0;
+
+      if not G_Initialized then
+         Out_Status := C_Status_Not_Initialized;
+         return;
+      end if;
+
       if Key_Len <= 0 or else Key_Len > int (Max_Ident_Len) then
          Out_Status := C_Status_Invalid_Arg;
          return;
@@ -277,6 +395,95 @@ package body Nhe_O.C_API is
       Out_Removed := (if Removed then 1 else 0);
       Out_Status  := C_Status_Ok;
    end C_KV_Del;
+
+   procedure C_KV_Exists
+     (Key_Buf    : in     C_Ident_Buf;
+      Key_Len    : in     int;
+      Now_Sec    : in     Integer_64;
+      Out_Exists :    out int;
+      Out_Status :    out int)
+   is
+      Key : Bounded_Ident;
+   begin
+      Out_Exists := 0;
+
+      if not G_Initialized then
+         Out_Status := C_Status_Not_Initialized;
+         return;
+      end if;
+
+      if Key_Len <= 0 or else Key_Len > int (Max_Ident_Len)
+        or else Now_Sec < 0
+      then
+         Out_Status := C_Status_Invalid_Arg;
+         return;
+      end if;
+
+      Key        := To_Bounded_Ident (Key_Buf, Ident_Length (Key_Len));
+      Out_Exists := (if Exists (G_KV_Store, Key, Now_Sec) then 1 else 0);
+      Out_Status := C_Status_Ok;
+   end C_KV_Exists;
+
+   procedure C_KV_Expire
+     (Key_Buf     : in     C_Ident_Buf;
+      Key_Len     : in     int;
+      Now_Sec     : in     Integer_64;
+      TTL_Sec     : in     Integer_64;
+      Out_Updated :    out int;
+      Out_Status  :    out int)
+   is
+      Key     : Bounded_Ident;
+      Updated : Boolean;
+   begin
+      Out_Updated := 0;
+
+      if not G_Initialized then
+         Out_Status := C_Status_Not_Initialized;
+         return;
+      end if;
+
+      if Key_Len <= 0 or else Key_Len > int (Max_Ident_Len)
+        or else Now_Sec < 0
+        or else TTL_Sec <= 0
+        or else Now_Sec > Epoch_Seconds'Last - TTL_Sec
+      then
+         Out_Status := C_Status_Invalid_Arg;
+         return;
+      end if;
+
+      Key := To_Bounded_Ident (Key_Buf, Ident_Length (Key_Len));
+      Expire (G_KV_Store, Key, Now_Sec, TTL_Sec, Updated);
+      Out_Updated := (if Updated then 1 else 0);
+      Out_Status  := C_Status_Ok;
+   end C_KV_Expire;
+
+   procedure C_KV_TTL
+     (Key_Buf    : in     C_Ident_Buf;
+      Key_Len    : in     int;
+      Now_Sec    : in     Integer_64;
+      Out_TTL    :    out Integer_64;
+      Out_Status :    out int)
+   is
+      Key : Bounded_Ident;
+   begin
+      Out_TTL := -2;
+
+      if not G_Initialized then
+         Out_Status := C_Status_Not_Initialized;
+         return;
+      end if;
+
+      if Key_Len <= 0 or else Key_Len > int (Max_Ident_Len)
+        or else Now_Sec < 0
+      then
+         Out_Status := C_Status_Invalid_Arg;
+         return;
+      end if;
+
+      Key        := To_Bounded_Ident (Key_Buf, Ident_Length (Key_Len));
+      Out_TTL    := Remaining_TTL (G_KV_Store, Key, Now_Sec);
+      Out_Status := C_Status_Ok;
+   end C_KV_TTL;
 
    procedure C_KV_Incr_By
      (Key_Buf     : in     C_Ident_Buf;
@@ -290,6 +497,12 @@ package body Nhe_O.C_API is
       Status : Engine_Status;
    begin
       Out_New_Val := 0;
+
+      if not G_Initialized then
+         Out_Status := C_Status_Not_Initialized;
+         return;
+      end if;
+
       if Key_Len <= 0 or else Key_Len > int (Max_Ident_Len)
         or else Now_Sec < 0
       then
@@ -313,6 +526,12 @@ package body Nhe_O.C_API is
       Status  : Engine_Status;
    begin
       Out_Sub_Id := 0;
+
+      if not G_Initialized then
+         Out_Status := C_Status_Not_Initialized;
+         return;
+      end if;
+
       if Pattern_Len <= 0 or else Pattern_Len > int (Max_Ident_Len) then
          Out_Status := C_Status_Invalid_Arg;
          return;
@@ -325,6 +544,25 @@ package body Nhe_O.C_API is
       end if;
       Out_Status := To_C_Status (Status);
    end C_PubSub_Subscribe;
+
+   procedure C_PubSub_Unsubscribe
+     (Sub_Id     : in     int;
+      Out_Status :    out int)
+   is
+   begin
+      if not G_Initialized then
+         Out_Status := C_Status_Not_Initialized;
+         return;
+      end if;
+
+      if Sub_Id not in int (Subscriber_Id'First) .. int (Subscriber_Id'Last) then
+         Out_Status := C_Status_Invalid_Arg;
+         return;
+      end if;
+
+      Unsubscribe (G_Broker, Subscriber_Id (Sub_Id));
+      Out_Status := C_Status_Ok;
+   end C_PubSub_Unsubscribe;
 
    procedure C_PubSub_Publish
      (Chan_Buf      : in     C_Ident_Buf;
@@ -339,6 +577,12 @@ package body Nhe_O.C_API is
       Delivered : Subscriber_Count;
    begin
       Out_Delivered := 0;
+
+      if not G_Initialized then
+         Out_Status := C_Status_Not_Initialized;
+         return;
+      end if;
+
       if Chan_Len <= 0 or else Chan_Len > int (Max_Ident_Len)
         or else Payload_Len < 0 or else Payload_Len > int (Max_Text_Len)
       then
@@ -355,9 +599,9 @@ package body Nhe_O.C_API is
 
    procedure C_PubSub_Poll
      (Sub_Id          : in     int;
-      Out_Chan_Buf    :    out C_Ident_Buf;
+      Out_Chan_Buf    : in out C_Ident_Buf;
       Out_Chan_Len    :    out int;
-      Out_Payload_Buf :    out C_Text_Buf;
+      Out_Payload_Buf : in out C_Text_Buf;
       Out_Payload_Len :    out int;
       Out_Found       :    out int;
       Out_Status      :    out int)
@@ -365,11 +609,14 @@ package body Nhe_O.C_API is
       Msg   : PubSub_Message;
       Found : Boolean;
    begin
-      Out_Chan_Buf    := [others => nul];
       Out_Chan_Len    := 0;
-      Out_Payload_Buf := [others => nul];
       Out_Payload_Len := 0;
       Out_Found       := 0;
+
+      if not G_Initialized then
+         Out_Status := C_Status_Not_Initialized;
+         return;
+      end if;
 
       if Sub_Id not in int (Subscriber_Id'First) .. int (Subscriber_Id'Last) then
          Out_Status := C_Status_Invalid_Arg;
@@ -396,51 +643,91 @@ package body Nhe_O.C_API is
       Related_Doc_Id : in     int;
       Out_Status     :    out int)
    is
-      DB_Path        : constant Bounded_Text := Make_Text ("/tmp/nhe_o_c_api.db");
-      WAL_Path       : constant Bounded_Text := Make_Text ("/tmp/nhe_o_c_api.wal");
+      Vec_Buf : C_Vec_Buf := [others => 0.0];
+   begin
+      Vec_Buf (1) := VX;
+      Vec_Buf (2) := VY;
+      Vec_Buf (3) := VZ;
+      C_RAG_Ingest_ND
+        (Doc_Id         => Doc_Id,
+         Summary_Buf    => Summary_Buf,
+         Summary_Len    => Summary_Len,
+         Vec_Buf        => Vec_Buf,
+         Dim            => 3,
+         Related_Doc_Id => Related_Doc_Id,
+         Out_Status     => Out_Status);
+   end C_RAG_Ingest_3D;
+
+   procedure C_RAG_Ingest_ND
+     (Doc_Id         : in     int;
+      Summary_Buf    : in     C_Text_Buf;
+      Summary_Len    : in     int;
+      Vec_Buf        : in     C_Vec_Buf;
+      Dim            : in     int;
+      Related_Doc_Id : in     int;
+      Out_Status     :    out int)
+   is
       Tx             : Transaction_Context;
       Staging        : Tx_Notification_Buffer := (others => <>);
       Meta           : JSONB_Document         := (others => <>);
       Summary        : Bounded_Text;
       Vec            : Vector_Value;
+      D              : Vector_Dim;
       Parent_Payload : TOAST_Payload_Buffer   := [others => 0];
       Parent_Len     : Valid_TOAST_Length     := 128;
-      Commit_Page    : constant Page_Buffer   := [others => 0];
+      Commit_Page    : Page_Buffer;
+      Saved_Engine   : constant RAG_Engine    := G_RAG_Engine;
       Status         : Engine_Status;
       Commit_Status  : Engine_Status;
       Flushed_Count  : Natural;
       pragma Warnings (Off, Flushed_Count);
+      pragma Warnings (Off, Status);
+      pragma Warnings (Off, Tx);
+      pragma Warnings (Off, Staging);
    begin
+      if not G_Initialized
+        or else G_DB_Path.Length = 0
+        or else G_WAL_Path.Length = 0
+      then
+         Out_Status := C_Status_Not_Initialized;
+         return;
+      end if;
+
       if Doc_Id not in int (RAG_Doc_Slot'First) .. int (RAG_Doc_Slot'Last)
         or else Summary_Len < 0 or else Summary_Len > int (Max_Text_Len)
+        or else Dim not in 1 .. int (Max_Vector_Dim)
         or else Related_Doc_Id not in int (Optional_Doc_Id'First) .. int (Optional_Doc_Id'Last)
       then
          Out_Status := C_Status_Invalid_Arg;
          return;
       end if;
 
-      if not (VX in -1.0e6 .. 1.0e6
-              and then VY in -1.0e6 .. 1.0e6
-              and then VZ in -1.0e6 .. 1.0e6)
-      then
-         Out_Status := C_Status_Invalid_Arg;
+      D := Vector_Dim (Dim);
+      if G_RAG_Engine.Dim /= D or else G_RAG_Engine.Vector_Graph.Dim /= D then
+         Out_Status := C_Status_Dimension_Mismatch;
          return;
       end if;
 
-      --  Ensure RAG engine and transaction sequence satisfy preconditions
+      Vec.Dim := D;
+      for I in 1 .. D loop
+         pragma Loop_Invariant (Vec.Dim = D);
+         if not (Vec_Buf (size_t (I)) in -1.0e6 .. 1.0e6) then
+            Out_Status := C_Status_Invalid_Arg;
+            return;
+         end if;
+         Vec.Elements (I) := Float (Vec_Buf (size_t (I)));
+      end loop;
+
       if G_Next_Tx = Max_Tx_Id
-        or else G_RAG_Engine.Dim /= 3
-        or else G_RAG_Engine.Vector_Graph.Dim /= 3
         or else G_RAG_Engine.PK_Tree.Node_Count not in 1 .. Max_BTree_Nodes
         or else G_RAG_Engine.PK_Tree.Root_Node not in 1 .. G_RAG_Engine.PK_Tree.Node_Count
-        or else G_RAG_Engine.Next_TOAST_Pg > Max_Page_Id - Max_TOAST_Chunks
+        or else G_RAG_Engine.Next_TOAST_Pg > Max_Safe_TOAST_Page
       then
          Out_Status := C_Status_Capacity_Exceeded;
          return;
       end if;
 
       Summary := To_Bounded_Text (Summary_Buf, Text_Length (Summary_Len));
-      Vec     := Make_Vector_3D (Float (VX), Float (VY), Float (VZ));
 
       if Summary.Length > 0 then
          Parent_Len := Summary.Length;
@@ -456,8 +743,8 @@ package body Nhe_O.C_API is
       Ingest_Document
         (Engine         => G_RAG_Engine,
          Ctx            => Tx,
-         DB_Path        => DB_Path,
-         WAL_Path       => WAL_Path,
+         DB_Path        => G_DB_Path,
+         WAL_Path       => G_WAL_Path,
          Staging        => Staging,
          Doc_Id         => RAG_Doc_Slot (Doc_Id),
          Metadata       => Meta,
@@ -470,21 +757,30 @@ package body Nhe_O.C_API is
          Status         => Status);
 
       if Status /= Status_Ok then
+         G_RAG_Engine := Saved_Engine;
+         Set_CLOG_State (G_RAG_Engine.CLOG, Tx.Id, Tx_Aborted);
+         pragma Warnings (GNATprove, Off, "statement has no effect");
          Rollback_Tx (Tx);
          Discard_Staged_Notifications (Tx, Staging);
+         pragma Warnings (GNATprove, On, "statement has no effect");
          Out_Status := To_C_Status (Status);
          return;
       end if;
 
-      Commit_Tx (Tx, DB_Path, WAL_Path, 1, Commit_Page, Commit_Status);
+      Build_RAG_Slotted_Page (G_RAG_Engine, Tx.Id, Commit_Page);
+      Commit_Tx (Tx, G_DB_Path, G_WAL_Path, 1, Commit_Page, Commit_Status);
       if Commit_Status = Status_Ok then
          Flush_Committed_Notifications (Tx, Staging, G_Broker, Flushed_Count);
       else
+         G_RAG_Engine := Saved_Engine;
+         Set_CLOG_State (G_RAG_Engine.CLOG, Tx.Id, Tx_Aborted);
+         pragma Warnings (GNATprove, Off, "statement has no effect");
          Discard_Staged_Notifications (Tx, Staging);
+         pragma Warnings (GNATprove, On, "statement has no effect");
       end if;
 
       Out_Status := To_C_Status (Commit_Status);
-   end C_RAG_Ingest_3D;
+   end C_RAG_Ingest_ND;
 
    procedure C_RAG_Query_3D
      (QX, QY, QZ       : in     C_float;
@@ -499,26 +795,70 @@ package body Nhe_O.C_API is
       Out_Graph_Hit    :    out int;
       Out_Status       :    out int)
    is
-      DB_Path     : constant Bounded_Text  := Make_Text ("/tmp/nhe_o_c_api.db");
+      Q_Buf      : C_Vec_Buf  := [others => 0.0];
+      Parent_Buf : C_Text_Buf := [others => nul];
+      pragma Warnings (Off, Parent_Buf);
+   begin
+      Q_Buf (1) := QX;
+      Q_Buf (2) := QY;
+      Q_Buf (3) := QZ;
+      C_RAG_Query_ND
+        (Query_Vec_Buf    => Q_Buf,
+         Dim              => 3,
+         Encoding_Mode    => Encoding_Mode,
+         Keyword_Buf      => Keyword_Buf,
+         Keyword_Len      => Keyword_Len,
+         Top_K            => Top_K,
+         Out_Hit_Count    => Out_Hit_Count,
+         Out_Top_Doc_Id   => Out_Top_Doc_Id,
+         Out_Top_Distance => Out_Top_Distance,
+         Out_Parent_Buf   => Parent_Buf,
+         Out_Parent_Len   => Out_Parent_Bytes,
+         Out_Graph_Hit    => Out_Graph_Hit,
+         Out_Status       => Out_Status);
+   end C_RAG_Query_3D;
+
+   procedure C_RAG_Query_ND
+     (Query_Vec_Buf    : in     C_Vec_Buf;
+      Dim              : in     int;
+      Encoding_Mode    : in     int;
+      Keyword_Buf      : in     C_Text_Buf;
+      Keyword_Len      : in     int;
+      Top_K            : in     int;
+      Out_Hit_Count    :    out int;
+      Out_Top_Doc_Id   :    out int;
+      Out_Top_Distance :    out C_float;
+      Out_Parent_Buf   : in out C_Text_Buf;
+      Out_Parent_Len   :    out int;
+      Out_Graph_Hit    :    out int;
+      Out_Status       :    out int)
+   is
       SQL_Query   : constant Bounded_Text  :=
         Make_Text ("SELECT id, chunk FROM rag_docs ORDER BY emb <-> $1;");
       Empty_Meta  : constant JSONB_Document := (others => <>);
       Query_Vec   : Vector_Value;
+      D           : Vector_Dim;
       Encoding    : Vector_Encoding_Kind;
       Keyword     : Bounded_Text;
       Use_Keyword : Boolean;
       Result      : RAG_Query_Result;
       Top_Parent  : TOAST_Payload_Buffer;
-      pragma Warnings (Off, Top_Parent);
+      Copy_Len    : Natural;
       Status      : Engine_Status;
    begin
       Out_Hit_Count    := 0;
       Out_Top_Doc_Id   := 0;
       Out_Top_Distance := 0.0;
-      Out_Parent_Bytes := 0;
+      Out_Parent_Len   := 0;
       Out_Graph_Hit    := 0;
 
+      if not G_Initialized or else G_DB_Path.Length = 0 then
+         Out_Status := C_Status_Not_Initialized;
+         return;
+      end if;
+
       if Keyword_Len < 0 or else Keyword_Len > int (Max_Text_Len)
+        or else Dim not in 1 .. int (Max_Vector_Dim)
         or else Top_K not in int (RAG_Hit_Index'First) .. int (RAG_Hit_Index'Last)
         or else Encoding_Mode not in 0 .. 2
       then
@@ -526,18 +866,25 @@ package body Nhe_O.C_API is
          return;
       end if;
 
-      if not (QX in -1.0e6 .. 1.0e6
-              and then QY in -1.0e6 .. 1.0e6
-              and then QZ in -1.0e6 .. 1.0e6)
+      D := Vector_Dim (Dim);
+      if G_RAG_Engine.Dim /= D
+        or else G_RAG_Engine.Vector_Graph.Dim /= D
+        or else G_RAG_Engine.PK_Tree.Node_Count not in 1 .. Max_BTree_Nodes
+        or else G_RAG_Engine.PK_Tree.Root_Node not in 1 .. G_RAG_Engine.PK_Tree.Node_Count
       then
-         Out_Status := C_Status_Invalid_Arg;
-         return;
-      end if;
-
-      if G_RAG_Engine.Dim /= 3 or else G_RAG_Engine.Vector_Graph.Dim /= 3 then
          Out_Status := C_Status_Dimension_Mismatch;
          return;
       end if;
+
+      Query_Vec.Dim := D;
+      for I in 1 .. D loop
+         pragma Loop_Invariant (Query_Vec.Dim = D);
+         if not (Query_Vec_Buf (size_t (I)) in -1.0e6 .. 1.0e6) then
+            Out_Status := C_Status_Invalid_Arg;
+            return;
+         end if;
+         Query_Vec.Elements (I) := Float (Query_Vec_Buf (size_t (I)));
+      end loop;
 
       case Encoding_Mode is
          when 0      => Encoding := Encoding_Float32;
@@ -545,14 +892,13 @@ package body Nhe_O.C_API is
          when others => Encoding := Encoding_Binary_1Bit;
       end case;
 
-      Query_Vec   := Make_Vector_3D (Float (QX), Float (QY), Float (QZ));
       Keyword     := To_Bounded_Text (Keyword_Buf, Text_Length (Keyword_Len));
       Use_Keyword := Keyword.Length > 0;
 
       Execute_Hybrid_RAG_Query
         (Engine            => G_RAG_Engine,
          Snapshot          => G_Next_Tx,
-         DB_Path           => DB_Path,
+         DB_Path           => G_DB_Path,
          SQL_Query         => SQL_Query,
          Query_Vec         => Query_Vec,
          Encoding          => Encoding,
@@ -566,11 +912,21 @@ package body Nhe_O.C_API is
          Status            => Status);
 
       if Status = Status_Ok then
-         Out_Hit_Count    := int (Result.Count);
-         Out_Parent_Bytes := int (Result.Top_Parent_Bytes);
-         Out_Graph_Hit    := (if Result.Graph_Neighbor_Hit then 1 else 0);
+         Out_Hit_Count  := int (Result.Count);
+         Out_Parent_Len := int (Result.Top_Parent_Bytes);
+         Out_Graph_Hit  := (if Result.Graph_Neighbor_Hit then 1 else 0);
+
+         Copy_Len := Natural'Min (Max_Text_Len, Result.Top_Parent_Bytes);
+         for I in 1 .. Copy_Len loop
+            Out_Parent_Buf (size_t (I)) :=
+              To_C (Character'Val (Natural (Top_Parent (I))));
+         end loop;
+         if Copy_Len < Max_Text_Len then
+            Out_Parent_Buf (size_t (Copy_Len + 1)) := nul;
+         end if;
+
          if Result.Count >= 1 then
-            Out_Top_Doc_Id   := int (Result.Hits (1).Doc_Id);
+            Out_Top_Doc_Id := int (Result.Hits (1).Doc_Id);
             if Result.Hits (1).Distance <= 1.0e30 then
                Out_Top_Distance := C_float (Result.Hits (1).Distance);
             end if;
@@ -578,6 +934,6 @@ package body Nhe_O.C_API is
       end if;
 
       Out_Status := To_C_Status (Status);
-   end C_RAG_Query_3D;
+   end C_RAG_Query_ND;
 
 end Nhe_O.C_API;

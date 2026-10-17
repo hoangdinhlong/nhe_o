@@ -1,6 +1,8 @@
---  Formally verified Universal RAG & Hybrid SQL Query Executor (ADR-003 / ADR-004)
+--  Formally verified Universal RAG & Hybrid SQL Query Executor
+--  (ADR-003, ADR-004, CRIT-01, CRIT-04, CRIT-07, HIGH-05, HIGH-09, MED-03, Q-003)
 --  Unifies B+Tree PK Index, 4096-D Quantized HNSW, JSONB Filter, 4KB TOAST Parent
---  Chunks, GraphRAG 1-Hop Links, and Durable WAL-Committed Pub/Sub Notifications.
+--  & Vector Overflow Chains, Slotted Page Persistence, MVCC CLOG + Prior Version
+--  Chains, GraphRAG 1-Hop Links, and Durable WAL-Committed Pub/Sub Notifications.
 pragma SPARK_Mode (On);
 
 with Nhe_O.Types;       use Nhe_O.Types;
@@ -19,26 +21,46 @@ package Nhe_O.RAG is
    subtype RAG_Doc_Count is Natural range 0 .. Max_RAG_Docs;
    subtype Optional_Doc_Id is Natural range 0 .. Max_RAG_Docs;
 
+   --  Upper bound on Next_TOAST_Pg guaranteeing room for 2 full TOAST chains (HIGH-09)
+   Max_Safe_TOAST_Page : constant Valid_Page_Id :=
+     Max_Page_Id - (2 * Max_TOAST_Chunks);
+
    type RAG_Document_Entry is record
-      Active         : Boolean        := False;
-      Doc_Id         : Positive       := 1;
-      Tuple_Hdr      : MVCC_Tuple_Header := (Xmin => 1, Xmax => 0);
-      Metadata       : JSONB_Document := (others => <>);
-      Summary_Text   : Bounded_Text   := (Length => 0, Data => [others => ' ']);
-      Toast_Ptr      : TOAST_Pointer  := (others => <>);
-      Related_Doc_Id : Optional_Doc_Id := 0; --  1-hop GraphRAG entity edge
+      Active            : Boolean           := False;
+      Doc_Id            : Positive          := 1;
+      Tuple_Hdr         : MVCC_Tuple_Header := (Xmin => 1, Xmax => 0);
+      Metadata          : JSONB_Document    := (others => <>);
+      Summary_Text      : Bounded_Text      := (Length => 0, Data => [others => ' ']);
+      Toast_Ptr         : TOAST_Pointer     := (others => <>);
+      Vec_Toast_Ptr     : TOAST_Pointer     := (others => <>); --  4096-D full vector TOAST (Q-003)
+      Related_Doc_Id    : Optional_Doc_Id   := 0;              --  1-hop GraphRAG entity edge
+      --  Prior MVCC tuple version preserved for historical snapshots & rollback (CRIT-04)
+      Has_Prior_Version : Boolean           := False;
+      Prior_Tuple_Hdr   : MVCC_Tuple_Header := (Xmin => 1, Xmax => 0);
+      Prior_Metadata    : JSONB_Document    := (others => <>);
+      Prior_Summary     : Bounded_Text      := (Length => 0, Data => [others => ' ']);
+      Prior_Toast_Ptr   : TOAST_Pointer     := (others => <>);
+      Prior_Related_Id  : Optional_Doc_Id   := 0;
    end record;
 
    type RAG_Document_Table is array (RAG_Doc_Slot) of RAG_Document_Entry;
 
    type RAG_Engine is record
-      Dim            : Vector_Dim         := 3;
-      Doc_Count      : RAG_Doc_Count      := 0;
-      Next_TOAST_Pg  : Valid_Page_Id      := 10;
-      PK_Tree        : BTree_Index        := (others => <>);
-      Vector_Graph   : HNSW_Index         := (others => <>);
-      Docs           : RAG_Document_Table := [others => (others => <>)];
+      Dim           : Vector_Dim         := 3;
+      Doc_Count     : RAG_Doc_Count      := 0;
+      Next_TOAST_Pg : Valid_Page_Id      := 10;
+      CLOG          : Commit_Log         := Default_CLOG;
+      PK_Tree       : BTree_Index        := (others => <>);
+      Vector_Graph  : HNSW_Index         := (others => <>);
+      Docs          : RAG_Document_Table := [others => (others => <>)];
    end record;
+
+   --  Structural invariant check for a RAG_Engine instance (MED-03)
+   function Is_Valid_RAG_Engine (Engine : RAG_Engine) return Boolean is
+     (Engine.Vector_Graph.Dim = Engine.Dim
+      and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+      and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
+      and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page);
 
    Max_RAG_Hits : constant := 8;
    subtype RAG_Hit_Index is Positive range 1 .. Max_RAG_Hits;
@@ -73,19 +95,63 @@ package Nhe_O.RAG is
                     and then Engine.Doc_Count = 0
                     and then Engine.PK_Tree.Node_Count = 1
                     and then Engine.PK_Tree.Root_Node = 1
-                    and then Engine.Next_TOAST_Pg = 10;
+                    and then Engine.Next_TOAST_Pg = 10
+                    and then Is_Valid_RAG_Engine (Engine);
 
-   --  Case-insensitive substring check for Hybrid Lexical + Vector RAG
+   --  Case-insensitive substring check for Hybrid Lexical + Vector RAG.
+   --  Returns False when Keyword.Length = 0 (HIGH-05).
    function Contains_Keyword
      (Text    : Bounded_Text;
       Keyword : Bounded_Text) return Boolean
-     with Global => null;
+     with Global => null,
+          Post   => (if Keyword.Length = 0 then not Contains_Keyword'Result);
+
+   --  MVCC logical delete of a document at transaction Ctx (sets Xmax := Ctx.Id, CRIT-04)
+   procedure Delete_Document
+     (Engine : in out RAG_Engine;
+      Ctx    : in     Transaction_Context;
+      Doc_Id : in     RAG_Doc_Slot;
+      Status :    out Engine_Status)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Ctx.State = Tx_Active
+                    and then Engine.Vector_Graph.Dim = Engine.Dim,
+          Post   => Engine.Dim = Engine.Dim'Old
+                    and then Engine.Vector_Graph.Dim = Engine.Dim
+                    and then Engine.PK_Tree.Node_Count = Engine.PK_Tree.Node_Count'Old
+                    and then Engine.PK_Tree.Root_Node = Engine.PK_Tree.Root_Node'Old
+                    and then Engine.Next_TOAST_Pg = Engine.Next_TOAST_Pg'Old;
+
+   --  Encode Engine.Docs into a 4096-byte primary Slotted_Page (`"SLOT"`, CRIT-01)
+   procedure Build_RAG_Slotted_Page
+     (Engine   : in     RAG_Engine;
+      LSN_Tx   : in     Valid_Tx_Id;
+      Raw_Page :    out Page_Buffer)
+     with Global => null,
+          Always_Terminates;
+
+   --  Recover a RAG_Engine from on-disk WAL + Page 1 Slotted_Page (CRIT-01, CRIT-05)
+   procedure Recover_RAG_Engine
+     (Engine   :    out RAG_Engine;
+      Dim      : in     Vector_Dim;
+      DB_Path  : in     Bounded_Text;
+      WAL_Path : in     Bounded_Text;
+      Status   :    out Engine_Status)
+     with Global => null,
+          Always_Terminates,
+          Pre    => DB_Path.Length > 0 and then WAL_Path.Length > 0,
+          Post   => Engine.Dim = Dim
+                    and then Engine.Vector_Graph.Dim = Dim
+                    and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
+                    and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page;
 
    --  Transactional Document Ingestion:
-   --  1. Persists oversized parent chunk (or 16KB 4096-D payload) to 4KB TOAST chain
+   --  1. Persists oversized parent chunk (and full >64-D vector when Dim > 64) to 4KB TOAST chains
    --  2. Indexes Doc_Id in B+Tree (Nhe_O.BTree)
    --  3. Indexes Embedding in Multi-Layer Quantized HNSW Graph (Nhe_O.HNSW)
-   --  4. Stages a DURABLE WAL notification on channel "rag.indexed" (Nhe_O.PubSub)
+   --  4. Preserves prior MVCC version & persists primary Slotted_Page on Page 1 (CRIT-01, CRIT-04)
+   --  5. Stages a DURABLE WAL notification on channel "rag.indexed" (Nhe_O.PubSub)
    procedure Ingest_Document
      (Engine         : in out RAG_Engine;
       Ctx            : in     Transaction_Context;
@@ -110,11 +176,12 @@ package Nhe_O.RAG is
                     and then Engine.Vector_Graph.Dim = Engine.Dim
                     and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
                     and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
-                    and then Engine.Next_TOAST_Pg <= Max_Page_Id - Max_TOAST_Chunks,
+                    and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page,
           Post   => Engine.Dim = Engine.Dim'Old
                     and then Engine.Vector_Graph.Dim = Engine.Dim
                     and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
-                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count;
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
+                    and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page;
 
    --  Execute a Hybrid SQL + JSONB (`@>`) + Lexical + HNSW Vector + TOAST + GraphRAG query
    procedure Execute_Hybrid_RAG_Query
@@ -136,7 +203,9 @@ package Nhe_O.RAG is
           Always_Terminates,
           Pre    => DB_Path.Length > 0
                     and then Query_Vec.Dim = Engine.Dim
-                    and then Engine.Vector_Graph.Dim = Engine.Dim,
+                    and then Engine.Vector_Graph.Dim = Engine.Dim
+                    and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count,
           Post   => Result.Count <= Top_K;
 
 end Nhe_O.RAG;

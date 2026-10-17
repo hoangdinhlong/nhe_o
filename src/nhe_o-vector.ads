@@ -1,7 +1,8 @@
---  Formally verified PostgreSQL pgvector-compatible Vector Engine (BR-003 / ADR-003)
+--  Formally verified PostgreSQL pgvector-compatible Vector Engine (BR-003 / ADR-003 / Q-003)
 pragma SPARK_Mode (On);
 
 with Interfaces;
+with Nhe_O.Transaction; use Nhe_O.Transaction;
 
 package Nhe_O.Vector is
 
@@ -105,6 +106,7 @@ package Nhe_O.Vector is
                     and then Quantize_To_Int8'Result.Scale > 0.0;
 
    --  Reconstruct approximate Float32 vector from Int8 (SQ8) quantized vector
+   --  with per-component saturation to [-Max_Component .. Max_Component] (CRIT-07)
    function Dequantize_From_Int8 (Q : Quantized_Int8_Vector) return Vector_Value
      with Global => null,
           Post   => Dequantize_From_Int8'Result.Dim = Q.Dim;
@@ -114,6 +116,13 @@ package Nhe_O.Vector is
      (A, B : Quantized_Int8_Vector) return Natural
      with Global => null,
           Pre    => A.Dim = B.Dim;
+
+   --  Scale-aware Euclidean (L2) distance between two Int8 (SQ8) vectors (CRIT-07)
+   function Int8_L2_Distance
+     (A, B : Quantized_Int8_Vector) return Non_Negative_Float
+     with Global => null,
+          Pre    => A.Dim = B.Dim,
+          Post   => Int8_L2_Distance'Result >= 0.0;
 
    --  Inner product in Int8 quantized integer domain (guaranteed overflow-free)
    function Int8_Inner_Product
@@ -133,5 +142,25 @@ package Nhe_O.Vector is
           Pre    => A.Dim = B.Dim,
           Post   => Hamming_Distance'Result <= A.Dim;
 
-end Nhe_O.Vector;
+   --  Serialize a Float32 Vector_Value (up to 4096-D = 16,384 bytes) into a
+   --  TOAST_Payload_Buffer (4 bytes per dimension) for TOAST overflow storage (Q-003)
+   procedure Encode_Vector_TOAST
+     (V       : in     Vector_Value;
+      Payload :    out TOAST_Payload_Buffer;
+      Length  :    out Valid_TOAST_Length)
+     with Global => null,
+          Always_Terminates,
+          Post   => Length = V.Dim * 4;
 
+   --  Deserialize a Float32 Vector_Value of dimension Dim from a TOAST_Payload_Buffer (Q-003)
+   procedure Decode_Vector_TOAST
+     (Payload : in     TOAST_Payload_Buffer;
+      Length  : in     Valid_TOAST_Length;
+      Dim     : in     Vector_Dim;
+      V       :    out Vector_Value;
+      Valid   :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Post   => V.Dim = Dim;
+
+end Nhe_O.Vector;

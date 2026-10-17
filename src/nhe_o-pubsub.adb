@@ -46,6 +46,7 @@ package body Nhe_O.PubSub is
                Head    => 1,
                Tail    => 1,
                Count   => 0,
+               Dropped => 0,
                Ring    => [others => (others => <>)]
             );
             Sub_Id := I;
@@ -61,11 +62,52 @@ package body Nhe_O.PubSub is
       Sub_Id : in     Subscriber_Id)
    is
    begin
-      Broker.Subscribers (Sub_Id).Active := False;
-      Broker.Subscribers (Sub_Id).Count  := 0;
-      Broker.Subscribers (Sub_Id).Head   := 1;
-      Broker.Subscribers (Sub_Id).Tail   := 1;
+      Broker.Subscribers (Sub_Id).Active  := False;
+      Broker.Subscribers (Sub_Id).Count   := 0;
+      Broker.Subscribers (Sub_Id).Dropped := 0;
+      Broker.Subscribers (Sub_Id).Head    := 1;
+      Broker.Subscribers (Sub_Id).Tail    := 1;
    end Unsubscribe;
+
+   procedure Publish
+     (Broker    : in out PubSub_Broker;
+      Channel   : in     Bounded_Ident;
+      Payload   : in     Bounded_Text;
+      Delivered :    out Subscriber_Count;
+      Dropped   :    out Subscriber_Count)
+   is
+      Tail_Idx : Queue_Index;
+   begin
+      Delivered := 0;
+      Dropped   := 0;
+      for I in Subscriber_Id loop
+         pragma Loop_Invariant (Delivered <= I - 1 and then Dropped <= I - 1);
+         if Broker.Subscribers (I).Active
+           and then Matches_Channel (Broker.Subscribers (I).Pattern, Channel)
+         then
+            if Broker.Subscribers (I).Count < Queue_Capacity then
+               Tail_Idx := Broker.Subscribers (I).Tail;
+               Broker.Subscribers (I).Ring (Tail_Idx) := (
+                  Channel => Channel,
+                  Payload => Payload
+               );
+               if Tail_Idx = Queue_Capacity then
+                  Broker.Subscribers (I).Tail := 1;
+               else
+                  Broker.Subscribers (I).Tail := Tail_Idx + 1;
+               end if;
+               Broker.Subscribers (I).Count := Broker.Subscribers (I).Count + 1;
+               Delivered := Delivered + 1;
+            else
+               if Broker.Subscribers (I).Dropped < Natural'Last then
+                  Broker.Subscribers (I).Dropped :=
+                    Broker.Subscribers (I).Dropped + 1;
+               end if;
+               Dropped := Dropped + 1;
+            end if;
+         end if;
+      end loop;
+   end Publish;
 
    procedure Publish
      (Broker    : in out PubSub_Broker;
@@ -73,29 +115,9 @@ package body Nhe_O.PubSub is
       Payload   : in     Bounded_Text;
       Delivered :    out Subscriber_Count)
    is
-      Tail_Idx : Queue_Index;
+      Ignored_Dropped : Subscriber_Count;
    begin
-      Delivered := 0;
-      for I in Subscriber_Id loop
-         pragma Loop_Invariant (Delivered <= I - 1);
-         if Broker.Subscribers (I).Active
-           and then Matches_Channel (Broker.Subscribers (I).Pattern, Channel)
-           and then Broker.Subscribers (I).Count < Queue_Capacity
-         then
-            Tail_Idx := Broker.Subscribers (I).Tail;
-            Broker.Subscribers (I).Ring (Tail_Idx) := (
-               Channel => Channel,
-               Payload => Payload
-            );
-            if Tail_Idx = Queue_Capacity then
-               Broker.Subscribers (I).Tail := 1;
-            else
-               Broker.Subscribers (I).Tail := Tail_Idx + 1;
-            end if;
-            Broker.Subscribers (I).Count := Broker.Subscribers (I).Count + 1;
-            Delivered := Delivered + 1;
-         end if;
-      end loop;
+      Publish (Broker, Channel, Payload, Delivered, Ignored_Dropped);
    end Publish;
 
    procedure Stage_Notify
@@ -106,6 +128,11 @@ package body Nhe_O.PubSub is
       Status  :    out Engine_Status)
    is
    begin
+      if Staging.Count > 0 and then Staging.Owner_Tx /= Ctx.Id then
+         Status := Status_Tx_Aborted;
+         return;
+      end if;
+
       if Staging.Count = Max_Staged_Notifications then
          Status := Status_Capacity_Exceeded;
          return;
@@ -126,32 +153,40 @@ package body Nhe_O.PubSub is
       Broker          : in out PubSub_Broker;
       Total_Delivered :    out Natural)
    is
-      pragma Unreferenced (Ctx);
       Step_Deliv : Subscriber_Count;
    begin
       Total_Delivered := 0;
-      for I in 1 .. Staging.Count loop
-         pragma Loop_Invariant (Total_Delivered <= (I - 1) * Max_Subscribers);
-         if Staging.Items (I).Channel.Length > 0 then
-            Publish
-              (Broker    => Broker,
-               Channel   => Staging.Items (I).Channel,
-               Payload   => Staging.Items (I).Payload,
-               Delivered => Step_Deliv);
-            Total_Delivered := Total_Delivered + Step_Deliv;
-         end if;
-      end loop;
 
-      Staging.Count := 0;
-      Staging.Items := [others => (others => <>)];
+      --  Enforce WAL Commit Barrier and transaction ownership (HIGH-07)
+      if Ctx.State = Tx_Committed
+        and then (Staging.Count = 0 or else Staging.Owner_Tx = Ctx.Id)
+      then
+         for I in 1 .. Staging.Count loop
+            pragma Loop_Invariant (Total_Delivered <= (I - 1) * Max_Subscribers);
+            if Staging.Items (I).Channel.Length > 0 then
+               Publish
+                 (Broker    => Broker,
+                  Channel   => Staging.Items (I).Channel,
+                  Payload   => Staging.Items (I).Payload,
+                  Delivered => Step_Deliv);
+               Total_Delivered := Total_Delivered + Step_Deliv;
+            end if;
+         end loop;
+      end if;
+
+      Staging.Owner_Tx := Ctx.Id;
+      Staging.Count    := 0;
+      Staging.Items    := [others => (others => <>)];
    end Flush_Committed_Notifications;
 
    procedure Discard_Staged_Notifications
      (Ctx     : in     Transaction_Context;
       Staging : in out Tx_Notification_Buffer)
    is
-      pragma Unreferenced (Ctx);
    begin
+      if Ctx.State = Tx_Aborted then
+         Staging.Owner_Tx := Ctx.Id;
+      end if;
       Staging.Count := 0;
       Staging.Items := [others => (others => <>)];
    end Discard_Staged_Notifications;
@@ -185,4 +220,3 @@ package body Nhe_O.PubSub is
    end Poll_Message;
 
 end Nhe_O.PubSub;
-

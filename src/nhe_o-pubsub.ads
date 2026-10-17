@@ -1,4 +1,5 @@
---  Formally verified Dual-Mode Ring-Buffer & Durable WAL Pub/Sub Broker (BR-005 / ADR-004)
+--  Formally verified Dual-Mode Ring-Buffer & Durable WAL Pub/Sub Broker
+--  (BR-005, ADR-004, HIGH-07, MED-03)
 pragma SPARK_Mode (On);
 
 with Nhe_O.Types;       use Nhe_O.Types;
@@ -27,8 +28,13 @@ package Nhe_O.PubSub is
       Head    : Queue_Index   := 1;
       Tail    : Queue_Index   := 1;
       Count   : Queue_Length  := 0;
+      Dropped : Natural       := 0;
       Ring    : Message_Ring  := [others => (others => <>)];
    end record;
+
+   --  Ring-buffer structural invariant for a subscriber slot (MED-03)
+   function Is_Valid_Subscriber_Ring (Slot : Subscriber_Slot) return Boolean is
+     (((Slot.Head - 1 + Slot.Count) mod Queue_Capacity) + 1 = Slot.Tail);
 
    type Subscriber_Table is array (Subscriber_Id) of Subscriber_Slot;
 
@@ -67,7 +73,9 @@ package Nhe_O.PubSub is
      with Global => null,
           Always_Terminates,
           Pre    => Pattern.Length > 0,
-          Post   => (if Status = Status_Ok then Broker.Subscribers (Sub_Id).Active);
+          Post   => (if Status = Status_Ok then
+                       Broker.Subscribers (Sub_Id).Active
+                       and then Is_Valid_Subscriber_Ring (Broker.Subscribers (Sub_Id)));
 
    --  UNSUBSCRIBE / UNLISTEN: Deactivate a subscriber slot and clear its queue
    procedure Unsubscribe
@@ -76,7 +84,8 @@ package Nhe_O.PubSub is
      with Global => null,
           Always_Terminates,
           Post   => not Broker.Subscribers (Sub_Id).Active
-                    and then Broker.Subscribers (Sub_Id).Count = 0;
+                    and then Broker.Subscribers (Sub_Id).Count = 0
+                    and then Is_Valid_Subscriber_Ring (Broker.Subscribers (Sub_Id));
 
    --  Mode 1 (Redis PUBLISH): Immediate in-memory delivery to matching subscribers
    procedure Publish
@@ -88,8 +97,20 @@ package Nhe_O.PubSub is
           Always_Terminates,
           Pre    => Channel.Length > 0;
 
+   --  Mode 1 with explicit overflow reporting (HIGH-07): reports both Delivered
+   --  and Dropped subscriber counts when a matching subscriber's ring is full.
+   procedure Publish
+     (Broker    : in out PubSub_Broker;
+      Channel   : in     Bounded_Ident;
+      Payload   : in     Bounded_Text;
+      Delivered :    out Subscriber_Count;
+      Dropped   :    out Subscriber_Count)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Channel.Length > 0;
+
    --  Mode 2 (PostgreSQL NOTIFY — Durable): Stage a notification inside an active transaction
-   --  held behind the WAL Commit Barrier until Commit_Tx succeeds (ADR-004 / BR-005)
+   --  held behind the WAL Commit Barrier until Commit_Tx succeeds (ADR-004 / BR-005 / HIGH-07)
    procedure Stage_Notify
      (Ctx     : in     Transaction_Context;
       Staging : in out Tx_Notification_Buffer;
@@ -104,6 +125,7 @@ package Nhe_O.PubSub is
                        and then Staging.Owner_Tx = Ctx.Id);
 
    --  Flush staged notifications across the WAL Commit Barrier ONLY after Tx_Committed
+   --  and only when Staging.Owner_Tx matches Ctx.Id (HIGH-07)
    procedure Flush_Committed_Notifications
      (Ctx             : in     Transaction_Context;
       Staging         : in out Tx_Notification_Buffer;
@@ -114,7 +136,7 @@ package Nhe_O.PubSub is
           Pre    => Ctx.State = Tx_Committed,
           Post   => Staging.Count = 0;
 
-   --  Discard staged notifications when a transaction rolls back or aborts
+   --  Discard staged notifications when a transaction rolls back or aborts (HIGH-07)
    procedure Discard_Staged_Notifications
      (Ctx     : in     Transaction_Context;
       Staging : in out Tx_Notification_Buffer)
@@ -136,4 +158,3 @@ package Nhe_O.PubSub is
                          Broker'Old.Subscribers (Sub_Id).Count - 1);
 
 end Nhe_O.PubSub;
-

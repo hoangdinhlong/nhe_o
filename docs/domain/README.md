@@ -1,4 +1,4 @@
-﻿# Domain Knowledge & Business Logic
+# Domain Knowledge & Business Logic
 
 The single source of truth for **domain rules, business formulas, and workflows**.
 
@@ -29,3 +29,5 @@ Follow the 4-step reverse-engineering / codification cycle:
 | ID | Domain / Concept | Source / Owner | Status |
 |---|---|---|---|
 | `RULE-001` | [Core Business Rules Index](business-rules.md) | Business Stakeholders | Active |
+| `DOM-001` | [Binary Storage, Slotted-Page, TOAST, B+Tree & WAL Format Specification](storage-and-wal-format.md) | Storage Engine Architecture (`ADR-001`..`ADR-007`) | Active |
+

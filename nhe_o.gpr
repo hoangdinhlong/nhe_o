@@ -1,11 +1,16 @@
+with "config/nhe_o_config.gpr";
+
 project Nhe_O is
    for Source_Dirs use ("src");
    for Object_Dir use "obj";
+   for Create_Missing_Dirs use "True";
    for Exec_Dir use "bin";
    for Main use ("nhe_o_main.adb");
 
    package Compiler is
       for Default_Switches ("Ada") use (
+         "-O2",
+         "-g",
          "-gnat2022",
          "-gnatwa",
          "-gnata",
@@ -16,4 +21,10 @@ project Nhe_O is
    package Binder is
       for Default_Switches ("Ada") use ("-E");
    end Binder;
+
+   package Prove is
+      for Proof_Switches ("Ada") use ("--level=2", "-j0");
+   end Prove;
 end Nhe_O;
+
+

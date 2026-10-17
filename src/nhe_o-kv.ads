@@ -1,8 +1,11 @@
---  Formally verified Redis-compatible Key-Value Cache Engine with TTL & LRU Eviction (BR-004)
+--  Formally verified Redis-compatible Key-Value Cache Engine with TTL, LRU Eviction,
+--  and Optional WAL Persistence & Crash Recovery (BR-004, HIGH-08, Q-004, MED-03)
 pragma SPARK_Mode (On);
 
-with Interfaces; use Interfaces;
-with Nhe_O.Types; use Nhe_O.Types;
+with Interfaces;        use Interfaces;
+with Nhe_O.Types;       use Nhe_O.Types;
+with Nhe_O.IO;          use Nhe_O.IO;
+with Nhe_O.Transaction; use Nhe_O.Transaction;
 
 package Nhe_O.KV is
 
@@ -60,7 +63,7 @@ package Nhe_O.KV is
                     and then (if Has_TTL then TTL_Sec > 0 and then Now <= Epoch_Seconds'Last - TTL_Sec),
           Post   => Exists (Store, Key, Now);
 
-   --  Redis `GET`: Retrieve value if present and not expired; updates LRU timestamp
+   --  Redis `GET`: Retrieve value if present and not expired; updates LRU timestamp (HIGH-08)
    procedure Get
      (Store  : in out KV_Store;
       Key    : in     Bounded_Ident;
@@ -68,7 +71,9 @@ package Nhe_O.KV is
       Val    :    out Bounded_Text;
       Status :    out Engine_Status)
      with Global => null,
-          Always_Terminates;
+          Always_Terminates,
+          Post   => Status in Status_Ok | Status_Not_Found | Status_Expired
+                    and then (if Status = Status_Ok then Exists (Store, Key, Now));
 
    --  Redis `DEL`: Remove key from store
    procedure Del
@@ -79,7 +84,7 @@ package Nhe_O.KV is
           Always_Terminates,
           Post   => not Exists (Store, Key, 0);
 
-   --  Redis `EXPIRE`: Attach a TTL in seconds to an existing live key
+   --  Redis `EXPIRE`: Attach a TTL in seconds to an existing live key (HIGH-08)
    procedure Expire
      (Store   : in out KV_Store;
       Key     : in     Bounded_Ident;
@@ -88,16 +93,19 @@ package Nhe_O.KV is
       Updated :    out Boolean)
      with Global => null,
           Always_Terminates,
-          Pre    => TTL_Sec > 0 and then Now <= Epoch_Seconds'Last - TTL_Sec;
+          Pre    => TTL_Sec > 0 and then Now <= Epoch_Seconds'Last - TTL_Sec,
+          Post   => (if Updated then Exists (Store, Key, Now));
 
-   --  Redis `TTL`: Return remaining seconds (-2 if missing/expired, -1 if no TTL)
+   --  Redis `TTL`: Return remaining seconds (-2 if missing/expired, -1 if no TTL) (HIGH-08)
    function Remaining_TTL
      (Store : KV_Store;
       Key   : Bounded_Ident;
       Now   : Epoch_Seconds) return Integer_64
-     with Global => null;
+     with Global => null,
+          Post   => Remaining_TTL'Result >= -2
+                    and then (if Remaining_TTL'Result > 0 then Exists (Store, Key, Now));
 
-   --  Redis `INCRBY`: Atomically increment numeric value of Key by Delta_Val
+   --  Redis `INCRBY`: Atomically increment numeric value of Key by Delta_Val (HIGH-08)
    procedure Incr_By
      (Store     : in out KV_Store;
       Key       : in     Bounded_Ident;
@@ -107,6 +115,75 @@ package Nhe_O.KV is
       Status    :    out Engine_Status)
      with Global => null,
           Always_Terminates,
-          Pre    => Key.Length > 0;
+          Pre    => Key.Length > 0,
+          Post   => (if Status = Status_Ok then Exists (Store, Key, Now));
+
+   -------------------------------------------------------------------------
+   --  Optional Durable WAL Persistence & Crash Recovery for KV (Q-004)
+   -------------------------------------------------------------------------
+
+   type KV_Wal_Op is (KV_Op_Set, KV_Op_Del);
+
+   --  Serialize a KV mutation into a 4096-byte WAL page with Magic "KVMG" + CRC32
+   procedure Encode_KV_Wal_Page
+     (Op   : in     KV_Wal_Op;
+      Slot : in     KV_Entry;
+      Page :    out Page_Buffer)
+     with Global => null,
+          Always_Terminates;
+
+   --  Deserialize and CRC32-verify a 4096-byte KV WAL page
+   procedure Decode_KV_Wal_Page
+     (Page  : in     Page_Buffer;
+      Op    :    out KV_Wal_Op;
+      Slot  :    out KV_Entry;
+      Valid :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Post   => (if Valid then Slot.Key.Length > 0);
+
+   --  Durable SET / SETEX: updates in-memory KV_Store and appends a WAL_Frame_KV record
+   procedure Set_Durable
+     (Store    : in out KV_Store;
+      WAL_Path : in     Bounded_Text;
+      Tx       : in     Valid_Tx_Id;
+      Key      : in     Bounded_Ident;
+      Val      : in     Bounded_Text;
+      Now      : in     Epoch_Seconds;
+      Has_TTL  : in     Boolean       := False;
+      TTL_Sec  : in     Epoch_Seconds := 0;
+      Status   :    out Engine_Status)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Key.Length > 0
+                    and then WAL_Path.Length > 0
+                    and then (if Has_TTL then TTL_Sec > 0 and then Now <= Epoch_Seconds'Last - TTL_Sec),
+          Post   => Exists (Store, Key, Now);
+
+   --  Durable DEL: removes Key from in-memory KV_Store and appends a WAL_Frame_KV record
+   procedure Del_Durable
+     (Store    : in out KV_Store;
+      WAL_Path : in     Bounded_Text;
+      Tx       : in     Valid_Tx_Id;
+      Key      : in     Bounded_Ident;
+      Removed  :    out Boolean;
+      Status   :    out Engine_Status)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Key.Length > 0 and then WAL_Path.Length > 0,
+          Post   => not Exists (Store, Key, 0);
+
+   --  Replay all WAL_Frame_KV records from WAL_Path into Store at recovery timestamp Now
+   procedure Recover_KV_From_WAL
+     (Store        : in out KV_Store;
+      WAL_Path     : in     Bounded_Text;
+      Now          : in     Epoch_Seconds;
+      Max_Frames   : in     Positive;
+      Replayed_Ops :    out Natural;
+      Status       :    out Engine_Status)
+     with Global => null,
+          Always_Terminates,
+          Pre    => WAL_Path.Length > 0 and then Max_Frames <= Max_Page_Id,
+          Post   => Replayed_Ops <= Max_Frames;
 
 end Nhe_O.KV;
