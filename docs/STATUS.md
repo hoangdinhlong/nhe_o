@@ -30,11 +30,17 @@ The project has completed **Epic 01 (Scaffold and Architecture)**, **Epic 02 (B+
 | `01-scaffold-and-architecture` | Establish project scaffolding, 100% SPARK core & POSIX I/O subsystems | ✅ Done |
 | `02-storage-indexing-and-rag-executor` | 4KB TOAST overflow, 4096-D quantized HNSW, B+Tree, Durable Pub/Sub & Universal RAG Executor | ✅ Done |
 | `03-formal-proof-and-c-ffi-sdk` | `gnatprove` Flow & AoRTE Formal Proofs (100% Stone/Bronze/Silver + Partial Gold: 1,543/1,543 VCs), C ABI / Python SDK & Interactive CLI | ✅ Done |
+| `04-catalog-buffer-pool-and-sql-executor` | Persistent Page-0 System Catalog, Clock-Sweep 4KB Buffer Pool Manager & End-to-End SQL Execution Engine | ⏳ Planned |
 
 ## Next up
 
-All committed epics (**Epic 01**, **Epic 02**, and **Epic 03**) are complete. Candidate scope for **Epic 04** (awaiting owner confirmation):
-- **Epic 04 (`04-catalog-buffer-pool-and-sql-executor`)**: **Persistent System Catalog, Clock-Sweep Buffer Pool Manager & End-to-End SQL Execution Engine** — Binding `Nhe_O.SQL` ASTs directly to persistent multi-table schemas (`pg_class` / `pg_attribute` catalog on Page 0), a bounded Clock-Sweep / LRU 4KB page buffer pool with dirty-page flushing and WAL checkpointing, and full DDL/DML execution (`CREATE TABLE`, `INSERT INTO ... ON CONFLICT DO UPDATE`, `SELECT ... WHERE ... ORDER BY <-> LIMIT`, `UPDATE`, `DELETE`) in 100% SPARK Silver/Gold.
+**Epic 04 (`04-catalog-buffer-pool-and-sql-executor`)** is defined in `docs/epics/04-catalog-buffer-pool-and-sql-executor/PROGRESS.md` and ready to begin:
+- **Task 1**: Implement `Nhe_O.Catalog` (`src/nhe_o-catalog.ad[sb]` in 100% `SPARK_Mode (On)`) for persistent table/column/index metadata (`pg_class` / `pg_attribute`) with Page-0 CRC32 serialization.
+- **Task 2**: Implement `Nhe_O.Buffer_Pool` (`src/nhe_o-buffer_pool.ad[sb]` in 100% `SPARK_Mode (On)`) with bounded 4KB frame caching, Clock-Sweep eviction, pin tracking, and WAL-before-Data flush invariants.
+- **Task 3**: Implement `Nhe_O.Executor` (`src/nhe_o-executor.ad[sb]` in 100% `SPARK_Mode (On)`) connecting `Nhe_O.SQL` ASTs to `Catalog`, `Buffer_Pool`, `Transaction` (MVCC + TOAST), `BTree`, and `HNSW` for `CREATE TABLE`, `INSERT`/`UPSERT`, `SELECT`, `UPDATE`, and `DELETE`.
+- **Task 4**: Wire stateful SQL execution into `Nhe_O.C_API` (`include/nhe_o.h`, `lib/libnhe_o.so`), Python SDK (`bindings/python/nhe_o.py`), and CLI (`src/nhe_o_main.adb` + Suite `[12/12]`).
+- **Task 5**: Prove 100% SPARK Stone, Bronze (Flow), Silver (AoRTE), and Gold contracts across `Nhe_O.Catalog`, `Nhe_O.Buffer_Pool`, `Nhe_O.Executor`, and updated units via `gnatprove -P nhe_o.gpr` (`0 unproved` checks).
+
 
 ## Known issues / blockers
 
