@@ -30,18 +30,21 @@ The project has completed **Epic 01 (Scaffold and Architecture)**, **Epic 02 (B+
 | `01-scaffold-and-architecture` | Establish project scaffolding, 100% SPARK core & POSIX I/O subsystems | ✅ Done |
 | `02-storage-indexing-and-rag-executor` | 4KB TOAST overflow, 4096-D quantized HNSW, B+Tree, Durable Pub/Sub & Universal RAG Executor | ✅ Done |
 | `03-formal-proof-and-c-ffi-sdk` | `gnatprove` Flow & AoRTE Formal Proofs (100% Stone/Bronze/Silver + Partial Gold: 1,543/1,543 VCs), C ABI / Python SDK & Interactive CLI | ✅ Done |
-| `04-post-epic-03-grooming-and-hardening` | Post-Epic-03 Grooming & Core Hardening: Remediate all 24 `ADVERSARIAL-REVIEW.md` findings, resolve `Q-003` & `Q-004`, codify `storage-and-wal-format.md`, and re-prove 100% SPARK (`Tasks 1–6 Done`: `2,626/2,626` VCs proved, `0 unproved`, `0 warnings`) | 🚧 Active |
+| `04-post-epic-03-grooming-and-hardening` | Post-Epic-03 Grooming & Core Hardening: Round 1 (`Tasks 1–6 Done`: 24/24 findings remediated, `2,626/2,626` VCs proved) · Round 2 (`Tasks 7–11 Pending`: 16 findings `R2-CRIT-01`..`R2-LOW-04` recorded in `ADVERSARIAL-REVIEW.md`) | 🚧 Active |
 | `05-catalog-buffer-pool-and-sql-executor` | Persistent Page-0 System Catalog, Clock-Sweep 4KB Buffer Pool Manager & End-to-End SQL Execution Engine | ⏳ Planned |
 
 ## Next up
 
 **Active Epic: `04-post-epic-03-grooming-and-hardening` (`docs/epics/04-post-epic-03-grooming-and-hardening/PROGRESS.md`)**
-- ✅ **Tasks 1–6 Completed**: All 24 adversarial findings from `ADVERSARIAL-REVIEW.md` are remediated, verified at runtime across all 11 Ada suites (`alr run`) and the Python `ctypes` SDK (`python3 bindings/python/nhe_o.py`), compiled with `0 warnings`, and formally proven at **100% (`2,626 / 2,626` checks proved, `0 unproved`, `0 warnings`)**.
-- **Next**: Await owner's next grooming/hardening tasks or verification pass in Epic 04 before advancing to **Epic 05 (`05-catalog-buffer-pool-and-sql-executor`)**.
+- ✅ **Tasks 1–6 Completed (Round 1 Audit — 24 Findings)**: All 24 Round-1 adversarial findings (`CRIT-01`..`LOW-03`) are remediated, verified at runtime across all 11 Ada suites (`alr run`) and the Python `ctypes` SDK (`python3 bindings/python/nhe_o.py`), compiled with `0 warnings`, and formally proven at **100% (`2,626 / 2,626` checks proved, `0 unproved`, `0 warnings`)**.
+- ☐ **Tasks 7–11 Pending (Round 2 Deep System Audit — 16 Findings)**: Remediate the 16 Round-2 findings (`R2-CRIT-01`..`R2-LOW-04`: `2 Critical, 5 High, 5 Medium, 4 Low`) recorded in `docs/epics/04-post-epic-03-grooming-and-hardening/ADVERSARIAL-REVIEW.md` and re-verify 100% `gnatprove -j24` before advancing to **Epic 05 (`05-catalog-buffer-pool-and-sql-executor`)**.
 
 ## Known issues / blockers
 
-- None. All 24 adversarial findings from `ADVERSARIAL-REVIEW.md` are remediated, all 11 runtime suites and the Python `ctypes` SDK pass, and `gnatprove` proves **2,626 / 2,626 checks (100%, 0 unproved, 0 warnings)**.
+- **Round 2 Deep System Adversarial Audit Findings (`16 Open` in `docs/epics/04-post-epic-03-grooming-and-hardening/ADVERSARIAL-REVIEW.md`, Part II)**:
+  - **2 Critical (`R2-CRIT-01`..`R2-CRIT-02`)**: Unconditional `STEAL` page writes without `UNDO`, premature `CLOG` commit in `Ingest_Document`, inverted `Default_CLOG`/`Is_Tx_Committed`, and missing in-memory rollback (`R2-CRIT-01`); `C_Init_With_Paths` unconditionally unlinks existing `.db`/`.wal` files instead of recovering (`R2-CRIT-02`).
+  - **5 High (`R2-HIGH-01`..`R2-HIGH-05`)**: `Delete_Document` mutates `Xmax` in RAM only (`R2-HIGH-01`); `Encode_Vector_TOAST` loses precision for `|c| < 1e-6` and omits `"VTST"` header (`R2-HIGH-02`); `Recover_RAG_Engine` confuses `Summary_Text` with `Metadata` JSONB (`R2-HIGH-03`); `Execute_Hybrid_RAG_Query` ignores SQL `LIMIT` and initializes `Fallback_D := 0.0` (`R2-HIGH-04`); `Recover_KV_From_WAL` silently truncates at `Max_Frames` (`R2-HIGH-05`).
+  - **5 Medium & 4 Low (`R2-MED-01`..`R2-MED-05`, `R2-LOW-01`..`R2-LOW-04`)**: SQL quote boundary & multi-statement guard (`R2-MED-01`), strict `Parse_JSONB` delimiter/capacity checks (`R2-MED-02`), TOAST update page reclamation (`R2-MED-03`), `BTree.Total_Keys` split accounting + `Delete_Key` (`R2-MED-04`), `Flush_Committed_Notifications` guard (`R2-MED-05`), `storage-and-wal-format.md` byte-offset alignment (`R2-LOW-01`), Python SDK path validation (`R2-LOW-02`), C ABI RAG metadata/parent payload (`R2-LOW-03`), and short-read retry condition (`R2-LOW-04`).
 
 ## Decisions
 
