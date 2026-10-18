@@ -2,7 +2,7 @@
  * nhe_o.h — C99 / C++17 Foreign Function Interface Header for Nhe_O
  *
  * Formally verified embedded PostgreSQL + pgvector + Redis + Hybrid RAG engine
- * written in 100% Ada/SPARK 2014 (pragma SPARK_Mode (On);).
+ * written in 100% Ada/SPARK 2022 (pragma SPARK_Mode (On);).
  */
 
 #ifndef NHE_O_H
@@ -14,10 +14,11 @@
 extern "C" {
 #endif
 
-/* Fixed buffer capacities matching Nhe_O.Types and Nhe_O.Vector */
-#define NHE_O_MAX_IDENT_LEN  64
-#define NHE_O_MAX_TEXT_LEN   512
-#define NHE_O_MAX_VECTOR_DIM 4096
+/* Fixed buffer capacities matching Nhe_O.Types, Nhe_O.Transaction, and Nhe_O.Vector */
+#define NHE_O_MAX_IDENT_LEN   64
+#define NHE_O_MAX_TEXT_LEN    512
+#define NHE_O_MAX_TOAST_BYTES 16392
+#define NHE_O_MAX_VECTOR_DIM  4096
 
 /* Status codes returned in *out_status */
 typedef enum {
@@ -48,7 +49,8 @@ int nhe_o_version_minor(void);
 /* Initialize / reset embedded Nhe_O runtime state (default paths, 3D vectors) */
 void nhe_o_init(int *out_status);
 
-/* Initialize / reset embedded Nhe_O runtime state with custom DB/WAL paths & dimension (1..4096) */
+/* Initialize embedded Nhe_O runtime state with custom DB/WAL paths & dimension (1..4096),
+ * recovering existing WAL/DB state when present on disk (R2-CRIT-02) */
 void nhe_o_init_with_paths(
     const char *db_path_buf,
     int         db_path_len,
@@ -204,6 +206,25 @@ void nhe_o_rag_ingest_nd(
     int         *out_status
 );
 
+void nhe_o_rag_ingest_full_nd(
+    int          doc_id,
+    const char  *meta_json_buf,
+    int          meta_json_len,
+    const char  *summary_buf,
+    int          summary_len,
+    const char  *parent_buf,
+    int          parent_len,
+    const float *vec_buf,
+    int          dim,
+    int          related_doc_id,
+    int         *out_status
+);
+
+void nhe_o_rag_delete(
+    int  doc_id,
+    int *out_status
+);
+
 void nhe_o_rag_query_3d(
     float       qx,
     float       qy,
@@ -224,6 +245,24 @@ void nhe_o_rag_query_nd(
     const float *query_vec_buf,
     int          dim,
     int          encoding_mode,
+    const char  *keyword_buf,
+    int          keyword_len,
+    int          top_k,
+    int         *out_hit_count,
+    int         *out_top_doc_id,
+    float       *out_top_distance,
+    char        *out_parent_buf,
+    int         *out_parent_len,
+    int         *out_graph_hit,
+    int         *out_status
+);
+
+void nhe_o_rag_query_full_nd(
+    const float *query_vec_buf,
+    int          dim,
+    int          encoding_mode,
+    const char  *filter_json_buf,
+    int          filter_json_len,
     const char  *keyword_buf,
     int          keyword_len,
     int          top_k,

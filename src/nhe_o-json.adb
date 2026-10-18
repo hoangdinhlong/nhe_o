@@ -451,20 +451,46 @@ package body Nhe_O.JSON is
       for Field_Step in 1 .. Max_JSON_Fields + 1 loop
          pragma Loop_Invariant (Pos in 1 .. Raw.Length + 1);
 
-         while Pos <= Raw.Length
-           and then (Is_Whitespace (Raw.Data (Pos)) or else Raw.Data (Pos) = ',')
-         loop
+         while Pos <= Raw.Length and then Is_Whitespace (Raw.Data (Pos)) loop
             pragma Loop_Invariant (Pos in 1 .. Raw.Length);
             pragma Loop_Variant (Increases => Pos);
             Pos := Pos + 1;
          end loop;
 
-         if Pos > Raw.Length or else Raw.Data (Pos) = '}' then
+         if Pos > Raw.Length then
+            Doc    := (others => <>);
+            Status := Status_Invalid_Syntax;
+            return;
+         end if;
+
+         if Raw.Data (Pos) = '}' then
             Status := Status_Ok;
             return;
          end if;
 
+         if Field_Step > 1 then
+            if Raw.Data (Pos) /= ',' or else Pos = Raw.Length then
+               Doc    := (others => <>);
+               Status := Status_Invalid_Syntax;
+               return;
+            end if;
+            Pos := Pos + 1;
+
+            while Pos <= Raw.Length and then Is_Whitespace (Raw.Data (Pos)) loop
+               pragma Loop_Invariant (Pos in 1 .. Raw.Length);
+               pragma Loop_Variant (Increases => Pos);
+               Pos := Pos + 1;
+            end loop;
+
+            if Pos > Raw.Length then
+               Doc    := (others => <>);
+               Status := Status_Invalid_Syntax;
+               return;
+            end if;
+         end if;
+
          if Raw.Data (Pos) /= '"' or else Pos = Raw.Length then
+            Doc    := (others => <>);
             Status := Status_Invalid_Syntax;
             return;
          end if;
@@ -483,7 +509,8 @@ package body Nhe_O.JSON is
                   Key_Id.Length := Key_Id.Length + 1;
                   Key_Id.Data (Key_Id.Length) := Raw.Data (Pos);
                else
-                  Status := Status_Invalid_Syntax;
+                  Doc    := (others => <>);
+                  Status := Status_Capacity_Exceeded;
                   return;
                end if;
             elsif Raw.Data (Pos) = '\' then
@@ -496,7 +523,8 @@ package body Nhe_O.JSON is
                   Key_Id.Length := Key_Id.Length + 1;
                   Key_Id.Data (Key_Id.Length) := Raw.Data (Pos);
                else
-                  Status := Status_Invalid_Syntax;
+                  Doc    := (others => <>);
+                  Status := Status_Capacity_Exceeded;
                   return;
                end if;
             end if;
@@ -504,20 +532,37 @@ package body Nhe_O.JSON is
          end loop;
 
          if Key_Id.Length = 0 then
+            Doc    := (others => <>);
             Status := Status_Invalid_Syntax;
             return;
          end if;
 
-         --  Skip whitespace and ':'
-         while Pos <= Raw.Length
-           and then (Is_Whitespace (Raw.Data (Pos)) or else Raw.Data (Pos) = ':')
-         loop
+         --  Skip whitespace, require exactly one ':', then skip whitespace (R2-MED-02)
+         while Pos <= Raw.Length and then Is_Whitespace (Raw.Data (Pos)) loop
             pragma Loop_Invariant (Pos in 1 .. Raw.Length);
             pragma Loop_Variant (Increases => Pos);
             Pos := Pos + 1;
          end loop;
 
-         if Pos > Raw.Length then
+         if Pos >= Raw.Length or else Raw.Data (Pos) /= ':' then
+            Doc    := (others => <>);
+            Status := Status_Invalid_Syntax;
+            return;
+         end if;
+         Pos := Pos + 1;
+
+         while Pos <= Raw.Length and then Is_Whitespace (Raw.Data (Pos)) loop
+            pragma Loop_Invariant (Pos in 1 .. Raw.Length);
+            pragma Loop_Variant (Increases => Pos);
+            Pos := Pos + 1;
+         end loop;
+
+         if Pos > Raw.Length
+           or else Raw.Data (Pos) = ':'
+           or else Raw.Data (Pos) = ','
+           or else Raw.Data (Pos) = '}'
+         then
+            Doc    := (others => <>);
             Status := Status_Invalid_Syntax;
             return;
          end if;
@@ -539,6 +584,10 @@ package body Nhe_O.JSON is
                   if Val_Text.Length < Max_Text_Len then
                      Val_Text.Length := Val_Text.Length + 1;
                      Val_Text.Data (Val_Text.Length) := Raw.Data (Pos);
+                  else
+                     Doc    := (others => <>);
+                     Status := Status_Capacity_Exceeded;
+                     return;
                   end if;
                elsif Raw.Data (Pos) = '\' then
                   Esc := True;
@@ -549,6 +598,10 @@ package body Nhe_O.JSON is
                   if Val_Text.Length < Max_Text_Len then
                      Val_Text.Length := Val_Text.Length + 1;
                      Val_Text.Data (Val_Text.Length) := Raw.Data (Pos);
+                  else
+                     Doc    := (others => <>);
+                     Status := Status_Capacity_Exceeded;
+                     return;
                   end if;
                end if;
                Pos := Pos + 1;
@@ -567,6 +620,10 @@ package body Nhe_O.JSON is
                if Val_Text.Length < Max_Text_Len then
                   Val_Text.Length := Val_Text.Length + 1;
                   Val_Text.Data (Val_Text.Length) := Raw.Data (Pos);
+               else
+                  Doc    := (others => <>);
+                  Status := Status_Capacity_Exceeded;
+                  return;
                end if;
 
                if In_Str then
@@ -616,6 +673,10 @@ package body Nhe_O.JSON is
                if Val_Text.Length < Max_Text_Len then
                   Val_Text.Length := Val_Text.Length + 1;
                   Val_Text.Data (Val_Text.Length) := Raw.Data (Pos);
+               else
+                  Doc    := (others => <>);
+                  Status := Status_Capacity_Exceeded;
+                  return;
                end if;
                Pos := Pos + 1;
             end loop;
@@ -623,11 +684,13 @@ package body Nhe_O.JSON is
 
          Put_Field (Doc, Key_Id, Val_Text, Val_Kind, Sub_Stat);
          if Sub_Stat /= Status_Ok then
+            Doc    := (others => <>);
             Status := Sub_Stat;
             return;
          end if;
       end loop;
 
+      Doc    := (others => <>);
       Status := Status_Capacity_Exceeded;
    end Parse_JSONB;
 

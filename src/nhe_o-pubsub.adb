@@ -157,7 +157,7 @@ package body Nhe_O.PubSub is
    begin
       Total_Delivered := 0;
 
-      --  Enforce WAL Commit Barrier and transaction ownership (HIGH-07)
+      --  Enforce WAL Commit Barrier and transaction ownership (HIGH-07, R2-MED-05)
       if Ctx.State = Tx_Committed
         and then (Staging.Count = 0 or else Staging.Owner_Tx = Ctx.Id)
       then
@@ -172,11 +172,11 @@ package body Nhe_O.PubSub is
                Total_Delivered := Total_Delivered + Step_Deliv;
             end if;
          end loop;
-      end if;
 
-      Staging.Owner_Tx := Ctx.Id;
-      Staging.Count    := 0;
-      Staging.Items    := [others => (others => <>)];
+         Staging.Owner_Tx := Ctx.Id;
+         Staging.Count    := 0;
+         Staging.Items    := [others => (others => <>)];
+      end if;
    end Flush_Committed_Notifications;
 
    procedure Discard_Staged_Notifications
@@ -184,11 +184,13 @@ package body Nhe_O.PubSub is
       Staging : in out Tx_Notification_Buffer)
    is
    begin
-      if Ctx.State = Tx_Aborted then
+      if Ctx.State = Tx_Aborted
+        and then (Staging.Count = 0 or else Staging.Owner_Tx = Ctx.Id)
+      then
          Staging.Owner_Tx := Ctx.Id;
+         Staging.Count    := 0;
+         Staging.Items    := [others => (others => <>)];
       end if;
-      Staging.Count := 0;
-      Staging.Items := [others => (others => <>)];
    end Discard_Staged_Notifications;
 
    procedure Poll_Message

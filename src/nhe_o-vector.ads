@@ -142,17 +142,25 @@ package Nhe_O.Vector is
           Pre    => A.Dim = B.Dim,
           Post   => Hamming_Distance'Result <= A.Dim;
 
-   --  Serialize a Float32 Vector_Value (up to 4096-D = 16,384 bytes) into a
-   --  TOAST_Payload_Buffer (4 bytes per dimension) for TOAST overflow storage (Q-003)
+   --  8-byte TOAST Vector header: 4B magic ("VTST") + 4B big-endian dimension (R2-HIGH-02)
+   Vector_TOAST_Header_Size : constant := 8;
+
+   function Vector_TOAST_Byte_Length
+     (Dim : Vector_Dim) return Valid_TOAST_Length is
+     (Vector_TOAST_Header_Size + Dim * 4)
+     with Global => null;
+
+   --  Serialize a Float32 Vector_Value (up to 4096-D = 16,392 bytes including
+   --  8B "VTST" header) into a TOAST_Payload_Buffer for TOAST overflow storage (Q-003, R2-HIGH-02)
    procedure Encode_Vector_TOAST
      (V       : in     Vector_Value;
       Payload :    out TOAST_Payload_Buffer;
       Length  :    out Valid_TOAST_Length)
      with Global => null,
           Always_Terminates,
-          Post   => Length = V.Dim * 4;
+          Post   => Length = Vector_TOAST_Byte_Length (V.Dim);
 
-   --  Deserialize a Float32 Vector_Value of dimension Dim from a TOAST_Payload_Buffer (Q-003)
+   --  Deserialize a Float32 Vector_Value of dimension Dim from a TOAST_Payload_Buffer (Q-003, R2-HIGH-02)
    procedure Decode_Vector_TOAST
      (Payload : in     TOAST_Payload_Buffer;
       Length  : in     Valid_TOAST_Length;

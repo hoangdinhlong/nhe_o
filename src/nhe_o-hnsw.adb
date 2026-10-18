@@ -179,6 +179,14 @@ package body Nhe_O.HNSW is
          end if;
       end loop;
 
+      for I in 1 .. Deg loop
+         Nbr_Id := Index.Nodes (Src_Id).Layers (L).Neighbors (I);
+         if not Index.Nodes (Nbr_Id).Active then
+            Index.Nodes (Src_Id).Layers (L).Neighbors (I) := Target;
+            return;
+         end if;
+      end loop;
+
       if Deg < Max_Neighbors then
          Index.Nodes (Src_Id).Layers (L).Degree := Deg + 1;
          Index.Nodes (Src_Id).Layers (L).Neighbors (Deg + 1) := Target;
@@ -211,17 +219,18 @@ package body Nhe_O.HNSW is
       Layer_Hint : in     HNSW_Layer;
       Status     :    out Engine_Status)
    is
-      Target_Id      : HNSW_Node_Id := 1;
-      Found_Existing : Boolean := False;
-      Q_Int8         : constant Quantized_Int8_Vector   := Quantize_To_Int8 (Vec);
-      Q_Bin          : constant Quantized_Binary_Vector := Quantize_To_Binary (Vec);
-      Pref_Len       : Matryoshka_Index;
-      Best_Id        : HNSW_Node_Id;
-      Best_Dst       : Non_Negative_Float;
-      Cand_Dst       : Non_Negative_Float;
-      Has_Peer       : Boolean;
-      Existing_Lim   : HNSW_Node_Count;
-      Prev_Layers    : Node_Layer_Array := [others => (others => <>)];
+      Target_Id       : HNSW_Node_Id := 1;
+      Found_Existing  : Boolean := False;
+      Reused_Inactive : Boolean := False;
+      Q_Int8          : constant Quantized_Int8_Vector   := Quantize_To_Int8 (Vec);
+      Q_Bin           : constant Quantized_Binary_Vector := Quantize_To_Binary (Vec);
+      Pref_Len        : Matryoshka_Index;
+      Best_Id         : HNSW_Node_Id;
+      Best_Dst        : Non_Negative_Float;
+      Cand_Dst        : Non_Negative_Float;
+      Has_Peer        : Boolean;
+      Existing_Lim    : HNSW_Node_Count;
+      Prev_Layers     : Node_Layer_Array := [others => (others => <>)];
    begin
       --  Check if Doc_Id already exists in the HNSW index (update in place, CRIT-06)
       for I in 1 .. Index.Node_Count loop
@@ -233,7 +242,18 @@ package body Nhe_O.HNSW is
          end if;
       end loop;
 
+      --  Otherwise, reuse any deactivated node slot before growing Node_Count
       if not Found_Existing then
+         for I in 1 .. Index.Node_Count loop
+            if not Index.Nodes (I).Active then
+               Target_Id       := I;
+               Reused_Inactive := True;
+               exit;
+            end if;
+         end loop;
+      end if;
+
+      if not Found_Existing and then not Reused_Inactive then
          if Index.Node_Count = Max_HNSW_Nodes then
             Status := Status_Capacity_Exceeded;
             return;
@@ -316,6 +336,7 @@ package body Nhe_O.HNSW is
 
       if Index.Node_Count = 1
         or else Index.Entry_Node > Index.Node_Count
+        or else not Index.Nodes (Index.Entry_Node).Active
         or else Index.Nodes (Target_Id).Top_Level > Index.Top_Layer
       then
          Index.Entry_Node := Target_Id;
@@ -405,10 +426,21 @@ package body Nhe_O.HNSW is
          Bound_K := Index.Node_Count;
       end if;
 
-      if Index.Entry_Node <= Index.Node_Count then
+      if Index.Entry_Node <= Index.Node_Count
+        and then Index.Nodes (Index.Entry_Node).Active
+      then
          Cur_Node := Index.Entry_Node;
       else
          Cur_Node := 1;
+         for I in 1 .. Index.Node_Count loop
+            if Index.Nodes (I).Active then
+               Cur_Node := I;
+               exit;
+            end if;
+         end loop;
+         if not Index.Nodes (Cur_Node).Active then
+            return;
+         end if;
       end if;
 
       if Index.Nodes (Cur_Node).Bin_Vec.Dim /= Query.Dim then

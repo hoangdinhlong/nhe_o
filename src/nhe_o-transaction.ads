@@ -25,11 +25,11 @@ package Nhe_O.Transaction is
       State    : Tx_State    := Tx_Idle;
    end record;
 
-   --  Bounded Commit Log (CLOG) for MVCC Snapshot Isolation (CRIT-04 / BR-002)
+   --  Bounded Commit Log (CLOG) for MVCC Snapshot Isolation (CRIT-04 / R2-CRIT-01 / BR-002)
    Max_CLOG_Entries : constant := 1024;
    subtype CLOG_Tx_Index is Valid_Tx_Id range 1 .. Max_CLOG_Entries;
    type Commit_Log is array (CLOG_Tx_Index) of Tx_State;
-   Default_CLOG : constant Commit_Log := [others => Tx_Committed];
+   Default_CLOG : constant Commit_Log := [others => Tx_Idle];
 
    --  Record a transaction state transition in the bounded Commit Log
    procedure Set_CLOG_State
@@ -39,14 +39,13 @@ package Nhe_O.Transaction is
      with Global => null,
           Always_Terminates;
 
-   --  True iff transaction Id has committed according to CLOG
+   --  True iff transaction Id has committed according to CLOG (R2-CRIT-01)
    function Is_Tx_Committed
      (CLOG : Commit_Log;
       Id   : Tx_Id) return Boolean
    is
-     (if Id = 0 then False
-      elsif Id <= Max_CLOG_Entries then CLOG (Id) = Tx_Committed
-      else True);
+     (if Id in 1 .. Max_CLOG_Entries then CLOG (Id) = Tx_Committed
+      else False);
 
    --  MVCC Snapshot Visibility Rule (BR-002):
    --  Visible iff created at or before Snapshot and either un-deleted (Xmax = 0)
@@ -152,8 +151,8 @@ package Nhe_O.Transaction is
 
    TOAST_Header_Size       : constant := 16;
    TOAST_Chunk_Max_Bytes   : constant := Nhe_O.Page_Size - TOAST_Header_Size; --  4080 bytes
-   Max_TOAST_Payload_Bytes : constant := 16_384; --  16 KB (4096-D Float32 or Parent Chunk)
-   Max_TOAST_Chunks        : constant := 5;      --  5 * 4080 = 20,400 >= 16,384 bytes
+   Max_TOAST_Payload_Bytes : constant := 16_392; --  8B "VTST" header + 4096 * 4B Float32 (R2-HIGH-02)
+   Max_TOAST_Chunks        : constant := 5;      --  5 * 4080 = 20,400 >= 16,392 bytes
 
    subtype TOAST_Payload_Index is Positive range 1 .. Max_TOAST_Payload_Bytes;
    subtype TOAST_Payload_Length is Natural range 0 .. Max_TOAST_Payload_Bytes;

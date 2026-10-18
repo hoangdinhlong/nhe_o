@@ -125,7 +125,7 @@ package Nhe_O.PubSub is
                        and then Staging.Owner_Tx = Ctx.Id);
 
    --  Flush staged notifications across the WAL Commit Barrier ONLY after Tx_Committed
-   --  and only when Staging.Owner_Tx matches Ctx.Id (HIGH-07)
+   --  and only when Staging.Owner_Tx matches Ctx.Id (HIGH-07, R2-MED-05)
    procedure Flush_Committed_Notifications
      (Ctx             : in     Transaction_Context;
       Staging         : in out Tx_Notification_Buffer;
@@ -134,16 +134,20 @@ package Nhe_O.PubSub is
      with Global => null,
           Always_Terminates,
           Pre    => Ctx.State = Tx_Committed,
-          Post   => Staging.Count = 0;
+          Post   => (if Staging'Old.Count = 0 or else Staging'Old.Owner_Tx = Ctx.Id
+                     then Staging.Count = 0
+                     else Staging = Staging'Old);
 
-   --  Discard staged notifications when a transaction rolls back or aborts (HIGH-07)
+   --  Discard staged notifications when a transaction rolls back or aborts (HIGH-07, R2-MED-05)
    procedure Discard_Staged_Notifications
      (Ctx     : in     Transaction_Context;
       Staging : in out Tx_Notification_Buffer)
      with Global => null,
           Always_Terminates,
           Pre    => Ctx.State = Tx_Aborted,
-          Post   => Staging.Count = 0;
+          Post   => (if Staging'Old.Count = 0 or else Staging'Old.Owner_Tx = Ctx.Id
+                     then Staging.Count = 0
+                     else Staging = Staging'Old);
 
    --  Dequeue oldest FIFO message from subscriber's ring buffer
    procedure Poll_Message

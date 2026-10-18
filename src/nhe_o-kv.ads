@@ -173,6 +173,39 @@ package Nhe_O.KV is
           Pre    => Key.Length > 0 and then WAL_Path.Length > 0,
           Post   => not Exists (Store, Key, 0);
 
+   --  Durable EXPIRE: attaches a TTL to Key and appends a WAL_Frame_KV record when updated
+   procedure Expire_Durable
+     (Store    : in out KV_Store;
+      WAL_Path : in     Bounded_Text;
+      Tx       : in     Valid_Tx_Id;
+      Key      : in     Bounded_Ident;
+      Now      : in     Epoch_Seconds;
+      TTL_Sec  : in     Epoch_Seconds;
+      Updated  :    out Boolean;
+      Status   :    out Engine_Status)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Key.Length > 0
+                    and then WAL_Path.Length > 0
+                    and then TTL_Sec > 0
+                    and then Now <= Epoch_Seconds'Last - TTL_Sec,
+          Post   => (if Updated then Exists (Store, Key, Now));
+
+   --  Durable INCRBY: increments numeric value of Key and appends a WAL_Frame_KV record
+   procedure Incr_By_Durable
+     (Store     : in out KV_Store;
+      WAL_Path  : in     Bounded_Text;
+      Tx        : in     Valid_Tx_Id;
+      Key       : in     Bounded_Ident;
+      Delta_Val : in     Integer_64;
+      Now       : in     Epoch_Seconds;
+      New_Val   :    out Integer_64;
+      Status    :    out Engine_Status)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Key.Length > 0 and then WAL_Path.Length > 0,
+          Post   => (if Status = Status_Ok then Exists (Store, Key, Now));
+
    --  Replay all WAL_Frame_KV records from WAL_Path into Store at recovery timestamp Now
    procedure Recover_KV_From_WAL
      (Store        : in out KV_Store;

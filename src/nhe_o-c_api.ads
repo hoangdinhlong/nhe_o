@@ -35,6 +35,9 @@ package Nhe_O.C_API is
    subtype C_Text_Index is size_t range 1 .. size_t (Max_Text_Len);
    subtype C_Text_Buf is char_array (C_Text_Index);
 
+   subtype C_Toast_Index is size_t range 1 .. size_t (Max_TOAST_Payload_Bytes);
+   subtype C_Toast_Buf is char_array (C_Toast_Index);
+
    subtype C_Vec_Index is size_t range 1 .. size_t (Max_Vector_Dim);
    type C_Vec_Buf is array (C_Vec_Index) of C_float
      with Convention => C;
@@ -75,8 +78,8 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_init";
 
-   --  Initialize / reset embedded Nhe_O C runtime state with caller-specified DB/WAL
-   --  paths and embedding dimension Dim in 1 .. 4096 (HIGH-01, HIGH-02)
+   --  Initialize embedded Nhe_O C runtime state with caller-specified DB/WAL paths
+   --  and embedding dimension Dim in 1 .. 4096, recovering existing state when present (R2-CRIT-02)
    procedure C_Init_With_Paths
      (DB_Path_Buf  : in     C_Text_Buf;
       DB_Path_Len  : in     int;
@@ -134,7 +137,7 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_vector_distance_nd";
 
-   --  Redis SET / SETEX operation via C ABI (rejects TTL_Sec < 0 and uninitialized state, HIGH-01/08)
+   --  Redis SET / SETEX operation via C ABI (durable WAL append, rejects TTL_Sec < 0, HIGH-01/08, R2-CRIT-02)
    procedure C_KV_Set
      (Key_Buf    : in     C_Ident_Buf;
       Key_Len    : in     int;
@@ -143,8 +146,8 @@ package Nhe_O.C_API is
       Now_Sec    : in     Integer_64;
       TTL_Sec    : in     Integer_64;
       Out_Status :    out int)
-     with Global        => (Input  => G_Initialized,
-                            In_Out => G_KV_Store),
+     with Global        => (Input  => (G_Initialized, G_WAL_Path),
+                            In_Out => (G_Next_Tx, G_KV_Store)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -165,14 +168,14 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_kv_get";
 
-   --  Redis DEL operation via C ABI
+   --  Redis DEL operation via C ABI (durable WAL append, R2-CRIT-02)
    procedure C_KV_Del
      (Key_Buf     : in     C_Ident_Buf;
       Key_Len     : in     int;
       Out_Removed :    out int;
       Out_Status  :    out int)
-     with Global        => (Input  => G_Initialized,
-                            In_Out => G_KV_Store),
+     with Global        => (Input  => (G_Initialized, G_WAL_Path),
+                            In_Out => (G_Next_Tx, G_KV_Store)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -191,7 +194,7 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_kv_exists";
 
-   --  Redis EXPIRE operation via C ABI (HIGH-02, HIGH-08)
+   --  Redis EXPIRE operation via C ABI (HIGH-02, HIGH-08, R2-CRIT-02)
    procedure C_KV_Expire
      (Key_Buf     : in     C_Ident_Buf;
       Key_Len     : in     int;
@@ -199,8 +202,8 @@ package Nhe_O.C_API is
       TTL_Sec     : in     Integer_64;
       Out_Updated :    out int;
       Out_Status  :    out int)
-     with Global        => (Input  => G_Initialized,
-                            In_Out => G_KV_Store),
+     with Global        => (Input  => (G_Initialized, G_WAL_Path),
+                            In_Out => (G_Next_Tx, G_KV_Store)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -219,7 +222,7 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_kv_ttl";
 
-   --  Redis INCRBY operation via C ABI
+   --  Redis INCRBY operation via C ABI (R2-CRIT-02)
    procedure C_KV_Incr_By
      (Key_Buf     : in     C_Ident_Buf;
       Key_Len     : in     int;
@@ -227,8 +230,8 @@ package Nhe_O.C_API is
       Now_Sec     : in     Integer_64;
       Out_New_Val :    out Integer_64;
       Out_Status  :    out int)
-     with Global        => (Input  => G_Initialized,
-                            In_Out => G_KV_Store),
+     with Global        => (Input  => (G_Initialized, G_WAL_Path),
+                            In_Out => (G_Next_Tx, G_KV_Store)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -320,6 +323,37 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_rag_ingest_nd";
 
+   --  Hybrid RAG Document Ingestion with JSONB Metadata + Full 16KB TOAST Parent Payload (R2-LOW-03)
+   procedure C_RAG_Ingest_Full_ND
+     (Doc_Id         : in     int;
+      Meta_JSON_Buf  : in     C_Text_Buf;
+      Meta_JSON_Len  : in     int;
+      Summary_Buf    : in     C_Text_Buf;
+      Summary_Len    : in     int;
+      Parent_Buf     : in     C_Toast_Buf;
+      Parent_Len     : in     int;
+      Vec_Buf        : in     C_Vec_Buf;
+      Dim            : in     int;
+      Related_Doc_Id : in     int;
+      Out_Status     :    out int)
+     with Global        => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path),
+                            In_Out => (G_Next_Tx, G_Broker, G_RAG_Engine)),
+          Always_Terminates,
+          Export        => True,
+          Convention    => C,
+          External_Name => "nhe_o_rag_ingest_full_nd";
+
+   --  Durable Hybrid RAG Document Deletion via C ABI (R2-HIGH-01)
+   procedure C_RAG_Delete
+     (Doc_Id     : in     int;
+      Out_Status :    out int)
+     with Global        => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path),
+                            In_Out => (G_Next_Tx, G_RAG_Engine)),
+          Always_Terminates,
+          Export        => True,
+          Convention    => C,
+          External_Name => "nhe_o_rag_delete";
+
    --  Hybrid RAG Query (3D) via C ABI
    procedure C_RAG_Query_3D
      (QX, QY, QZ       : in     C_float;
@@ -360,5 +394,28 @@ package Nhe_O.C_API is
           Export        => True,
           Convention    => C,
           External_Name => "nhe_o_rag_query_nd";
+
+   --  Hybrid RAG Query with JSONB `@>` Filter + Full 16KB TOAST Parent Output Buffer (R2-LOW-03)
+   procedure C_RAG_Query_Full_ND
+     (Query_Vec_Buf    : in     C_Vec_Buf;
+      Dim              : in     int;
+      Encoding_Mode    : in     int;
+      Filter_JSON_Buf  : in     C_Text_Buf;
+      Filter_JSON_Len  : in     int;
+      Keyword_Buf      : in     C_Text_Buf;
+      Keyword_Len      : in     int;
+      Top_K            : in     int;
+      Out_Hit_Count    :    out int;
+      Out_Top_Doc_Id   :    out int;
+      Out_Top_Distance :    out C_float;
+      Out_Parent_Buf   : in out C_Toast_Buf;
+      Out_Parent_Len   :    out int;
+      Out_Graph_Hit    :    out int;
+      Out_Status       :    out int)
+     with Global        => (Input => (G_Initialized, G_DB_Path, G_Next_Tx, G_RAG_Engine)),
+          Always_Terminates,
+          Export        => True,
+          Convention    => C,
+          External_Name => "nhe_o_rag_query_full_nd";
 
 end Nhe_O.C_API;

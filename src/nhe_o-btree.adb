@@ -542,6 +542,44 @@ package body Nhe_O.BTree is
    end Search_Key;
 
    -------------------------------------------------------------------------
+   --  Delete_Key (R2-MED-04)
+   -------------------------------------------------------------------------
+
+   procedure Delete_Key
+     (Tree    : in out BTree_Index;
+      Key     : in     Integer_64;
+      Removed :    out Boolean)
+   is
+      Leaf_Id : constant BTree_Node_Id := Route_To_Leaf (Tree, Key);
+      Leaf    : BTree_Node             := Tree.Nodes (Leaf_Id);
+   begin
+      Removed := False;
+
+      if Leaf.Kind /= Node_Leaf or else Leaf.Num_Keys = 0 then
+         return;
+      end if;
+
+      for I in 1 .. Leaf.Num_Keys loop
+         if Leaf.Keys (I) = Key then
+            for J in I .. Leaf.Num_Keys - 1 loop
+               Leaf.Keys (J)     := Leaf.Keys (J + 1);
+               Leaf.Pointers (J) := Leaf.Pointers (J + 1);
+            end loop;
+            Leaf.Keys (Leaf.Num_Keys)     := 0;
+            Leaf.Pointers (Leaf.Num_Keys) := (others => <>);
+            Leaf.Num_Keys                 := Leaf.Num_Keys - 1;
+            Tree.Nodes (Leaf_Id)          := Leaf;
+
+            if Tree.Total_Keys > 0 then
+               Tree.Total_Keys := Tree.Total_Keys - 1;
+            end if;
+            Removed := True;
+            return;
+         end if;
+      end loop;
+   end Delete_Key;
+
+   -------------------------------------------------------------------------
    --  Range_Scan (Leftmost-Leaf Descent + Leaf Chain Verification, CRIT-02)
    -------------------------------------------------------------------------
 

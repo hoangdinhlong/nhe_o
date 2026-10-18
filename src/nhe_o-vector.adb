@@ -369,8 +369,14 @@ package body Nhe_O.Vector is
    end Hamming_Distance;
 
    -------------------------------------------------------------------------
-   --  4096-D Vector TOAST Serialization / Deserialization (Q-003)
+   --  4096-D Vector TOAST Serialization / Deserialization (Q-003, R2-HIGH-02)
    -------------------------------------------------------------------------
+
+   VTST_Magic_0 : constant Byte := 16#56#; --  'V'
+   VTST_Magic_1 : constant Byte := 16#54#; --  'T'
+   VTST_Magic_2 : constant Byte := 16#53#; --  'S'
+   VTST_Magic_3 : constant Byte := 16#54#; --  'T'
+   Max_Mantissa : constant := 100_000_000;
 
    procedure Encode_Vector_TOAST
      (V       : in     Vector_Value;
@@ -378,46 +384,77 @@ package body Nhe_O.Vector is
       Length  :    out Valid_TOAST_Length)
    is
       use Interfaces;
-      Base       : TOAST_Payload_Index;
-      Comp       : Vector_Component;
-      Abs_C      : Non_Negative_Float;
-      Sign_Bit   : Unsigned_32;
-      Range_Bit  : Unsigned_32;
-      Scaled     : Float;
-      Mag_Int    : Integer;
-      Word       : Unsigned_32;
+      Dim_U32  : constant Unsigned_32 := Unsigned_32 (V.Dim);
+      Base     : TOAST_Payload_Index;
+      Comp     : Vector_Component;
+      Abs_C    : Non_Negative_Float;
+      Sign_Bit : Unsigned_32;
+      Exp_Code : Unsigned_32;
+      Scaled   : Float;
+      Mant_Int : Integer;
+      Word     : Unsigned_32;
    begin
       Payload := [others => 0];
-      Length  := V.Dim * 4;
+      Length  := Vector_TOAST_Byte_Length (V.Dim);
+
+      --  8-byte header: "VTST" magic (1..4) + Big-Endian Dim (5..8)
+      Payload (1) := VTST_Magic_0;
+      Payload (2) := VTST_Magic_1;
+      Payload (3) := VTST_Magic_2;
+      Payload (4) := VTST_Magic_3;
+      Payload (5) := Byte (Shift_Right (Dim_U32, 24) and 16#FF#);
+      Payload (6) := Byte (Shift_Right (Dim_U32, 16) and 16#FF#);
+      Payload (7) := Byte (Shift_Right (Dim_U32, 8)  and 16#FF#);
+      Payload (8) := Byte (Dim_U32 and 16#FF#);
 
       for I in 1 .. V.Dim loop
-         Base     := (I - 1) * 4 + 1;
+         Base     := Vector_TOAST_Header_Size + (I - 1) * 4 + 1;
          Comp     := V.Elements (I);
          Sign_Bit := (if Comp < 0.0 then 16#8000_0000# else 0);
          Abs_C    := abs Comp;
 
-         if Abs_C <= 1000.0 then
-            Range_Bit := 0;
-            Scaled    := Abs_C * 1.0e6;
+         if Abs_C = 0.0 then
+            Exp_Code := 0;
+            Scaled   := 0.0;
+         elsif Abs_C <= 1.0e-24 then
+            Exp_Code := 1;
+            Scaled   := Abs_C * 1.0e32;
+         elsif Abs_C <= 1.0e-18 then
+            Exp_Code := 2;
+            Scaled   := Abs_C * 1.0e26;
+         elsif Abs_C <= 1.0e-12 then
+            Exp_Code := 3;
+            Scaled   := Abs_C * 1.0e20;
+         elsif Abs_C <= 1.0e-6 then
+            Exp_Code := 4;
+            Scaled   := Abs_C * 1.0e14;
+         elsif Abs_C <= 1.0 then
+            Exp_Code := 5;
+            Scaled   := Abs_C * 1.0e8;
+         elsif Abs_C <= 1000.0 then
+            Exp_Code := 6;
+            Scaled   := Abs_C * 1.0e5;
          else
-            Range_Bit := 16#4000_0000#;
-            Scaled    := Abs_C * 1.0e3;
+            Exp_Code := 7;
+            Scaled   := Abs_C * 1.0e2;
          end if;
 
-         if Scaled >= 1.0e9 then
-            Mag_Int := 1_000_000_000;
+         if Scaled >= Float (Max_Mantissa) then
+            Mant_Int := Max_Mantissa;
          elsif Scaled <= 0.0 then
-            Mag_Int := 0;
+            Mant_Int := 0;
          else
-            Mag_Int := Integer (Scaled);
-            if Mag_Int > 1_000_000_000 then
-               Mag_Int := 1_000_000_000;
-            elsif Mag_Int < 0 then
-               Mag_Int := 0;
+            Mant_Int := Integer (Scaled);
+            if Mant_Int > Max_Mantissa then
+               Mant_Int := Max_Mantissa;
+            elsif Mant_Int < 0 then
+               Mant_Int := 0;
             end if;
          end if;
 
-         Word := Sign_Bit or Range_Bit or Unsigned_32 (Mag_Int);
+         Word := Sign_Bit
+           or Shift_Left (Exp_Code, 27)
+           or Unsigned_32 (Mant_Int);
 
          Payload (Base)     := Byte (Shift_Right (Word, 24) and 16#FF#);
          Payload (Base + 1) := Byte (Shift_Right (Word, 16) and 16#FF#);
@@ -434,42 +471,81 @@ package body Nhe_O.Vector is
       Valid   :    out Boolean)
    is
       use Interfaces;
-      Base       : TOAST_Payload_Index;
-      Word       : Unsigned_32;
-      Is_Neg     : Boolean;
-      High_Range : Boolean;
-      Mag        : Unsigned_32;
-      Val_Abs    : Float;
+      Raw_Dim  : Unsigned_32;
+      Base     : TOAST_Payload_Index;
+      Word     : Unsigned_32;
+      Is_Neg   : Boolean;
+      Exp_Code : Unsigned_32;
+      Mantissa : Unsigned_32;
+      Val_Abs  : Float;
    begin
       V := (Dim => Dim, Elements => [others => 0.0]);
 
-      if Length /= Dim * 4 then
+      if Length /= Vector_TOAST_Byte_Length (Dim) then
+         Valid := False;
+         return;
+      end if;
+
+      if Payload (1) /= VTST_Magic_0
+        or else Payload (2) /= VTST_Magic_1
+        or else Payload (3) /= VTST_Magic_2
+        or else Payload (4) /= VTST_Magic_3
+      then
+         Valid := False;
+         return;
+      end if;
+
+      Raw_Dim := Shift_Left (Unsigned_32 (Payload (5)), 24)
+        or Shift_Left (Unsigned_32 (Payload (6)), 16)
+        or Shift_Left (Unsigned_32 (Payload (7)), 8)
+        or Unsigned_32 (Payload (8));
+
+      if Raw_Dim /= Unsigned_32 (Dim) then
          Valid := False;
          return;
       end if;
 
       for I in 1 .. Dim loop
-         Base := (I - 1) * 4 + 1;
+         Base := Vector_TOAST_Header_Size + (I - 1) * 4 + 1;
          Word := Shift_Left (Unsigned_32 (Payload (Base)), 24)
            or Shift_Left (Unsigned_32 (Payload (Base + 1)), 16)
            or Shift_Left (Unsigned_32 (Payload (Base + 2)), 8)
            or Unsigned_32 (Payload (Base + 3));
 
-         Is_Neg     := (Word and 16#8000_0000#) /= 0;
-         High_Range := (Word and 16#4000_0000#) /= 0;
-         Mag        := Word and 16#3FFF_FFFF#;
+         Is_Neg   := (Word and 16#8000_0000#) /= 0;
+         Exp_Code := Shift_Right (Word, 27) and 16#0F#;
+         Mantissa := Word and 16#07FF_FFFF#;
 
-         if Mag > 1_000_000_000 then
+         if Exp_Code > 7 or else Mantissa > Unsigned_32 (Max_Mantissa) then
             V     := (Dim => Dim, Elements => [others => 0.0]);
             Valid := False;
             return;
          end if;
 
-         if High_Range then
-            Val_Abs := Float (Mag) * 1.0e-3;
-         else
-            Val_Abs := Float (Mag) * 1.0e-6;
+         if Exp_Code = 0 and then (Is_Neg or else Mantissa /= 0) then
+            V     := (Dim => Dim, Elements => [others => 0.0]);
+            Valid := False;
+            return;
          end if;
+
+         case Exp_Code is
+            when 0 =>
+               Val_Abs := 0.0;
+            when 1 =>
+               Val_Abs := Float (Mantissa) * 1.0e-32;
+            when 2 =>
+               Val_Abs := Float (Mantissa) * 1.0e-26;
+            when 3 =>
+               Val_Abs := Float (Mantissa) * 1.0e-20;
+            when 4 =>
+               Val_Abs := Float (Mantissa) * 1.0e-14;
+            when 5 =>
+               Val_Abs := Float (Mantissa) * 1.0e-8;
+            when 6 =>
+               Val_Abs := Float (Mantissa) * 1.0e-5;
+            when others =>
+               Val_Abs := Float (Mantissa) * 1.0e-2;
+         end case;
 
          if Val_Abs > Max_Component then
             Val_Abs := Max_Component;

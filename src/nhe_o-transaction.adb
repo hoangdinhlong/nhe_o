@@ -255,11 +255,18 @@ package body Nhe_O.Transaction is
       Page     : in     Page_Buffer;
       Status   :    out Engine_Status)
    is
-      Checksum : Unsigned_32;
+      Max_Commit_Scan : constant := 256;
+      Checksum        : Unsigned_32;
       pragma Warnings (Off, Checksum);
-      Frame    : WAL_Frame_Buffer;
-      WAL_Ok   : Boolean;
-      Page_Ok  : Boolean;
+      Frame           : WAL_Frame_Buffer;
+      Scan_Frame      : WAL_Frame_Buffer;
+      Scan_Page       : Page_Buffer;
+      Scan_Tx         : Valid_Tx_Id;
+      Scan_Pg         : Valid_Page_Id;
+      WAL_Ok          : Boolean;
+      Page_Ok         : Boolean;
+      Scan_Ok         : Boolean;
+      Scan_EOF        : Boolean;
    begin
       Encode_WAL_Frame (Ctx.Id, Page_Id, Page, Checksum, Frame, WAL_Frame_Commit);
       if not Verify_WAL_Frame (Frame) then
@@ -268,7 +275,7 @@ package body Nhe_O.Transaction is
          return;
       end if;
 
-      --  1. Write-Ahead Log commit frame first (WAL protocol)
+      --  1. Write-Ahead Log commit barrier frame first (WAL protocol)
       Append_WAL_Frame (WAL_Path, Frame, WAL_Ok);
       if not WAL_Ok then
          Ctx.State := Tx_Aborted;
@@ -276,7 +283,33 @@ package body Nhe_O.Transaction is
          return;
       end if;
 
-      --  2. Persist slotted page to database file
+      --  2. NO-STEAL materialization: flush all WAL_Frame_Data pages staged by Ctx.Id
+      --     to DB_Path only after the commit barrier frame is durable on disk (R2-CRIT-01)
+      for Step in 1 .. Max_Commit_Scan loop
+         Read_WAL_Frame (WAL_Path, Valid_Page_Id (Step - 1), Scan_Frame, Scan_Ok, Scan_EOF);
+         if not Scan_Ok then
+            exit when Scan_EOF;
+            Ctx.State := Tx_Aborted;
+            Status    := Status_IO_Error;
+            return;
+         end if;
+
+         if Verify_WAL_Frame (Scan_Frame)
+           and then Get_WAL_Frame_Kind (Scan_Frame) = WAL_Frame_Data
+         then
+            Decode_WAL_Frame (Scan_Frame, Scan_Tx, Scan_Pg, Scan_Page);
+            if Scan_Tx = Ctx.Id then
+               Write_Page (DB_Path, Scan_Pg, Scan_Page, Page_Ok);
+               if not Page_Ok then
+                  Ctx.State := Tx_Aborted;
+                  Status    := Status_IO_Error;
+                  return;
+               end if;
+            end if;
+         end if;
+      end loop;
+
+      --  3. Persist the final commit slotted/data page to database file
       Write_Page (DB_Path, Page_Id, Page, Page_Ok);
       if not Page_Ok then
          Ctx.State := Tx_Aborted;
@@ -455,8 +488,15 @@ package body Nhe_O.Transaction is
       Next_Page_U32 : Unsigned_32;
       Chunk_Bytes   : Positive;
       WAL_Ok        : Boolean;
-      Page_Ok       : Boolean;
    begin
+      if Nhe_O.IO.Has_Embedded_NUL (DB_Path)
+        or else Nhe_O.IO.Has_Embedded_NUL (WAL_Path)
+      then
+         Ptr    := (others => <>);
+         Status := Status_IO_Error;
+         return;
+      end if;
+
       Ptr := (
          Root_Overflow_Page => Start_Page_Id,
          Total_Byte_Length  => Length,
@@ -499,16 +539,12 @@ package body Nhe_O.Transaction is
          Put_Page_U32_BE (Page, 9, Unsigned_32 (Chunk_Bytes));
          Put_Page_U32_BE (Page, 13, Chunk_CRC);
 
-         --  Write WAL data frame first, then 4KB TOAST overflow page
+         --  NO-STEAL: stage 4KB TOAST overflow page exclusively in WAL_Path
+         --  during Tx_Active; Commit_Tx flushes it to DB_Path after the
+         --  WAL_Frame_Commit barrier frame is durable.
          Encode_WAL_Frame (Ctx.Id, Cur_Page_Id, Page, WAL_CRC, Frame, WAL_Frame_Data);
          Append_WAL_Frame (WAL_Path, Frame, WAL_Ok);
          if not WAL_Ok then
-            Status := Status_IO_Error;
-            return;
-         end if;
-
-         Write_Page (DB_Path, Cur_Page_Id, Page, Page_Ok);
-         if not Page_Ok then
             Status := Status_IO_Error;
             return;
          end if;

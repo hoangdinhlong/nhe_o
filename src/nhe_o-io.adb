@@ -210,7 +210,7 @@ package body Nhe_O.IO is
 
       for Attempt in 1 .. Max_IO_Retries loop
          N_Read := Posix_Pread (Fd, Buffer, size_t (Nhe_O.Page_Size), Offset);
-         exit when N_Read >= 0;
+         exit when N_Read = Ssize_T (Nhe_O.Page_Size) or else N_Read = 0;
       end loop;
 
       Close_R := Posix_Close (Fd);
@@ -350,7 +350,7 @@ package body Nhe_O.IO is
 
       for Attempt in 1 .. Max_IO_Retries loop
          N_Read := Posix_Pread_WAL (Fd, Frame, size_t (WAL_Frame_Size), Offset);
-         exit when N_Read >= 0;
+         exit when N_Read = Ssize_T (WAL_Frame_Size) or else N_Read = 0;
       end loop;
 
       Close_R := Posix_Close (Fd);

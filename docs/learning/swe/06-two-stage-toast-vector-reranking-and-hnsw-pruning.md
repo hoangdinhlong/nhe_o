@@ -38,17 +38,17 @@ When inserting or updating a vector in `Nhe_O.HNSW`:
 1. **`Doc_Id` Deduplication**: `Insert_Vector` first scans `1 .. Index.Node_Count`. If a node with `Nodes (I).Doc_Id = Doc_Id` already exists, it updates that node's vector representations in-place.
 2. **Nearest-Neighbor Edge Selection**: For a new node at `Target_Id`, `Insert_Vector` ranks existing nodes on layer $L$ by `Node_Pair_Distance` and connects `Target_Id` to the closest neighbors.
 3. **Distance-Pruned Reverse Edges (`Add_Edge_Pruned`)**: When adding a reverse edge `Src_Id -> Target_Id` on layer $L$:
-   - If `Degree < Max_Neighbors (8)`, `Target_Id` is appended directly.
+   - If `Degree < Max_Neighbors (4)`, `Target_Id` is appended directly (or reclaims any deactivated neighbor slot).
    - If `Degree = Max_Neighbors`, `Add_Edge_Pruned` finds the **farthest** existing neighbor `Worst_Slot` of `Src_Id`. If `Node_Pair_Distance (Src_Id, Target_Id) < Worst_Dist`, `Target_Id` replaces `Worst_Slot`, maintaining navigable small-world connectivity.
 4. **Greedy Upper-Layer Descent + 4-Wave Beam Expansion (`Search_KNN`)**: `Search_KNN` descends greedily from `Top_Layer` down to layer `2`, then performs 4 waves of neighbor expansion on layer `1` starting from the entry seed.
 
 ### 3. Two-Stage 4096-D Vector TOAST Exact Re-Ranking (`ADR-006`)
 To support full 4096-D precision without blowing up HNSW RAM:
-- **On `Ingest_Document` (`Dim > 64`)**:
-  - `Encode_Vector_TOAST` serializes the full `Dim`-dimensional `Float32` embedding (`"VTST"` magic + big-endian `Dim` + IEEE-754 `Float32` words) into a `TOAST_Payload_Buffer` (`up to 16,392 bytes`) and writes it to a 4KB TOAST overflow chain (`Vec_Toast_Ptr`), persisted inside the document's primary `"SLOT"` tuple on Page 1.
+- **On `Ingest_Document`**:
+  - `Encode_Vector_TOAST` serializes the full `Dim`-dimensional `Float32` embedding (`"VTST"` 4-byte magic + big-endian `Dim` + tiered scientific `Float32` words) into a `TOAST_Payload_Buffer` (`up to 16,392 bytes`) and writes it to a 4KB TOAST overflow chain (`Vec_Toast_Ptr`), persisted inside the document's primary `"SLOT"` tuple on Page 1.
 - **On `Execute_Hybrid_RAG_Query`**:
   - **Stage 1 (Fast RAM Candidate Generation)**: `HNSW.Search_KNN` (plus MVCC-visible `PK_Tree`-verified document evaluation) scores candidates in RAM.
-  - **Stage 2 (On-Disk TOAST Exact Re-Ranking)**: Whenever `Engine.Dim > 64` and a candidate has a valid `Vec_Toast_Ptr`, `Evaluate_Doc_Candidate` reads the `"VTST"` chain via `Read_TOAST_Chain`, decodes the full `4096-D` `Vector_Value` via `Decode_Vector_TOAST`, and recomputes exact `L2_Distance (Full_Vec, Query_Vec)` (or full `Int8_L2_Distance`) before inserting the candidate into the sorted top-$k$ result list!
+  - **Stage 2 (On-Disk TOAST Exact Re-Ranking)**: Whenever `Engine.Dim > 64` (or a historical prior tuple version is resolved) and a candidate has a valid `Vec_Toast_Ptr`, `Evaluate_Doc_Candidate` reads the `"VTST"` chain via `Read_TOAST_Chain`, decodes the full `4096-D` `Vector_Value` via `Decode_Vector_TOAST`, and recomputes exact `L2_Distance (Query_Vec, Full_Vec)` (or full-dimension `Int8_L2_Distance` / `Hamming_Distance`) before inserting the candidate into the sorted top-$k$ result list!
 
 ```text
 Query Vector (4096-D)
@@ -59,39 +59,39 @@ Query Vector (4096-D)
        |
        +---> [Stage 2: Exact TOAST Re-Ranking (`Nhe_O.RAG`)]
              Reads `"VTST"` 4KB TOAST Chain (`Vec_Toast_Ptr`)
-             Recomputes exact 4096-D `L2_Distance` -> Final Top-K Hits
+             Recomputes exact 4096-D `L2_Distance` / `Int8_L2_Distance` -> Final Top-K Hits
 ```
 
 ---
 
 ## 3. Concrete example: `"VTST"` Binary Layout & Stage-2 Re-Ranking
 
-In [`src/nhe_o-vector.adb`](../../../src/nhe_o-vector.adb), `Encode_Vector_TOAST` packs a `Vector_Value` (`1 .. 4096` floats) into a deterministic big-endian byte buffer:
+In [`src/nhe_o-vector.adb`](../../../src/nhe_o-vector.adb), `Encode_Vector_TOAST` packs a `Vector_Value` (`1 .. 4096` floats) into a deterministic big-endian byte buffer (`8 + Dim * 4` bytes, up to `16,392 bytes`):
 
 | Byte Offset | Field | Description |
 |---|---|---|
 | `1..4` | `Magic` | ASCII `"VTST"` (`16#56#`, `16#54#`, `16#53#`, `16#54#`) |
 | `5..8` | `Dim` | Big-endian `Unsigned_32` dimension (`1 .. 4096`) |
-| `9 .. 8 + 4*Dim` | `Elements` | Big-endian IEEE-754 `Float32` words (`Float_To_U32` / `U32_To_Float`) |
+| `9 .. 8 + 4*Dim` | `Elements` | Big-endian tiered scientific `Float32` words (`Float_To_Scaled_Word` / `Scaled_Word_To_Float`: `Bit 31 = Sign`, `Bits 27..30 = Exp_Code 0..7`, `Bits 0..26 = Mantissa 0..10^8`) |
 
-During `Decode_Vector_TOAST`, every restored `Float32` word is sanitized against `NaN`/`Inf` and clamped to `Vector_Component` (`-1.0e6 .. 1.0e6`), allowing `gnatprove` to prove 100% of all run-time and functional contract checks (`Post => (if Valid then V.Dim = Expected_Dim)`) in under 1 second.
+During `Decode_Vector_TOAST`, `Magic = "VTST"` and `Raw_Dim = Expected_Dim` are verified first, and each restored `Float32` word is bounded by construction to `Vector_Component` (`-1.0e6 .. 1.0e6`) while preserving 8 decimal digits of precision across `[1.0e-7, 1.0e6]`, allowing `gnatprove` to prove 100% of all run-time and functional contract checks (`Post => (if Valid then V.Dim = Expected_Dim)`) without `Ada.Unchecked_Conversion`.
 
 ---
 
 ## 4. Trade-offs & alternatives
 
-| Design Choice | RAM per 64-Node Graph | 4096-D Tail Precision (`dims 65..4096`) | Disk I/O During Query |
+| Design Choice | RAM per 32-Node Graph | 4096-D Tail Precision (`dims 65..4096`) | Disk I/O During Query |
 |---|---|---|---|
-| **1. Full 4096-D `Float32` in HNSW RAM** | `> 1.1 MB` (exceeds stack frame budget) | Exact | 0 page reads |
-| **2. 64-D Prefix Only in HNSW RAM** | `~72 KB` | Blind to dimensions `65..4096` in `Float32`/`Int8` mode | 0 page reads |
-| **3. Two-Stage HNSW RAM + `"VTST"` TOAST Re-Ranking (Nhé O's choice)** | `~72 KB` | **Exact 4096-D L2** | Reads `"VTST"` TOAST chain only for filtered candidates |
+| **1. Full 4096-D `Float32` in HNSW RAM** | `> 550 KB` (exceeds stack frame budget) | Exact | 0 page reads |
+| **2. 64-D Prefix Only in HNSW RAM** | `~36 KB` | Blind to dimensions `65..4096` in `Float32`/`Int8` mode | 0 page reads |
+| **3. Two-Stage HNSW RAM + `"VTST"` TOAST Re-Ranking (Nhé O's choice)** | `~36 KB` | **Exact 4096-D L2 / SQ8** | Reads `"VTST"` TOAST chain only for filtered candidates |
 
 ---
 
 ## 5. Where it lives in the project
 
 - **ADR**: [`ADR-006`](../../DECISIONS.md) — *Two-Stage 4096-D Hybrid RAG (HNSW RAM Stage-1 + TOAST Full-Vector Stage-2 Exact Re-Ranking) & Primary 4KB `"SLOT"` Pages*.
-- **Domain Specification**: [`docs/domain/storage-and-wal-format.md`](../../domain/storage-and-wal-format.md) (Section 3.2 `"VTST"` Vector TOAST Payload Format).
+- **Domain Specification**: [`docs/domain/storage-and-wal-format.md`](../../domain/storage-and-wal-format.md) (Section 3.3 `"VTST"` Vector TOAST Payload).
 - **Code Modules**:
   - [`src/nhe_o-vector.ads`](../../../src/nhe_o-vector.ads) & [`src/nhe_o-vector.adb`](../../../src/nhe_o-vector.adb) (`Int8_L2_Distance`, `Encode_Vector_TOAST`, `Decode_Vector_TOAST`).
   - [`src/nhe_o-hnsw.ads`](../../../src/nhe_o-hnsw.ads) & [`src/nhe_o-hnsw.adb`](../../../src/nhe_o-hnsw.adb) (`Dequantize_Int8_Scalar`, `Node_Distance`, `Node_Pair_Distance`, `Add_Edge_Pruned`, `Insert_Vector`, `Search_KNN`).

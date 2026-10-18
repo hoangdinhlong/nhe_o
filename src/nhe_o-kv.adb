@@ -597,6 +597,81 @@ package body Nhe_O.KV is
       Status := (if WAL_Ok then Status_Ok else Status_IO_Error);
    end Del_Durable;
 
+   procedure Expire_Durable
+     (Store    : in out KV_Store;
+      WAL_Path : in     Bounded_Text;
+      Tx       : in     Valid_Tx_Id;
+      Key      : in     Bounded_Ident;
+      Now      : in     Epoch_Seconds;
+      TTL_Sec  : in     Epoch_Seconds;
+      Updated  :    out Boolean;
+      Status   :    out Engine_Status)
+   is
+      Entry_Rec : KV_Entry := (others => <>);
+      Page      : Page_Buffer;
+      Frame     : WAL_Frame_Buffer;
+      CRC       : Unsigned_32;
+      pragma Warnings (Off, CRC);
+      WAL_Ok    : Boolean;
+   begin
+      Expire (Store, Key, Now, TTL_Sec, Updated);
+      if not Updated then
+         Status := Status_Ok;
+         return;
+      end if;
+
+      for I in KV_Slot_Index loop
+         if Store.Slots (I).Occupied and then Equal_Ident (Store.Slots (I).Key, Key) then
+            Entry_Rec := Store.Slots (I);
+            exit;
+         end if;
+      end loop;
+
+      Encode_KV_Wal_Page (KV_Op_Set, Entry_Rec, Page);
+      Encode_WAL_Frame (Tx, 0, Page, CRC, Frame, WAL_Frame_KV);
+      Append_WAL_Frame (WAL_Path, Frame, WAL_Ok);
+
+      Status := (if WAL_Ok then Status_Ok else Status_IO_Error);
+   end Expire_Durable;
+
+   procedure Incr_By_Durable
+     (Store     : in out KV_Store;
+      WAL_Path  : in     Bounded_Text;
+      Tx        : in     Valid_Tx_Id;
+      Key       : in     Bounded_Ident;
+      Delta_Val : in     Integer_64;
+      Now       : in     Epoch_Seconds;
+      New_Val   :    out Integer_64;
+      Status    :    out Engine_Status)
+   is
+      Entry_Rec : KV_Entry := (others => <>);
+      Page      : Page_Buffer;
+      Frame     : WAL_Frame_Buffer;
+      CRC       : Unsigned_32;
+      pragma Warnings (Off, CRC);
+      WAL_Ok    : Boolean;
+   begin
+      Incr_By (Store, Key, Delta_Val, Now, New_Val, Status);
+      if Status /= Status_Ok then
+         return;
+      end if;
+
+      for I in KV_Slot_Index loop
+         if Store.Slots (I).Occupied and then Equal_Ident (Store.Slots (I).Key, Key) then
+            Entry_Rec := Store.Slots (I);
+            exit;
+         end if;
+      end loop;
+
+      Encode_KV_Wal_Page (KV_Op_Set, Entry_Rec, Page);
+      Encode_WAL_Frame (Tx, 0, Page, CRC, Frame, WAL_Frame_KV);
+      Append_WAL_Frame (WAL_Path, Frame, WAL_Ok);
+
+      if not WAL_Ok then
+         Status := Status_IO_Error;
+      end if;
+   end Incr_By_Durable;
+
    procedure Recover_KV_From_WAL
      (Store        : in out KV_Store;
       WAL_Path     : in     Bounded_Text;
@@ -609,6 +684,7 @@ package body Nhe_O.KV is
       Page      : Page_Buffer;
       Frame_Tx  : Valid_Tx_Id;
       Page_Id   : Valid_Page_Id;
+      pragma Warnings (Off, Frame);
       pragma Warnings (Off, Frame_Tx);
       pragma Warnings (Off, Page_Id);
       Read_Ok   : Boolean;
@@ -669,6 +745,15 @@ package body Nhe_O.KV is
             end if;
          end if;
       end loop;
+
+      --  Detect WAL truncation beyond Max_Frames instead of silently stopping (R2-HIGH-05)
+      if Max_Frames < Max_Page_Id then
+         Read_WAL_Frame (WAL_Path, Valid_Page_Id (Max_Frames), Frame, Read_Ok, Is_EOF);
+         if Read_Ok or else not Is_EOF then
+            Status := Status_Capacity_Exceeded;
+            return;
+         end if;
+      end if;
    end Recover_KV_From_WAL;
 
 end Nhe_O.KV;

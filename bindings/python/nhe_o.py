@@ -2,7 +2,7 @@
 """
 nhe_o.py — Python ctypes SDK for the Formally Verified Nhé O Engine
 
-Wraps the 100% SPARK 2014 C ABI (`Nhe_O.C_API` / `include/nhe_o.h`) so Python
+Wraps the 100% SPARK 2022 C ABI (`Nhe_O.C_API` / `include/nhe_o.h`) so Python
 local LLM pipelines (e.g., Qwen 3.8 RAG agents, llama-cpp-python, LangChain)
 can invoke PostgreSQL SQL analysis, pgvector distance & quantization (up to
 4096-D), Redis KV cache with TTL/LRU, Durable WAL Pub/Sub, and Universal
@@ -19,6 +19,7 @@ from typing import Any, Sequence
 
 MAX_IDENT_LEN = 64
 MAX_TEXT_LEN = 512
+MAX_TOAST_BYTES = 16392
 MAX_VECTOR_DIM = 4096
 MAX_COMPONENT = 1.0e6
 
@@ -40,6 +41,7 @@ ENCODING_BINARY_1BIT = 2
 
 IdentBuffer = c_char * MAX_IDENT_LEN
 TextBuffer = c_char * MAX_TEXT_LEN
+ToastBuffer = c_char * MAX_TOAST_BYTES
 VectorBuffer = c_float * MAX_VECTOR_DIM
 
 
@@ -57,6 +59,15 @@ def _make_text_buf(text: str) -> tuple[TextBuffer, int]:
     if len(raw) > MAX_TEXT_LEN:
         raise ValueError(f"Text exceeds {MAX_TEXT_LEN} bytes")
     buf = TextBuffer()
+    buf[: len(raw)] = raw
+    return buf, len(raw)
+
+
+def _make_toast_buf(text: str) -> tuple[ToastBuffer, int]:
+    raw = text.encode("utf-8")
+    if len(raw) > MAX_TOAST_BYTES:
+        raise ValueError(f"TOAST payload exceeds {MAX_TOAST_BYTES} bytes")
+    buf = ToastBuffer()
     buf[: len(raw)] = raw
     return buf, len(raw)
 
@@ -88,6 +99,12 @@ class NheOEngine:
         wal_path: str | None = None,
         dim: int = 3,
     ) -> None:
+        if (db_path is None) != (wal_path is None):
+            raise ValueError("Both db_path and wal_path must be provided together")
+        if db_path is not None and wal_path is not None:
+            if not db_path.strip() or not wal_path.strip():
+                raise ValueError("db_path and wal_path must not be empty or whitespace")
+
         if lib_path is None:
             repo_root = Path(__file__).resolve().parents[2]
             lib_path = repo_root / "lib" / "libnhe_o.so"
@@ -285,6 +302,27 @@ class NheOEngine:
         ]
         self._lib.nhe_o_rag_ingest_nd.restype = None
 
+        self._lib.nhe_o_rag_ingest_full_nd.argtypes = [
+            c_int,
+            char_p,
+            c_int,
+            char_p,
+            c_int,
+            char_p,
+            c_int,
+            float_p,
+            c_int,
+            c_int,
+            int_p,
+        ]
+        self._lib.nhe_o_rag_ingest_full_nd.restype = None
+
+        self._lib.nhe_o_rag_delete.argtypes = [
+            c_int,
+            int_p,
+        ]
+        self._lib.nhe_o_rag_delete.restype = None
+
         self._lib.nhe_o_rag_query_3d.argtypes = [
             c_float,
             c_float,
@@ -319,6 +357,25 @@ class NheOEngine:
         ]
         self._lib.nhe_o_rag_query_nd.restype = None
 
+        self._lib.nhe_o_rag_query_full_nd.argtypes = [
+            float_p,
+            c_int,
+            c_int,
+            char_p,
+            c_int,
+            char_p,
+            c_int,
+            c_int,
+            int_p,
+            int_p,
+            float_p,
+            char_p,
+            int_p,
+            int_p,
+            int_p,
+        ]
+        self._lib.nhe_o_rag_query_full_nd.restype = None
+
     def version(self) -> tuple[int, int]:
         return (
             int(self._lib.nhe_o_version_major()),
@@ -332,6 +389,8 @@ class NheOEngine:
             raise RuntimeError(f"nhe_o_init failed with status {status.value}")
 
     def init_with_paths(self, db_path: str, wal_path: str, dim: int = 3) -> None:
+        if not db_path.strip() or not wal_path.strip():
+            raise ValueError("Paths must not be empty or whitespace")
         if "\x00" in db_path or "\x00" in wal_path:
             raise ValueError("Paths must not contain embedded NUL bytes")
         db_buf, db_len = _make_text_buf(db_path)
@@ -578,22 +637,17 @@ class NheOEngine:
         summary: str,
         vec: tuple[float, float, float],
         related_doc_id: int = 0,
+        metadata_json: str = "",
+        parent_text: str | None = None,
     ) -> None:
-        vx, vy, vz = _validate_float(vec[0]), _validate_float(vec[1]), _validate_float(vec[2])
-        s_buf, s_len = _make_text_buf(summary)
-        status = c_int(0)
-        self._lib.nhe_o_rag_ingest_3d(
-            c_int(doc_id),
-            s_buf,
-            s_len,
-            c_float(vx),
-            c_float(vy),
-            c_float(vz),
-            c_int(related_doc_id),
-            byref(status),
+        self.rag_ingest_nd(
+            doc_id,
+            summary,
+            vec,
+            related_doc_id=related_doc_id,
+            metadata_json=metadata_json,
+            parent_text=parent_text,
         )
-        if status.value != STATUS_OK:
-            raise RuntimeError(f"nhe_o_rag_ingest_3d failed: {status.value}")
 
     def rag_ingest_nd(
         self,
@@ -601,21 +655,53 @@ class NheOEngine:
         summary: str,
         vec: Sequence[float],
         related_doc_id: int = 0,
+        metadata_json: str = "",
+        parent_text: str | None = None,
     ) -> None:
+        m_buf, m_len = _make_text_buf(metadata_json)
         s_buf, s_len = _make_text_buf(summary)
+        p_buf, p_len = _make_toast_buf(parent_text if parent_text is not None else summary)
         v_buf, dim = _make_vec_buf(vec)
         status = c_int(0)
-        self._lib.nhe_o_rag_ingest_nd(
+        self._lib.nhe_o_rag_ingest_full_nd(
             c_int(doc_id),
+            m_buf,
+            m_len,
             s_buf,
             s_len,
+            p_buf,
+            p_len,
             v_buf,
             c_int(dim),
             c_int(related_doc_id),
             byref(status),
         )
         if status.value != STATUS_OK:
-            raise RuntimeError(f"nhe_o_rag_ingest_nd failed: {status.value}")
+            raise RuntimeError(f"nhe_o_rag_ingest_full_nd failed: {status.value}")
+
+    def rag_ingest_full_nd(
+        self,
+        doc_id: int,
+        summary: str,
+        vec: Sequence[float],
+        related_doc_id: int = 0,
+        metadata_json: str = "",
+        parent_text: str | None = None,
+    ) -> None:
+        self.rag_ingest_nd(
+            doc_id,
+            summary,
+            vec,
+            related_doc_id=related_doc_id,
+            metadata_json=metadata_json,
+            parent_text=parent_text,
+        )
+
+    def rag_delete(self, doc_id: int) -> None:
+        status = c_int(0)
+        self._lib.nhe_o_rag_delete(c_int(doc_id), byref(status))
+        if status.value != STATUS_OK:
+            raise RuntimeError(f"nhe_o_rag_delete failed: {status.value}")
 
     def rag_query_3d(
         self,
@@ -623,9 +709,14 @@ class NheOEngine:
         encoding_mode: int = ENCODING_FLOAT32,
         keyword: str = "",
         top_k: int = 3,
+        filter_json: str = "",
     ) -> dict[str, Any]:
         return self.rag_query_nd(
-            query_vec, encoding_mode=encoding_mode, keyword=keyword, top_k=top_k
+            query_vec,
+            encoding_mode=encoding_mode,
+            keyword=keyword,
+            top_k=top_k,
+            filter_json=filter_json,
         )
 
     def rag_query_nd(
@@ -634,20 +725,24 @@ class NheOEngine:
         encoding_mode: int = ENCODING_FLOAT32,
         keyword: str = "",
         top_k: int = 3,
+        filter_json: str = "",
     ) -> dict[str, Any]:
         q_buf, dim = _make_vec_buf(query_vec)
+        f_buf, f_len = _make_text_buf(filter_json)
         k_buf, k_len = _make_text_buf(keyword)
         hit_count = c_int(0)
         top_doc_id = c_int(0)
         top_dist = c_float(0.0)
-        parent_buf = TextBuffer()
+        parent_buf = ToastBuffer()
         parent_bytes = c_int(0)
         graph_hit = c_int(0)
         status = c_int(0)
-        self._lib.nhe_o_rag_query_nd(
+        self._lib.nhe_o_rag_query_full_nd(
             q_buf,
             c_int(dim),
             c_int(encoding_mode),
+            f_buf,
+            f_len,
             k_buf,
             k_len,
             c_int(top_k),
@@ -660,8 +755,8 @@ class NheOEngine:
             byref(status),
         )
         if status.value != STATUS_OK:
-            raise RuntimeError(f"nhe_o_rag_query_nd failed: {status.value}")
-        copy_len = min(MAX_TEXT_LEN, int(parent_bytes.value))
+            raise RuntimeError(f"nhe_o_rag_query_full_nd failed: {status.value}")
+        copy_len = min(MAX_TOAST_BYTES, int(parent_bytes.value))
         parent_text = bytes(parent_buf[:copy_len]).decode("utf-8", errors="replace")
         return {
             "hit_count": int(hit_count.value),
@@ -672,8 +767,31 @@ class NheOEngine:
             "graph_neighbor_hit": bool(graph_hit.value),
         }
 
+    def rag_query_full_nd(
+        self,
+        query_vec: Sequence[float],
+        encoding_mode: int = ENCODING_FLOAT32,
+        keyword: str = "",
+        top_k: int = 3,
+        filter_json: str = "",
+    ) -> dict[str, Any]:
+        return self.rag_query_nd(
+            query_vec,
+            encoding_mode=encoding_mode,
+            keyword=keyword,
+            top_k=top_k,
+            filter_json=filter_json,
+        )
+
 
 def run_self_test() -> None:
+    # Verify single-path argument rejection (R2-LOW-02)
+    try:
+        NheOEngine(db_path="/tmp/only_one.db")
+        assert False, "Expected ValueError when only db_path is provided"
+    except ValueError:
+        pass
+
     engine = NheOEngine()
     assert engine.version() == (0, 3), f"Unexpected version: {engine.version()}"
 
@@ -683,6 +801,10 @@ def run_self_test() -> None:
     assert sql_info["status"] == STATUS_OK
     assert sql_info["has_vector_op"] is True
     assert sql_info["has_jsonb_op"] is True
+
+    # Verify multi-statement SQL injection rejection (R2-MED-01)
+    bad_sql = engine.analyze_sql("SELECT 1; DROP TABLE docs;")
+    assert bad_sql["status"] == STATUS_INVALID_SYNTAX
 
     dist = engine.vector_distance_3d((1.0, 2.0, 2.0), (4.0, 6.0, 2.0))
     assert abs(dist["l2_distance"] - 5.0) < 0.01
@@ -704,27 +826,103 @@ def run_self_test() -> None:
     assert engine.kv_incr_by("llm:tokens", 42, now_sec=200) == 42
 
     sub_id = engine.pubsub_subscribe("rag.*")
-    engine.rag_ingest_3d(1, "Ada SPARK formal verification guide", (1.0, 0.0, 0.0), related_doc_id=2)
-    engine.rag_ingest_3d(2, "PostgreSQL TOAST overflow storage", (0.8, 0.2, 0.0), related_doc_id=1)
+    large_parent = "Ada SPARK formal verification guide: " + ("X" * 5000)
+    engine.rag_ingest_3d(
+        1,
+        "Ada SPARK formal verification guide",
+        (1.0, 0.0, 0.0),
+        related_doc_id=2,
+        metadata_json='{"lang":"vi","domain":"spark"}',
+        parent_text=large_parent,
+    )
+    engine.rag_ingest_3d(
+        2,
+        "PostgreSQL TOAST overflow storage",
+        (0.8, 0.2, 0.0),
+        related_doc_id=1,
+        metadata_json='{"lang":"en","domain":"storage"}',
+    )
 
     polled = engine.pubsub_poll(sub_id)
     assert polled is not None and polled[0] == "rag.indexed"
     engine.pubsub_unsubscribe(sub_id)
 
-    rag_res = engine.rag_query_3d((1.0, 0.0, 0.0), encoding_mode=ENCODING_FLOAT32, keyword="SPARK", top_k=2)
-    assert rag_res["hit_count"] == 2
+    rag_res = engine.rag_query_3d(
+        (1.0, 0.0, 0.0),
+        encoding_mode=ENCODING_FLOAT32,
+        keyword="SPARK",
+        top_k=2,
+        filter_json='{"lang":"vi"}',
+    )
+    assert rag_res["hit_count"] == 1
     assert rag_res["top_doc_id"] == 1
-    assert rag_res["top_parent_text"] == "Ada SPARK formal verification guide"
+    assert rag_res["top_parent_bytes"] == len(large_parent)
+    assert rag_res["top_parent_text"] == large_parent
     assert rag_res["graph_neighbor_hit"] is True
 
-    # Verify N-D (4096-D) RAG with custom paths & Stage-2 TOAST Exact Re-Ranking
-    engine.init_with_paths("/tmp/nhe_o_py_4096.db", "/tmp/nhe_o_py_4096.wal", dim=4096)
-    engine.rag_ingest_nd(1, "Qwen3 4096-D embedding chunk A", vec_4096_a, related_doc_id=2)
-    engine.rag_ingest_nd(2, "Qwen3 4096-D embedding chunk B", vec_4096_b, related_doc_id=1)
-    rag_4096 = engine.rag_query_nd(vec_4096_b, encoding_mode=ENCODING_FLOAT32, top_k=2)
+    # Verify N-D (4096-D) RAG with custom paths, persistence across restart (R2-CRIT-02),
+    # durable KV incr_by/expire recovery, and durable deletion (R2-HIGH-01)
+    db_4096 = Path("/tmp/nhe_o_py_4096.db")
+    wal_4096 = Path("/tmp/nhe_o_py_4096.wal")
+    db_4096.unlink(missing_ok=True)
+    wal_4096.unlink(missing_ok=True)
+
+    engine.init_with_paths(str(db_4096), str(wal_4096), dim=4096)
+    engine.kv_set("persist:key", "survived_restart", now_sec=100, ttl_sec=0)
+    assert engine.kv_expire("persist:key", ttl_sec=500, now_sec=100) is True
+    assert engine.kv_incr_by("persist:counter", 99, now_sec=100) == 99
+    engine.rag_ingest_full_nd(
+        1,
+        "Qwen3 4096-D embedding chunk A",
+        vec_4096_a,
+        related_doc_id=2,
+        metadata_json='{"model":"qwen3","tier":"prod"}',
+    )
+    engine.rag_ingest_full_nd(
+        2,
+        "Qwen3 4096-D embedding chunk B",
+        vec_4096_b,
+        related_doc_id=1,
+        metadata_json='{"model":"qwen3","tier":"prod"}',
+    )
+
+    # Re-open existing DB & WAL without deleting files (R2-CRIT-02)
+    engine.init_with_paths(str(db_4096), str(wal_4096), dim=4096)
+    assert engine.kv_get("persist:key", now_sec=105) == "survived_restart"
+    assert engine.kv_ttl("persist:key", now_sec=105) == 495
+    assert engine.kv_get("persist:counter", now_sec=105) == "99"
+    assert engine.kv_incr_by("persist:counter", 1, now_sec=105) == 100
+    rag_4096 = engine.rag_query_full_nd(
+        vec_4096_b,
+        encoding_mode=ENCODING_FLOAT32,
+        top_k=2,
+        filter_json='{"model":"qwen3","tier":"prod"}',
+    )
     assert rag_4096["hit_count"] == 2
     assert rag_4096["top_doc_id"] == 2
     assert rag_4096["top_parent_text"] == "Qwen3 4096-D embedding chunk B"
+
+    # Also verify Stage-2 TOAST re-ranking in INT8_SQ8 mode on 4096-D (R2-HIGH-02)
+    rag_4096_sq8 = engine.rag_query_full_nd(
+        vec_4096_b,
+        encoding_mode=ENCODING_INT8_SQ8,
+        top_k=2,
+        filter_json='{"model":"qwen3","tier":"prod"}',
+    )
+    assert rag_4096_sq8["hit_count"] == 2
+    assert rag_4096_sq8["top_doc_id"] == 2
+
+    # Durable delete of doc 2 and verify survival across restart (R2-HIGH-01)
+    engine.rag_delete(2)
+    engine.init_with_paths(str(db_4096), str(wal_4096), dim=4096)
+    rag_after_del = engine.rag_query_full_nd(
+        vec_4096_b, encoding_mode=ENCODING_FLOAT32, top_k=2
+    )
+    assert rag_after_del["hit_count"] == 1
+    assert rag_after_del["top_doc_id"] == 1
+
+    db_4096.unlink(missing_ok=True)
+    wal_4096.unlink(missing_ok=True)
 
     print("[PASS] Python ctypes SDK (`bindings/python/nhe_o.py`) verified against `libnhe_o.so`!")
 

@@ -111,6 +111,21 @@ package Nhe_O.BTree is
           Pre    => Tree.Node_Count in 1 .. Max_BTree_Nodes
                     and then Tree.Root_Node in 1 .. Tree.Node_Count;
 
+   --  Delete a key from its target leaf node and decrement Total_Keys (R2-MED-04)
+   procedure Delete_Key
+     (Tree    : in out BTree_Index;
+      Key     : in     Integer_64;
+      Removed :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Tree.Root_Node in 1 .. Tree.Node_Count,
+          Post   => Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Tree.Root_Node in 1 .. Tree.Node_Count
+                    and then (if Removed and then Tree'Old.Total_Keys > 0
+                              then Tree.Total_Keys = Tree'Old.Total_Keys - 1
+                              else Tree.Total_Keys = Tree'Old.Total_Keys);
+
    --  Ordered range scan [Min_Key .. Max_Key] across linked leaf nodes
    procedure Range_Scan
      (Tree    : in     BTree_Index;

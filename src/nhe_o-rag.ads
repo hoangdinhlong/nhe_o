@@ -35,12 +35,13 @@ package Nhe_O.RAG is
       Vec_Toast_Ptr     : TOAST_Pointer     := (others => <>); --  4096-D full vector TOAST (Q-003)
       Related_Doc_Id    : Optional_Doc_Id   := 0;              --  1-hop GraphRAG entity edge
       --  Prior MVCC tuple version preserved for historical snapshots & rollback (CRIT-04)
-      Has_Prior_Version : Boolean           := False;
-      Prior_Tuple_Hdr   : MVCC_Tuple_Header := (Xmin => 1, Xmax => 0);
-      Prior_Metadata    : JSONB_Document    := (others => <>);
-      Prior_Summary     : Bounded_Text      := (Length => 0, Data => [others => ' ']);
-      Prior_Toast_Ptr   : TOAST_Pointer     := (others => <>);
-      Prior_Related_Id  : Optional_Doc_Id   := 0;
+      Has_Prior_Version   : Boolean           := False;
+      Prior_Tuple_Hdr     : MVCC_Tuple_Header := (Xmin => 1, Xmax => 0);
+      Prior_Metadata      : JSONB_Document    := (others => <>);
+      Prior_Summary       : Bounded_Text      := (Length => 0, Data => [others => ' ']);
+      Prior_Toast_Ptr     : TOAST_Pointer     := (others => <>);
+      Prior_Vec_Toast_Ptr : TOAST_Pointer     := (others => <>);
+      Prior_Related_Id    : Optional_Doc_Id   := 0;
    end record;
 
    type RAG_Document_Table is array (RAG_Doc_Slot) of RAG_Document_Entry;
@@ -121,6 +122,43 @@ package Nhe_O.RAG is
                     and then Engine.PK_Tree.Node_Count = Engine.PK_Tree.Node_Count'Old
                     and then Engine.PK_Tree.Root_Node = Engine.PK_Tree.Root_Node'Old
                     and then Engine.Next_TOAST_Pg = Engine.Next_TOAST_Pg'Old;
+
+   --  Durable WAL-staged MVCC delete of a document at transaction Ctx (R2-HIGH-01)
+   procedure Delete_Document
+     (Engine   : in out RAG_Engine;
+      Ctx      : in     Transaction_Context;
+      DB_Path  : in     Bounded_Text;
+      WAL_Path : in     Bounded_Text;
+      Doc_Id   : in     RAG_Doc_Slot;
+      Status   :    out Engine_Status)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Ctx.State = Tx_Active
+                    and then DB_Path.Length > 0
+                    and then WAL_Path.Length > 0
+                    and then Engine.Vector_Graph.Dim = Engine.Dim,
+          Post   => Engine.Dim = Engine.Dim'Old
+                    and then Engine.Vector_Graph.Dim = Engine.Dim
+                    and then Engine.PK_Tree.Node_Count = Engine.PK_Tree.Node_Count'Old
+                    and then Engine.PK_Tree.Root_Node = Engine.PK_Tree.Root_Node'Old
+                    and then Engine.Next_TOAST_Pg = Engine.Next_TOAST_Pg'Old;
+
+   --  Roll back in-memory RAG_Engine mutations (Docs, PK_Tree, Vector_Graph,
+   --  CLOG, and Next_TOAST_Pg) performed by transaction Tx_Num (R2-CRIT-01)
+   procedure Rollback_RAG_Tx
+     (Engine : in out RAG_Engine;
+      Tx_Num : in     Valid_Tx_Id)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Engine.Vector_Graph.Dim = Engine.Dim
+                    and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
+                    and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page,
+          Post   => Engine.Dim = Engine.Dim'Old
+                    and then Engine.Vector_Graph.Dim = Engine.Dim
+                    and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
+                    and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page;
 
    --  Encode Engine.Docs into a 4096-byte primary Slotted_Page (`"SLOT"`, CRIT-01)
    procedure Build_RAG_Slotted_Page

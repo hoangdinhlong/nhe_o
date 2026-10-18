@@ -89,7 +89,7 @@ package body Nhe_O.SQL is
                Skip_Next      := True;
             elsif Query.Data (I) = ''' then
                In_Single      := True;
-               Clean.Data (I) := '_';
+               Clean.Data (I) := ''';
             elsif Query.Data (I) = '"' then
                In_Double      := True;
                Clean.Data (I) := ' ';
@@ -316,7 +316,7 @@ package body Nhe_O.SQL is
          declare
             Next_C : constant Character := Clean_Query.Data (First_Pos + K_Len);
          begin
-            return Is_WS_Char (Next_C) or else Next_C = ';';
+            return not Is_Ident_Char (Next_C);
          end;
       end if;
       return True;
@@ -506,6 +506,27 @@ package body Nhe_O.SQL is
       return False;
    end Has_JSONB_Question_Op;
 
+   --  Reject empty semicolon statements or multi-statement tails after ';' (R2-MED-01)
+   function Has_Multi_Statement_Tail (Clean_Query : Bounded_Text) return Boolean is
+      Seen_Token     : Boolean := False;
+      Seen_Semicolon : Boolean := False;
+   begin
+      for I in 1 .. Clean_Query.Length loop
+         if Clean_Query.Data (I) = ';' then
+            if not Seen_Token or else Seen_Semicolon then
+               return True;
+            end if;
+            Seen_Semicolon := True;
+         elsif not Is_WS_Char (Clean_Query.Data (I)) then
+            if Seen_Semicolon then
+               return True;
+            end if;
+            Seen_Token := True;
+         end if;
+      end loop;
+      return False;
+   end Has_Multi_Statement_Tail;
+
    procedure Analyze_SQL
      (Query  : in     Bounded_Text;
       Result :    out Parsed_SQL_Descriptor;
@@ -521,7 +542,7 @@ package body Nhe_O.SQL is
       end if;
 
       Sanitize_SQL (Query, Clean, Lex_Valid);
-      if not Lex_Valid then
+      if not Lex_Valid or else Has_Multi_Statement_Tail (Clean) then
          Status := Status_Invalid_Syntax;
          return;
       end if;

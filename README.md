@@ -21,7 +21,7 @@
 8. **Universal Local LLM Hybrid RAG & C/Python SDK**: Single-pass execution combining B+Tree PK lookup, HNSW ANN vector search, JSONB metadata pre-filtering (`@>`), lexical keyword boosting, TOAST chunk retrieval, and 1-hop GraphRAG expansion — exposed via a formally verified C ABI (`include/nhe_o.h`, `lib/libnhe_o.so`) and Python `ctypes` SDK (`bindings/python/nhe_o.py`).
 9. **100% SPARK Verification Mandate (`BR-001` / `ADR-002` / `ADR-005`)**:
    - **100% of specifications, bodies, and entrypoints** (all 26 files across 14 units in `src/`) operate under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)`.
-   - **2,626 / 2,626 Formal Checks Proved (100% SPARK Stone, Bronze, Silver & Gold Contracts)**: Verified by `gnatprove 16.1.0` (`Why3` + `Z3` + `cvc5` + `Alt-Ergo`) with `0 unproved` checks and `0 warnings`.
+   - **2,863 / 2,863 Formal Checks Proved (100% SPARK Stone, Bronze, Silver & Gold Contracts)**: Verified by `gnatprove 16.1.0` (`Why3` + `Z3` + `cvc5` + `Alt-Ergo`) with `0 unproved` checks and `0 warnings`.
    - **Contract-Bound POSIX I/O (`src/nhe_o-io.adb`)**: Physical disk operations bypass exception-raising `Ada.Streams.Stream_IO` and bind directly in `SPARK_Mode (On)` to atomic POSIX kernel syscalls (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `close`, `unlink`).
 
 ---
@@ -67,7 +67,7 @@ alr run
 gprbuild -P nhe_o_lib.gpr
 python3 bindings/python/nhe_o.py
 
-# 4. Run formal SPARK verification (2,626 / 2,626 checks proved — 0 unproved)
+# 4. Run formal SPARK verification (2,863 / 2,863 checks proved — 0 unproved)
 gnatprove -P nhe_o.gpr --mode=all --level=2 -j24
 ```
 
