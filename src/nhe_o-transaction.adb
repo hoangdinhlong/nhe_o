@@ -658,9 +658,11 @@ package body Nhe_O.Transaction is
 
       --  16-Slot Line Pointer Directory (Bytes 25..152) + Tuple Area (Bytes 153..3992)
       for Slot in Page_Slot_Index loop
-         pragma Loop_Invariant (Slot in Page_Slot_Index);
          Dir_Base := 25 + (Slot - 1) * 8;
          Tup_Base := 153 + (Slot - 1) * 240;
+         pragma Loop_Invariant
+           (Dir_Base = 25 + (Slot - 1) * 8
+            and then Tup_Base = 153 + (Slot - 1) * 240);
 
          Put_Page_U32_BE (Raw_Page, Dir_Base, Unsigned_32 (Tup_Base));
          Raw_Page (Dir_Base + 4) := (if Page_Rec.Tuples (Slot).Occupied then 1 else 0);
@@ -675,12 +677,10 @@ package body Nhe_O.Transaction is
 
          Encode_TOAST_Pointer (Page_Rec.Tuples (Slot).Toast_Ptr, Toast_B);
          for B in TOAST_Pointer_Index loop
-            pragma Loop_Invariant (B in TOAST_Pointer_Index);
             Raw_Page (Tup_Base + 15 + B) := Toast_B (B);
          end loop;
 
          for B in Inline_Tuple_Index loop
-            pragma Loop_Invariant (B in Inline_Tuple_Index);
             Raw_Page (Tup_Base + 31 + B) := Page_Rec.Tuples (Slot).Inline_Data (B);
          end loop;
       end loop;
@@ -748,7 +748,10 @@ package body Nhe_O.Transaction is
       Page_Rec.Page_LSN_Tx := Valid_Tx_Id (Raw_LSN);
 
       for Slot in Page_Slot_Index loop
-         pragma Loop_Invariant (Slot in Page_Slot_Index);
+         pragma Loop_Invariant
+           (Page_Rec.Page_Id = Valid_Page_Id (Raw_Page_Id)
+            and then Page_Rec.Slot_Count = Page_Slot_Count (Raw_Slots)
+            and then Page_Rec.Page_LSN_Tx = Valid_Tx_Id (Raw_LSN));
          Dir_Base    := 25 + (Slot - 1) * 8;
          Tup_Base    := 153 + (Slot - 1) * 240;
          Raw_Tup_Off := Get_Page_U32_BE (Raw_Page, Dir_Base);
@@ -778,7 +781,6 @@ package body Nhe_O.Transaction is
          end if;
 
          for B in TOAST_Pointer_Index loop
-            pragma Loop_Invariant (B in TOAST_Pointer_Index);
             Toast_B (B) := Raw_Page (Tup_Base + 15 + B);
          end loop;
 
@@ -804,7 +806,6 @@ package body Nhe_O.Transaction is
          Page_Rec.Tuples (Slot).Inline_Len := Inline_Tuple_Length (Raw_Page (Dir_Base + 5));
 
          for B in Inline_Tuple_Index loop
-            pragma Loop_Invariant (B in Inline_Tuple_Index);
             Page_Rec.Tuples (Slot).Inline_Data (B) := Raw_Page (Tup_Base + 31 + B);
          end loop;
       end loop;

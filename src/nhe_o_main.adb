@@ -719,7 +719,9 @@ begin
    Check (Tree_Idx.Nodes (Tree_Idx.Root_Node).Kind = Node_Internal);
 
    for K in 1 .. 20 loop
-      pragma Loop_Invariant (K in 1 .. 20);
+      pragma Loop_Invariant
+        (Tree_Idx.Node_Count in 1 .. Max_BTree_Nodes
+         and then Tree_Idx.Root_Node in 1 .. Tree_Idx.Node_Count);
       Search_Key (Tree_Idx, Big_Key_Base + Integer_64 (K * 10), BTree_Hit, BTree_Ptr);
       Check (BTree_Hit and then BTree_Ptr.Target_Page = K and then BTree_Ptr.TOAST_Root = K + 100);
    end loop;

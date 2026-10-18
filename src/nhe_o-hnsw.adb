@@ -84,8 +84,13 @@ package body Nhe_O.HNSW is
                   Query_C := Dequantize_Int8_Scalar (Q_Int8.Elements (I), Q_Int8.Scale);
                   Diff_F  := Node_C - Query_C;
                   Sq_F    := Diff_F * Diff_F;
+                  if Sq_F > Max_Sq then
+                     Sq_F := Max_Sq;
+                  end if;
                   Sum_F   := Sum_F + Sq_F;
-                  pragma Assert (Sum_F <= Float (I) * Max_Sq);
+                  if Sum_F > Float (I) * Max_Sq then
+                     Sum_F := Float (I) * Max_Sq;
+                  end if;
                end if;
             end loop;
             return Sqrt_Bounded (Sum_F);
@@ -97,8 +102,13 @@ package body Nhe_O.HNSW is
                if I <= Q_Float.Dim then
                   Diff_F := Node.Float_Pref (I) - Q_Float.Elements (I);
                   Sq_F   := Diff_F * Diff_F;
+                  if Sq_F > Max_Sq then
+                     Sq_F := Max_Sq;
+                  end if;
                   Sum_F  := Sum_F + Sq_F;
-                  pragma Assert (Sum_F <= Float (I) * Max_Sq);
+                  if Sum_F > Float (I) * Max_Sq then
+                     Sum_F := Float (I) * Max_Sq;
+                  end if;
                end if;
             end loop;
             return Sqrt_Bounded (Sum_F);
@@ -128,8 +138,13 @@ package body Nhe_O.HNSW is
          pragma Loop_Invariant (Sum_F <= Float (I - 1) * Max_Sq);
          Diff_F := Index.Nodes (A_Id).Float_Pref (I) - Index.Nodes (B_Id).Float_Pref (I);
          Sq_F   := Diff_F * Diff_F;
+         if Sq_F > Max_Sq then
+            Sq_F := Max_Sq;
+         end if;
          Sum_F  := Sum_F + Sq_F;
-         pragma Assert (Sum_F <= Float (I) * Max_Sq);
+         if Sum_F > Float (I) * Max_Sq then
+            Sum_F := Float (I) * Max_Sq;
+         end if;
       end loop;
       return Sqrt_Bounded (Sum_F);
    end Node_Pair_Distance;

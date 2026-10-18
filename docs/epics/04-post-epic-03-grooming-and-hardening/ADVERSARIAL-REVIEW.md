@@ -1,6 +1,6 @@
 # Adversarial System Review (`v0.3.0` — Epics 01–03 Audit & Epic 04 Remediation Record)
 
-_Date: 2026-10-17 · Status: ✅ All 24 findings remediated & formally verified in Epic 04_
+_Date: 2026-10-18 · Status: ✅ All 24 findings remediated & formally verified in Epic 04 (`2,626 / 2,626` checks proved, `0 unproved`, `0 warnings`)_
 
 This document records the 24 verified findings (**7 Critical, 9 High, 5 Medium, 3 Low**) uncovered during the comprehensive adversarial review of **Nhé O (`v0.3.0`)** after completing Epics 01–03, together with their concrete remediation in **Epic 04 (`04-post-epic-03-grooming-and-hardening`)**.
 

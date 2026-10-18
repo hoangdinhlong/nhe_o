@@ -21,8 +21,8 @@
 8. **Universal Local LLM Hybrid RAG & C/Python SDK**: Single-pass execution combining B+Tree PK lookup, HNSW ANN vector search, JSONB metadata pre-filtering (`@>`), lexical keyword boosting, TOAST chunk retrieval, and 1-hop GraphRAG expansion — exposed via a formally verified C ABI (`include/nhe_o.h`, `lib/libnhe_o.so`) and Python `ctypes` SDK (`bindings/python/nhe_o.py`).
 9. **100% SPARK Verification Mandate (`BR-001` / `ADR-002` / `ADR-005`)**:
    - **100% of specifications, bodies, and entrypoints** (all 26 files across 14 units in `src/`) operate under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)`.
-   - **1,543 / 1,543 Formal Checks Proved (100% SPARK Stone, Bronze & Silver + Partial Gold)**: Verified by `gnatprove 16.1.0` (`Why3` + `Z3` + `cvc5` + `Alt-Ergo`) with `0 unproved` checks and `0 warnings`.
-   - **Contract-Bound POSIX I/O (`src/nhe_o-io.adb`)**: Physical disk operations bypass exception-raising `Ada.Streams.Stream_IO` and bind directly in `SPARK_Mode (On)` to atomic POSIX kernel syscalls (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`, `unlink`).
+   - **2,626 / 2,626 Formal Checks Proved (100% SPARK Stone, Bronze, Silver & Gold Contracts)**: Verified by `gnatprove 16.1.0` (`Why3` + `Z3` + `cvc5` + `Alt-Ergo`) with `0 unproved` checks and `0 warnings`.
+   - **Contract-Bound POSIX I/O (`src/nhe_o-io.adb`)**: Physical disk operations bypass exception-raising `Ada.Streams.Stream_IO` and bind directly in `SPARK_Mode (On)` to atomic POSIX kernel syscalls (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `close`, `unlink`).
 
 ---
 
@@ -44,7 +44,7 @@ Following professional Ada Quality & Style Guide (`Mixed_Case_With_Underscores` 
 | `Nhe_O.SQL` | `src/nhe_o-sql.ad[sb]` | `SPARK_Mode (On)` | PostgreSQL SQL dialect tokenizer, parser, and statement classifier |
 | `Nhe_O.RAG` | `src/nhe_o-rag.ad[sb]` | `SPARK_Mode (On)` | Universal Local LLM Hybrid RAG & 1-hop GraphRAG query executor |
 | `Nhe_O.C_API` | `src/nhe_o-c_api.ad[sb]` | `SPARK_Mode (On)` | Precondition-free defensive C ABI / FFI boundary (`include/nhe_o.h`, `lib/libnhe_o.so`) |
-| `Nhe_O.IO` | `src/nhe_o-io.ad[sb]` | `SPARK_Mode (On)` | Contract-bound POSIX syscall I/O (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`, `unlink`) |
+| `Nhe_O.IO` | `src/nhe_o-io.ad[sb]` | `SPARK_Mode (On)` | Contract-bound POSIX syscall I/O (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `close`, `unlink`) |
 | `Nhe_O_Main` | `src/nhe_o_main.adb` | `SPARK_Mode (On)` | 11-suite verification harness and interactive CLI (`--verify`, `--sql`, `--kv`, `--rag-demo`) |
 
 ---
@@ -67,8 +67,8 @@ alr run
 gprbuild -P nhe_o_lib.gpr
 python3 bindings/python/nhe_o.py
 
-# 4. Run formal SPARK verification (1,543 / 1,543 checks proved — 0 unproved)
-gnatprove -P nhe_o.gpr --mode=all --level=2
+# 4. Run formal SPARK verification (2,626 / 2,626 checks proved — 0 unproved)
+gnatprove -P nhe_o.gpr --mode=all --level=2 -j24
 ```
 
 ---
@@ -79,8 +79,9 @@ gnatprove -P nhe_o.gpr --mode=all --level=2
 - [`docs/STATUS.md`](docs/STATUS.md) — Current project status, active epic, and next tasks.
 - [`docs/reference/VISION.md`](docs/reference/VISION.md) — Product vision, capabilities, and guiding principles.
 - [`docs/reference/ARCHITECTURE.md`](docs/reference/ARCHITECTURE.md) — Technical architecture and SPARK/Ada boundary design.
-- [`docs/DECISIONS.md`](docs/DECISIONS.md) — Authoritative Architectural Decision Records (`ADR-001`..`ADR-005`).
+- [`docs/DECISIONS.md`](docs/DECISIONS.md) — Authoritative Architectural Decision Records (`ADR-001`..`ADR-007`).
 - [`docs/domain/business-rules.md`](docs/domain/business-rules.md) — Core database and formal verification invariants (`BR-001`..`BR-007`).
+- [`docs/domain/storage-and-wal-format.md`](docs/domain/storage-and-wal-format.md) — Binary byte layouts for `"SLOT"` pages, `"TOAS"` chains, `"BTRE"` nodes, `"KVMG"` KV WAL pages, and 4116-byte WAL frames.
 - [`docs/learning/README.md`](docs/learning/README.md) — Teaching corpus (`swe/` & `ai/` lessons) explaining the concepts behind our ADRs.
 - [`docs/OPEN-QUESTIONS.md`](docs/OPEN-QUESTIONS.md) — Open architectural questions awaiting benchmarks or owner decisions.
 - [`docs/_meta/SELF-AUDIT.md`](docs/_meta/SELF-AUDIT.md) — End-of-session verification checklist.

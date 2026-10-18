@@ -37,7 +37,7 @@ Developers are forced either to run a heavy fleet of external server daemons (Po
 - **Full ACID, TOAST Overflow & Disk Persistence**: Multi-Version Concurrency Control (MVCC) with snapshot isolation (`xmin`/`xmax`) paired with CRC32-checksummed Write-Ahead Logging (WAL), slotted 4KB primary disk pages, 4KB TOAST overflow page chains, and Multi-Page B+Tree indexing.
 - **Redis-Grade Key-Value Cache & Dual-Mode Pub/Sub**: Direct high-speed KV operations (`GET`, `SET`, `DEL`, `INCR`, `EXPIRE`, `TTL`) with deterministic TTL expiration and LRU eviction, plus an in-process Pub/Sub message broker (`PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, pattern matching) supporting both immediate in-memory delivery and `DURABLE` WAL-committed notifications (`LISTEN`/`NOTIFY`).
 - **Universal Local LLM RAG & C/Python FFI SDK**: Built-in Hybrid RAG & 1-hop GraphRAG executor exposed via a precondition-free C ABI (`include/nhe_o.h`, `lib/libnhe_o.so`) and Python `ctypes` SDK (`bindings/python/nhe_o.py`).
-- **100% SPARK Verified Codebase (Silver + Partial Gold)**: Every single module specification and body (26/26 files across 14 units in `src/`, including `Nhe_O.IO` and `Nhe_O.C_API`) operates under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)`, achieving **1,543 / 1,543 formal checks proved (0 unproved)** with `gnatprove 16.1.0`.
+- **100% SPARK Verified Codebase (Silver + Gold)**: Every single module specification and body (26/26 files across 14 units in `src/`, including `Nhe_O.IO` and `Nhe_O.C_API`) operates under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)`, achieving **2,626 / 2,626 formal checks proved (0 unproved, 0 warnings)** with `gnatprove 16.1.0`.
 
 ---
 

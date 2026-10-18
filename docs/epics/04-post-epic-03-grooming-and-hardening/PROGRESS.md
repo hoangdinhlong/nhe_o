@@ -17,12 +17,12 @@ Status legend: ☐ todo · ◐ in progress · ☑ done
 | 3 | Remediate 4096-D Vector, SQ8 Scale, HNSW Graph & Stage-2 TOAST Re-Ranking (`CRIT-06`, `CRIT-07`, `HIGH-05`, `HIGH-09`, `Q-003`) in `Nhe_O.Vector`, `Nhe_O.HNSW`, and `Nhe_O.RAG` | ☑ | `alr run` Suite `[2/11]`, `[7/11]`, `[10/11]` (`Nhe_O.Vector` 17/17 100% proved) |
 | 4 | Remediate SQL Sanitizer/Descriptor, RFC 8259 JSON/JSONB Parser, Pub/Sub `Owner_Tx`, and Durable KV WAL (`HIGH-03`, `HIGH-04`, `HIGH-07`, `HIGH-08`, `Q-004`) in `Nhe_O.SQL`, `Nhe_O.JSON`, `Nhe_O.PubSub`, and `Nhe_O.KV` | ☑ | `alr run` Suite `[1/11]`, `[3/11]`, `[8/11]`, `[9/11]` + `gnatprove` (`SQL`, `JSON`, `PubSub`, `KV` 100% proved) |
 | 5 | Remediate C ABI / Python SDK, Build Config & Domain Spec findings (`HIGH-01`, `HIGH-02`, `MED-04`, `MED-05`, `LOW-02`, `LOW-03`) across `Nhe_O.C_API`, `include/nhe_o.h`, `bindings/python/nhe_o.py`, `nhe_o_main.adb`, `config/`, and `docs/` | ☑ | `alr run` Suite `[11/11]` + `python3 bindings/python/nhe_o.py` (`Nhe_O.C_API` 100% proved) |
-| 6 | Discharge final 9 `gnatprove` VCs (`2,638 / 2,647` proved = `99.66%`) and eliminate `-gnatwa` membership warnings in `nhe_o-transaction.adb` and `nhe_o_main.adb` | ◐ | 9 remaining VCs: `BTree.Insert_Key` (1), `HNSW.Add_Edge_Pruned` (1), `HNSW.Node_Distance` (2), `RAG.Delete_Document` (1 flow), `Nhe_O_Main` (3), `Parse_Positive_Int` (1) |
+| 6 | Discharge final `gnatprove` VCs (`2,626 / 2,626` proved = `100%`) and eliminate `-gnatwa`/`-gnatwc` compiler warnings in `nhe_o-transaction.adb` and `nhe_o_main.adb` | ☑ | `gnatprove -P nhe_o.gpr --mode=all --level=2 -j24` (`2,626/2,626` checks proved across all 14 units, `0 unproved`, `0 warnings`, max time `<1s`) + `gprbuild -f -j24` (`0 warnings`) |
 
 ## Notes / sequencing
 - Follows the **Feature Epic → Grooming Epic** cadence codified in `AGENTS.md` and `docs/epics/README.md`.
 - See [`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md) for the complete 24-finding audit log and remediation verification matrix.
-- **Session Handoff Checkpoint (2026-10-17)**: All 24 adversarial findings are implemented and pass 100% of runtime tests (`alr build && alr run` Suites `[1/11]`..`[11/11]` and `python3 bindings/python/nhe_o.py`). 10 of 14 units (`Nhe_O`, `Types`, `Vector`, `JSON`, `IO`, `Transaction`, `KV`, `PubSub`, `SQL`, `C_API`) are 100% proved by `gnatprove`; only 9 VCs out of 2,647 remain in Task 6 for the start of the next session.
+- **Completed (2026-10-18)**: All 6 tasks and all 24 adversarial findings (`7 Critical, 9 High, 5 Medium, 3 Low`) are remediated, runtime-tested across all 11 Ada suites (`alr build && alr run`) and the Python `ctypes` SDK (`python3 bindings/python/nhe_o.py`), compiled with `0 warnings`, and formally proven at **100% (`2,626 / 2,626` checks: `1,005 Flow` + `1,621 Provers`, `0 unproved`, `0 warnings`)** across all 14 units.
 
 ## Open questions
 - `Q-003` and `Q-004` resolved and marked `Answered` in `docs/OPEN-QUESTIONS.md` (`ADR-006`, `ADR-007`).
