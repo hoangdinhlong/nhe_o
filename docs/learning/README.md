@@ -34,11 +34,13 @@ interview prep, and friendly to anyone who clones the project to learn by doing.
 - [`05-two-pass-wal-recovery-and-slotted-page-crc32-in-spark.md`](swe/05-two-pass-wal-recovery-and-slotted-page-crc32-in-spark.md) — Two-Pass Committed-Only WAL Recovery, CLOG MVCC & 4KB Slotted-Page CRC32 in SPARK: preventing dirty/aborted WAL replay and proving self-referential page checksums (`ADR-006`, `ADR-007`).
 - [`06-two-stage-toast-vector-reranking-and-hnsw-pruning.md`](swe/06-two-stage-toast-vector-reranking-and-hnsw-pruning.md) — Two-Stage 4096-D Vector TOAST Re-Ranking, Scale-Aware SQ8 & Distance-Pruned HNSW in SPARK: combining compact HNSW RAM Stage-1 candidate generation with on-disk `"VTST"` TOAST Stage-2 exact 4096-D re-ranking (`ADR-003`, `ADR-006`).
 - [`07-closing-protocol-invariant-gaps-and-modular-spark-contracts.md`](swe/07-closing-protocol-invariant-gaps-and-modular-spark-contracts.md) — Closing Protocol Invariant Gaps & Preventing VC Explosion with Modular SPARK Contracts: unifying `Max_CLOG_Entries = Max_Tx_Id`, preventing multi-chain TOAST page self-overlap, and proving multi-level JSONB `@>` containment modularly (`ADR-006`, `ADR-007`).
+- [`08-formally-verified-property-graph-csr-and-sql-pgq-in-spark.md`](swe/08-formally-verified-property-graph-csr-and-sql-pgq-in-spark.md) — Formally Verified Property Graphs in SPARK: Bi-Directional CSR Adjacency, `SQL/PGQ MATCH` & Cycle-Safe Termination (`ADR-008`).
 
 
 ### ai/
 - [`01-toast-overflow-and-vector-quantization-for-local-llm-rag.md`](ai/01-toast-overflow-and-vector-quantization-for-local-llm-rag.md) — 4KB TOAST Overflow Pages & Vector Quantization (`Float32` / `Int8` / `Binary`) for Universal Local LLM RAG: scaling up to 4096-D embeddings and parent-document chunks while saving 4x–32x HNSW RAM alongside local LLMs (`ADR-003`).
 - *(Cross-cutting AI × SWE)* [`swe/06-two-stage-toast-vector-reranking-and-hnsw-pruning.md`](swe/06-two-stage-toast-vector-reranking-and-hnsw-pruning.md) — Two-Stage 4096-D Vector TOAST Re-Ranking, Scale-Aware SQ8 & Distance-Pruned HNSW (`ADR-006`).
+- *(Cross-cutting AI × SWE)* [`swe/08-formally-verified-property-graph-csr-and-sql-pgq-in-spark.md`](swe/08-formally-verified-property-graph-csr-and-sql-pgq-in-spark.md) — Formally Verified Property Graphs in SPARK & Multi-Hop Knowledge GraphRAG (`ADR-008`).
 
 
 ## Writing a lesson

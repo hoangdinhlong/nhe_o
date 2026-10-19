@@ -17,13 +17,14 @@ record why it is superseded in `../DECISIONS.md`.
 
 ## 1. The problem
 
-Modern applications — especially local-first AI agents, edge systems, and high-assurance services — typically require four distinct data primitives:
+Modern applications — especially local-first AI agents, social/knowledge graphs, edge systems, and high-assurance services — typically require five distinct data primitives:
 1. **Relational ACID Storage** with expressive SQL and strong data types (PostgreSQL).
 2. **Vector Similarity Search** for embeddings and semantic retrieval (`pgvector`).
 3. **Structured Document Queries** over semi-structured payloads (`JSON` / `JSONB`).
 4. **Low-Latency Key-Value Caching & Event Pub/Sub** for state caching and real-time notifications (Redis).
+5. **Labeled Property Graph & Multi-Hop Traversal** for social networks, permission hierarchies (ReBAC), lineage, and multi-hop Knowledge GraphRAG (Neo4j / Apache AGE / KùzuDB).
 
-Developers are forced either to run a heavy fleet of external server daemons (PostgreSQL + pgvector + Redis) or to settle for embedded engines written in C/C++ (SQLite + extensions) that lack PostgreSQL type fidelity, lack native KV/Pub-Sub, and remain susceptible to memory corruption, integer overflows, and subtle concurrency bugs.
+Developers are forced either to run a heavy fleet of external server daemons (PostgreSQL + pgvector + Neo4j/AGE + Redis) or to settle for embedded engines written in C/C++ (SQLite + extensions) that lack PostgreSQL type fidelity, lack native KV/Pub-Sub/Graph integration, and remain susceptible to memory corruption, integer overflows, and subtle concurrency bugs.
 
 ---
 
@@ -36,7 +37,7 @@ Developers are forced either to run a heavy fleet of external server daemons (Po
 - **PostgreSQL JSON / JSONB Engine**: Structural validation and binary tree indexing with `->`, `->>`, `@>` (containment), and `?` (key-existence) operators.
 - **Full ACID, TOAST Overflow & Disk Persistence**: Multi-Version Concurrency Control (MVCC) with snapshot isolation (`xmin`/`xmax`) paired with CRC32-checksummed Write-Ahead Logging (WAL), slotted 4KB primary disk pages, 4KB TOAST overflow page chains, and Multi-Page B+Tree indexing.
 - **Redis-Grade Key-Value Cache & Dual-Mode Pub/Sub**: Direct high-speed KV operations (`GET`, `SET`, `DEL`, `INCR`, `EXPIRE`, `TTL`) with deterministic TTL expiration and LRU eviction, plus an in-process Pub/Sub message broker (`PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, pattern matching) supporting both immediate in-memory delivery and `DURABLE` WAL-committed notifications (`LISTEN`/`NOTIFY`).
-- **Universal Local LLM RAG & C/Python FFI SDK**: Built-in Hybrid RAG & 1-hop GraphRAG executor exposed via a precondition-free C ABI (`include/nhe_o.h`, `lib/libnhe_o.so`) and Python `ctypes` SDK (`bindings/python/nhe_o.py`).
+- **Universal Local LLM RAG, Labeled Property Graph & C/Python FFI SDK**: Built-in Hybrid RAG & 1-hop GraphRAG executor (`Nhe_O.RAG`) evolving into a full bi-directional CSR **Labeled Property Graph & Multi-Hop Knowledge GraphRAG Engine (`Nhe_O.Graph`, `SQL/PGQ MATCH`, `ADR-008` — Epic 06)**, exposed via a precondition-free C ABI (`include/nhe_o.h`, `lib/libnhe_o.so`) and Python `ctypes` SDK (`bindings/python/nhe_o.py`).
 - **100% SPARK Verified Codebase (Silver + Gold)**: Every single module specification and body (26/26 files across 14 units in `src/`, including `Nhe_O.IO` and `Nhe_O.C_API`) operates under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)`, achieving **3,776 / 3,776 formal checks proved (0 unproved, 0 warnings)** with `gnatprove 16.1.0`.
 
 ---
@@ -49,7 +50,8 @@ Developers are forced either to run a heavy fleet of external server daemons (Po
 4. **Crash-Safe ACID Persistence**: Guarantee atomicity, consistency, snapshot isolation, and durability across power loss or process crashes via WAL redo recovery, hardware `fsync`, and page checksums.
 5. **Embedded Redis-Compatible Cache**: Sub-microsecond in-memory Key-Value reads/writes with optional TTL expiration, LRU bounded eviction, and transparent WAL persistence.
 6. **Real-Time & Transactional Pub/Sub Channels**: Publish and subscribe to named channels or wildcard patterns using bounded ring buffers with zero dynamic heap allocation and optional WAL-commit gating.
-7. **100% `SPARK_Mode (On)` Verification (Stone / Bronze / Silver / Partial Gold)**: Enforce that 100% of parsing, B+Tree/HNSW indexing, transaction visibility, vector math, JSON traversal, KV caching, Pub/Sub routing, C FFI boundaries (`Nhe_O.C_API`), and POSIX syscall I/O orchestration (`Nhe_O.IO`) operate under `SPARK_Mode (On)` with 100% proved Absence of Run-Time Errors (Silver) and key domain integrity contracts (Gold).
+7. **Cycle-Safe Labeled Property Graph & Multi-Hop GraphRAG (`ADR-008`)**: Traverse $k$-hop directed labeled relationships (`Out_Edges`/`In_Edges` CSR over 4KB `"GRPH"` pages), compute shortest paths (`BFS`/`Dijkstra`) and mutual neighbors ($N(u) \cap N(v)$), and execute `SQL/PGQ MATCH` + 4096-D Vector GraphRAG queries with mathematically proven termination (`Always_Terminates`) even on cyclic graphs.
+8. **100% `SPARK_Mode (On)` Verification (Stone / Bronze / Silver / Gold)**: Enforce that 100% of parsing, B+Tree/HNSW/Graph indexing, transaction visibility, vector math, JSON traversal, KV caching, Pub/Sub routing, C FFI boundaries (`Nhe_O.C_API`), and POSIX syscall I/O orchestration (`Nhe_O.IO`) operate under `SPARK_Mode (On)` with 100% proved Absence of Run-Time Errors (Silver) and key domain integrity contracts (Gold).
 
 
 ---

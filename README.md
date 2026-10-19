@@ -106,9 +106,9 @@ gnatprove -P nhe_o.gpr --mode=all --level=2 -j24
 - [`docs/STATUS.md`](docs/STATUS.md) — Current project status, active epic, and next tasks.
 - [`docs/reference/VISION.md`](docs/reference/VISION.md) — Product vision, capabilities, and guiding principles.
 - [`docs/reference/ARCHITECTURE.md`](docs/reference/ARCHITECTURE.md) — Technical architecture and SPARK/Ada boundary design.
-- [`docs/DECISIONS.md`](docs/DECISIONS.md) — Authoritative Architectural Decision Records (`ADR-001`..`ADR-007`).
-- [`docs/domain/business-rules.md`](docs/domain/business-rules.md) — Core database and formal verification invariants (`BR-001`..`BR-007`).
-- [`docs/domain/storage-and-wal-format.md`](docs/domain/storage-and-wal-format.md) — Binary byte layouts for `"SLOT"` pages, `"TOAS"` chains, `"BTRE"` nodes, `"KVMG"` KV WAL pages, and 4116-byte WAL frames.
+- [`docs/DECISIONS.md`](docs/DECISIONS.md) — Authoritative Architectural Decision Records (`ADR-001`..`ADR-008`).
+- [`docs/domain/business-rules.md`](docs/domain/business-rules.md) — Core database and formal verification invariants (`BR-001`..`BR-008`).
+- [`docs/domain/storage-and-wal-format.md`](docs/domain/storage-and-wal-format.md) — Binary byte layouts for `"SLOT"` pages, `"TOAS"`/`"VTST"`/`"RMET"` chains, `"BTRE"` nodes, `"KVMG"` KV WAL pages, and 4,120-byte WAL frames.
 - [`docs/learning/README.md`](docs/learning/README.md) — Teaching corpus (`swe/` & `ai/` lessons) explaining the concepts behind our ADRs.
 - [`docs/OPEN-QUESTIONS.md`](docs/OPEN-QUESTIONS.md) — Open architectural questions awaiting benchmarks or owner decisions.
 - [`docs/_meta/SELF-AUDIT.md`](docs/_meta/SELF-AUDIT.md) — End-of-session verification checklist.
