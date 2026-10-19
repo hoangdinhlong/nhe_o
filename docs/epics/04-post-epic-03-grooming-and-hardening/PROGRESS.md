@@ -1,6 +1,6 @@
 # Epic 04 — Post-Epic-03 Grooming & Core Hardening (Adversarial Audit Remediation)
 
-**Goal:** Execute the project's first dedicated **Grooming & Hardening Epic** following Feature Epics 01–03 by remediating all 40 findings across both rounds of `ADVERSARIAL-REVIEW.md` (**Round 1: 24 findings `CRIT-01`..`LOW-03` [Done]; Round 2: 16 findings `R2-CRIT-01`..`R2-LOW-04` [Done]**), resolving open questions `Q-003` (4096-D Vector TOAST overflow storage & Stage-2 Exact Re-Ranking) and `Q-004` (Optional WAL-backed KV durability and recovery), codifying binary page/WAL/TOAST/B+Tree byte layouts in `docs/domain/storage-and-wal-format.md`, and proving 100% SPARK Stone, Bronze, Silver (AoRTE), and Gold contracts (`2,863 / 2,863` checks proved, `0 unproved` checks, `0 warnings`) across all 26 source files in `src/`.
+**Goal:** Execute the project's dedicated **Grooming & Hardening Epic** following Feature Epics 01–03 by remediating all 58 findings across all three rounds of `ADVERSARIAL-REVIEW.md` (**Round 1: 24 findings `CRIT-01`..`LOW-03` [Done]; Round 2: 16 findings `R2-CRIT-01`..`R2-LOW-04` [Done]; Round 3: 18 findings `R3-CRIT-01`..`R3-LOW-04` [In Progress]**), resolving open questions `Q-003` (4096-D Vector TOAST overflow storage & Stage-2 Exact Re-Ranking) and `Q-004` (Optional WAL-backed KV durability and recovery), codifying binary page/WAL/TOAST/B+Tree byte layouts in `docs/domain/storage-and-wal-format.md`, and proving 100% SPARK Stone, Bronze, Silver (AoRTE), and Gold contracts (`0 unproved` checks, `0 warnings`) across all 26 source files in `src/`.
 
 **Definition of done:**
 1. Remediate all 7 Round-1 Critical findings (`CRIT-01`..`CRIT-07`), 9 High findings (`HIGH-01`..`HIGH-09`), 5 Medium findings (`MED-01`..`MED-05`), and 3 Low findings (`LOW-01`..`LOW-03`) in Tasks 1–6.
@@ -9,7 +9,12 @@
    - IEEE-754-faithful `"VTST"` Vector TOAST encoding (`R2-HIGH-02`), SQL `LIMIT` enforcement & safe `Fallback_D` in `Execute_Hybrid_RAG_Query` (`R2-HIGH-04`), and `BTree.Total_Keys` split accounting + `Delete_Key` (`R2-MED-04`).
    - `Recover_KV_From_WAL` overflow detection (`R2-HIGH-05`), `Sanitize_SQL` quote boundary & single-statement enforcement (`R2-MED-01`), strict `Parse_JSONB` delimiter/capacity checks (`R2-MED-02`), and safe `Flush_Committed_Notifications` (`R2-MED-05`).
    - Non-destructive `C_Init_With_Paths` recovery (`R2-CRIT-02`), C ABI `nhe_o_rag_delete` + JSONB metadata/parent support (`R2-LOW-03`), Python SDK path validation (`R2-LOW-02`), and exact byte-offset alignment in `docs/domain/storage-and-wal-format.md` & Lesson 06 (`R2-LOW-01`).
-3. Pass `gnatprove -P nhe_o.gpr --mode=all --level=2 -j24` with `0 unproved` checks and `0 warnings`, `alr build && alr run` (all 11 suites), and `gprbuild -P nhe_o_lib.gpr && python3 bindings/python/nhe_o.py`.
+3. Remediate all 18 Round-3 Full-System Adversarial Audit findings (`R3-CRIT-01`..`R3-CRIT-03`, `R3-HIGH-01`..`R3-HIGH-05`, `R3-MED-01`..`R3-MED-06`, `R3-LOW-01`..`R3-LOW-04`) in Tasks 12–16:
+   - Eliminate the `Max_CLOG_Entries = 1024` horizon cliff & decouple KV WAL sequence IDs from `G_Next_Tx` (`R3-CRIT-01`), enforce `Scan_EOF` / corrupted-frame detection & expanded/checkpointed WAL scanning in `Commit_Tx`, `Recover_RAG_Engine`, and `C_Init_With_Paths` (`R3-CRIT-02`).
+   - Fix `Ingest_Document` TOAST page allocator self-collision & `.wal` frame order before `Stage_Notify` (`R3-CRIT-03`), restore HNSW vectors on rolled-back updates & synchronize `PK_Tree`/`Vector_Graph` across `Delete_Document` and `Recover_RAG_Engine` (`R3-HIGH-02`, `R3-MED-04`), preserve full `Summary_Text`/`JSONB_Document` metadata across `"SLOT"` recovery (`R3-HIGH-04`), improve `"VTST"` exponent tier continuity (`R3-MED-02`), reclaim empty B+Tree leaves in `Delete_Key` (`R3-MED-03`), and forbid self-loop GraphRAG neighbors (`R3-MED-06`).
+   - Enforce `WAL-before-Data` rollback on I/O error in `Set_Durable`/`Del_Durable`/`Expire_Durable`/`Incr_By_Durable` & skip logging no-op `Del_Durable` (`R3-HIGH-03`), harden `Analyze_SQL` clause ordering, identifier rules, `IF NOT EXISTS`, and `LIMIT` validation (`R3-HIGH-05`), fix JSON escape decoding & `@>` comparison in `Nhe_O.JSON` (`R3-MED-01`), and support general `*` glob matching in `Nhe_O.PubSub.Matches_Channel` (`R3-MED-05`).
+   - Enforce recovery status checks (`KV_Stat`, `WAL_Stat`, `RAG_Stat`, torn frame 0 / Page 1) in `C_Init_With_Paths` (`R3-HIGH-01`) and align all domain/reference/learning docs (`R3-LOW-01`..`R3-LOW-04`).
+4. Pass `gnatprove -P nhe_o.gpr --mode=all --level=2 -j24` with `0 unproved` checks and `0 warnings`, `alr build && alr run` (all verification suites), and `gprbuild -P nhe_o_lib.gpr && python3 bindings/python/nhe_o.py`.
 
 Status legend: ☐ todo · ◐ in progress · ☑ done
 
@@ -26,11 +31,17 @@ Status legend: ☐ todo · ◐ in progress · ☑ done
 | 9 | Remediate Round-2 KV WAL Overflow Detection, SQL Quote Boundary / Multi-Statement Guard, Strict `Parse_JSONB`, and Pub/Sub `Flush_Committed_Notifications` (`R2-HIGH-05`, `R2-MED-01`, `R2-MED-02`, `R2-MED-05`) in `Nhe_O.KV`, `Nhe_O.SQL`, `Nhe_O.JSON`, and `Nhe_O.PubSub` | ☑ | `alr run` Suites `[1/11]`, `[3/11]`, `[8/11]`, `[9/11]` + `gnatprove -j24` (`KV`, `SQL`, `JSON`, `PubSub` 100% proved) |
 | 10 | Remediate Round-2 Non-Destructive `C_Init_With_Paths` Recovery, C ABI RAG Delete/Metadata/Parent Support, and Python SDK Path Validation (`R2-CRIT-02`, `R2-LOW-02`, `R2-LOW-03`) in `Nhe_O.C_API`, `include/nhe_o.h`, and `bindings/python/nhe_o.py` | ☑ | `alr run` Suite `[11/11]` + `python3 bindings/python/nhe_o.py` (`Nhe_O.C_API` 31/31 subprograms 100% proved) |
 | 11 | Align `docs/domain/storage-and-wal-format.md` & Lesson 06 byte offsets (`R2-LOW-01`) and re-verify 100% `gnatprove -j24` (`0 unproved`, `0 warnings`) + all Ada & Python test suites | ☑ | `gnatprove -P nhe_o.gpr --mode=all --level=2 -j24` (`2,863 / 2,863` checks proved, `0 unproved`, `0 warnings`) + `gprbuild -f -j24` (`0 warnings`) + `./bin/nhe_o_main` + `python3 bindings/python/nhe_o.py` |
+| 12 | Remediate Round-3 CLOG Horizon Cliff (`R3-CRIT-01`) and `Commit_Tx` 256-Frame Scan Truncation & Corrupted-Frame Check (`R3-CRIT-02`) in `Nhe_O.Transaction`, `Nhe_O.RAG`, and `Nhe_O.C_API` | ☐ | — |
+| 13 | Remediate Round-3 TOAST Page Allocator Self-Collision & `.wal` Ordering (`R3-CRIT-03`), HNSW/B+Tree Rollback & Delete Synchronization (`R3-HIGH-02`, `R3-MED-03`, `R3-MED-04`), Lossless RAG Summary/Metadata Persistence (`R3-HIGH-04`), `"VTST"` Tier Continuity (`R3-MED-02`), and GraphRAG Self-Loop Guard (`R3-MED-06`) in `Nhe_O.RAG`, `Nhe_O.HNSW`, `Nhe_O.BTree`, and `Nhe_O.Vector` | ☐ | — |
+| 14 | Remediate Round-3 Durable KV `WAL-before-Data` Rollback & Non-Existent `Del_Durable` Skip (`R3-HIGH-03`), SQL Grammar/Clause-Order/Identifier Hardening (`R3-HIGH-05`), JSON Escape Decoding & `@>` Comparison (`R3-MED-01`), and Pub/Sub `*` Glob Matching (`R3-MED-05`) in `Nhe_O.KV`, `Nhe_O.SQL`, `Nhe_O.JSON`, and `Nhe_O.PubSub` | ☐ | — |
+| 15 | Remediate Round-3 `C_Init_With_Paths` Recovery Error Propagation (`R3-HIGH-01`) and `C_KV_*` `Max_Tx_Id` Capacity Check (`R3-HIGH-03`) in `Nhe_O.C_API` | ☐ | — |
+| 16 | Remediate Round-3 Documentation Drift (`R3-LOW-01`..`R3-LOW-04`) across `docs/` and re-verify 100% `gnatprove -j24` (`0 unproved`, `0 warnings`) + all Ada & Python test suites | ☐ | — |
 
 ## Notes / sequencing
 - Follows the **Feature Epic → Grooming Epic** cadence codified in `AGENTS.md` and `docs/epics/README.md`.
-- See [`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md) for both the Round 1 (24 findings, all `✅ Remediated`) and Round 2 (16 findings, all `✅ Remediated` in Tasks 7–11) audit matrices.
+- See [`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md) for Round 1 (24 findings, `✅ Remediated`), Round 2 (16 findings, `✅ Remediated`), and Round 3 (18 findings, `☐ Pending Remediation` in Tasks 12–16).
 
 ## Open questions
 - `Q-003` and `Q-004` resolved and marked `Answered` in `docs/OPEN-QUESTIONS.md` (`ADR-006`, `ADR-007`).
+
 

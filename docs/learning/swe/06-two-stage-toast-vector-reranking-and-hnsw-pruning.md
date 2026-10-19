@@ -19,7 +19,7 @@ During the post-Epic-03 adversarial review (`CRIT-06`, `CRIT-07`, `Q-003` in [`A
    - Scalar quantization (`Quantize_To_Int8`) normalizes each vector $V$ by its own dynamic range $\text{Scale}_V = \max_i |V_i| / 127$.
    - Comparing raw `Int8` integers `(A_i - B_i)^2` without multiplying by each vector's `Scale` factor computes distance in incompatible coordinate spaces whenever $\text{Scale}_A \neq \text{Scale}_B$.
 3. **Chronological Neighbor Cap & Duplicate `Doc_Id` Nodes in HNSW (`CRIT-06`)**:
-   - Simply connecting a new HNSW node to the first `Max_Neighbors = 8` nodes in insertion order and ignoring subsequent edges once `Degree = 8` freezes early nodes into a clique and starves later nodes.
+   - Simply connecting a new HNSW node to the first `Max_Neighbors = 4` nodes in insertion order and ignoring subsequent edges once `Degree = 4` freezes early nodes into a clique and starves later nodes.
    - Re-ingesting an existing `Doc_Id` must update its HNSW node in-place rather than allocating a duplicate graph node that pollutes top-$k$ results.
 
 ---
@@ -72,7 +72,7 @@ In [`src/nhe_o-vector.adb`](../../../src/nhe_o-vector.adb), `Encode_Vector_TOAST
 |---|---|---|
 | `1..4` | `Magic` | ASCII `"VTST"` (`16#56#`, `16#54#`, `16#53#`, `16#54#`) |
 | `5..8` | `Dim` | Big-endian `Unsigned_32` dimension (`1 .. 4096`) |
-| `9 .. 8 + 4*Dim` | `Elements` | Big-endian tiered scientific `Float32` words (`Float_To_Scaled_Word` / `Scaled_Word_To_Float`: `Bit 31 = Sign`, `Bits 27..30 = Exp_Code 0..7`, `Bits 0..26 = Mantissa 0..10^8`) |
+| `9 .. 8 + 4*Dim` | `Elements` | Big-endian tiered scientific `Float32` words (`Encode_Vector_TOAST` / `Decode_Vector_TOAST`: `Bit 31 = Sign`, `Bits 27..30 = Exp_Code 0..7`, `Bits 0..26 = Mantissa 0..10^8`) |
 
 During `Decode_Vector_TOAST`, `Magic = "VTST"` and `Raw_Dim = Expected_Dim` are verified first, and each restored `Float32` word is bounded by construction to `Vector_Component` (`-1.0e6 .. 1.0e6`) while preserving 8 decimal digits of precision across `[1.0e-7, 1.0e6]`, allowing `gnatprove` to prove 100% of all run-time and functional contract checks (`Post => (if Valid then V.Dim = Expected_Dim)`) without `Ada.Unchecked_Conversion`.
 
@@ -110,6 +110,6 @@ During `Decode_Vector_TOAST`, `Magic = "VTST"` and `Raw_Dim = Expected_Dim` are 
 ## 7. Check yourself
 
 1. **Why does comparing raw `Int8` quantized components `(A_i - B_i)^2` without using each vector's `Scale` factor distort Euclidean distances?**
-2. **How does `Add_Edge_Pruned` preserve small-world graph navigability when a node's neighbor list reaches `Max_Neighbors = 8`?**
+2. **How does `Add_Edge_Pruned` preserve small-world graph navigability when a node's neighbor list reaches `Max_Neighbors = 4`?**
 3. **Why does Nhé O store the full `>64-D` `Float32` embedding in a `"VTST"` 4KB TOAST chain while keeping only a 64-D prefix + 4096-bit binary vector inside `HNSW_Node`?**
 4. **How does `Decode_Vector_TOAST` guarantee to `gnatprove` that arbitrary bytes read from a disk TOAST chain will never produce a `Constraint_Error` on `Vector_Component` (`-1.0e6 .. 1.0e6`)?**

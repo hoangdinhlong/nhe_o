@@ -6,7 +6,7 @@
 1. `Nhe_O.Catalog` (`src/nhe_o-catalog.ads` and `src/nhe_o-catalog.adb`, 100% `SPARK_Mode (On)`) stores multi-table schemas (table IDs, names, column definitions with PostgreSQL types `INT8`/`TEXT`/`JSONB`/`VECTOR(d)`, B+Tree root page IDs, and HNSW vector dimension/quantization metadata) and serializes/deserializes deterministically to and from Page 0 with CRC32 verification.
 2. `Nhe_O.Buffer_Pool` (`src/nhe_o-buffer_pool.ads` and `src/nhe_o-buffer_pool.adb`, 100% `SPARK_Mode (On)`) manages a statically bounded pool of 4096-byte page frames with `Pin_Count`, `Dirty`, `Usage_Count` (PostgreSQL Clock-Sweep replacement), `Page_LSN` tracking, and WAL-before-Data flush/checkpoint verification via `Nhe_O.IO`.
 3. `Nhe_O.Executor` (`src/nhe_o-executor.ads` and `src/nhe_o-executor.adb`, 100% `SPARK_Mode (On)`) executes PostgreSQL DDL/DML statements end-to-end (`CREATE TABLE`, `INSERT INTO ... VALUES ... ON CONFLICT DO UPDATE`, `SELECT ... WHERE ... ORDER BY embedding <-> $1 LIMIT k`, `UPDATE`, `DELETE`) across `Nhe_O.Catalog`, `Nhe_O.Buffer_Pool`, `Nhe_O.Transaction` (MVCC + 4KB `"SLOT"` slotted pages + 4KB `"TOAS"` overflow chains), `Nhe_O.BTree`, and `Nhe_O.HNSW`.
-4. `Nhe_O.C_API` (`include/nhe_o.h`, `lib/libnhe_o.so`), `bindings/python/nhe_o.py`, and `src/nhe_o_main.adb` expose live stateful SQL execution (`--sql` and Python `Engine.execute_sql`) alongside a new Verification Suite `[12/12]` testing persistent catalog recovery, Clock-Sweep eviction, and end-to-end SQL execution.
+4. `Nhe_O.C_API` (`include/nhe_o.h`, `lib/libnhe_o.so`), `bindings/python/nhe_o.py`, and `src/nhe_o_main.adb` expose live stateful SQL execution (`--sql` and Python `NheOEngine.execute_sql`) alongside a new Verification Suite `[12/12]` testing persistent catalog recovery, Clock-Sweep eviction, and end-to-end SQL execution.
 5. `gnatprove -P nhe_o.gpr --mode=all --level=2` proves 100% of all flow, AoRTE (Silver), and functional contract (Gold) verification conditions (`0 unproved` checks, `0 warnings`) across all units in `src/`.
 
 Status legend: ☐ todo · ◐ in progress · ☑ done
@@ -20,7 +20,7 @@ Status legend: ☐ todo · ◐ in progress · ☑ done
 | 5 | Prove 100% SPARK Stone, Bronze (Flow), Silver (AoRTE), and Gold contracts across `Nhe_O.Catalog`, `Nhe_O.Buffer_Pool`, and `Nhe_O.Executor` via `gnatprove -P nhe_o.gpr` (`0 unproved` checks) | ☐ | — |
 
 ## Notes / sequencing
-- Prerequisite Grooming Epic **04 (`04-post-epic-03-grooming-and-hardening`)** is complete (`✅ Done`), providing the `"SLOT"` primary slotted-page serializer, multi-level B+Tree, 2-pass WAL recovery, and bounded CLOG required by `Catalog`, `Buffer_Pool`, and `Executor`.
+- Prerequisite Grooming Epic **04 (`04-post-epic-03-grooming-and-hardening`)** has completed Round 1 (24/24) and Round 2 (16/16) in Tasks 1–11; Round 3 remediation (`Tasks 12–16`, covering 18 findings `R3-CRIT-01`..`R3-LOW-04`) is in progress before starting Task 1 of Epic 05.
 
 ## Open questions
 - None (`Q-001`..`Q-004` are all answered in `docs/OPEN-QUESTIONS.md`).

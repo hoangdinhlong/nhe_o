@@ -14,7 +14,7 @@ Defined in `src/nhe_o-io.ads` (`WAL_Header_Size = 24`, `WAL_Frame_Size = 4120`) 
 |---|---|---|---|
 | `1 .. 4` | 4 B | `Magic` | ASCII `"NHEO"` (`16#4E#, 16#48#, 16#45#, 16#4F#`) |
 | `5 .. 8` | 4 B | `Tx_Id` | `Valid_Tx_Id` (`1 .. 1_000_000_000`) |
-| `9 .. 12` | 4 B | `Page_Id` | Target 4KB page index (`Valid_Page_Id`, `0 .. 1_048_576`) |
+| `9 .. 12` | 4 B | `Page_Id` | Target 4KB page index (`Valid_Page_Id`, `0 .. 1_048_575`) |
 | `13 .. 16` | 4 B | `CRC32` | IEEE 802.3 CRC-32 (`Compute_WAL_CRC32`) over `Tx_Id (4B)`, `Page_Id (4B)`, `Frame_Kind (1B)`, and `Page_Payload (4096B)` |
 | `17` | 1 B | `Frame_Kind` | `0 = WAL_Frame_Data`, `1 = WAL_Frame_Commit`, `2 = WAL_Frame_KV` (`CRIT-05`, `Q-004`) |
 | `18 .. 24` | 7 B | `Reserved` | Zero-filled (`0`, verified by `Verify_WAL_Frame`) |
@@ -36,7 +36,7 @@ Defined in `src/nhe_o-transaction.ad[sb]` (`Encode_Slotted_Page` / `Decode_Slott
 | Byte Offset (1-indexed) | Size | Field | Description |
 |---|---|---|---|
 | `1 .. 4` | 4 B | `Magic` | ASCII `"SLOT"` (`16#53#, 16#4C#, 16#4F#, 16#54#`) |
-| `5 .. 8` | 4 B | `Page_Id` | `Valid_Page_Id` (`0 .. 1_048_576`) |
+| `5 .. 8` | 4 B | `Page_Id` | `Valid_Page_Id` (`0 .. 1_048_575`) |
 | `9 .. 12` | 4 B | `Slot_Count` | Active tuple slots (`0 .. 16`) |
 | `13 .. 14` | 2 B | `Free_Lower` | End of line pointer directory (`152 = 24 + 16 * 8`) |
 | `15 .. 16` | 2 B | `Free_Upper` | End of active tuple region (`153 + Slot_Count * 240`) |
@@ -83,7 +83,7 @@ Defined in `src/nhe_o-transaction.ad[sb]` (`Encode_TOAST_Pointer`, `Decode_TOAST
 |---|---|---|---|
 | `1 .. 4` | 4 B | `Magic` | ASCII `"VTST"` (`16#56#, 16#54#, 16#53#, 16#54#`) |
 | `5 .. 8` | 4 B | `Dim` | Embedding dimension (`1 .. 4096`, 32-bit Big-Endian) |
-| `9 .. 8 + Dim*4` | `Dim * 4` B | `Elements (1..Dim)` | 32-bit Big-Endian tiered scientific Float32 words (`Float_To_Scaled_Word` / `Scaled_Word_To_Float`: `Bit 31 = Sign`, `Bits 27..30 = Exp_Code 0..7`, `Bits 0..26 = Mantissa 0..10^8`) |
+| `9 .. 8 + Dim*4` | `Dim * 4` B | `Elements (1..Dim)` | 32-bit Big-Endian tiered scientific Float32 words (`Encode_Vector_TOAST` / `Decode_Vector_TOAST`: `Bit 31 = Sign`, `Bits 27..30 = Exp_Code 0..7`, `Bits 0..26 = Mantissa 0..10^8`) |
 
 ---
 
