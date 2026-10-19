@@ -1,6 +1,6 @@
 # Nhé O — Vision
 
-> **A formally verified, disk-persistent, ACID-compliant embedded database engine written in Ada/SPARK featuring PostgreSQL syntax and data types, native Vector search, JSON/JSONB processing, Redis-compatible Key-Value caching, and Pub/Sub messaging.**
+> **A formally verified, disk-persistent, ACID-compliant embedded database engine written in Ada/SPARK featuring PostgreSQL syntax and data types, native 4096-D Vector search, JSON/JSONB processing, Hybrid RAG & Property Graph traversal, Redis-compatible Key-Value caching, and Pub/Sub messaging.**
 
 This document is the **north star**. Everything else (architecture, epics, decisions) exists to
 serve the vision stated here. If a later decision contradicts this document, either update it or
@@ -8,8 +8,9 @@ record why it is superseded in `../DECISIONS.md`.
 
 > **Note on intent.** **Nhé O** (Alire crate `nhe_o`, Ada root package `Nhe_O`)
 > unifies the zero-configuration embedded footprint of SQLite, the rich SQL grammar and data types
-> (`JSONB`, `VECTOR`) of PostgreSQL, and the ultra-fast Key-Value caching and Pub/Sub semantics of
-> Redis inside a single formally verified Ada/SPARK codebase. **100% of all specifications and
+> (`JSONB`, `VECTOR`) of PostgreSQL, the ultra-fast Key-Value caching and Pub/Sub semantics of
+> Redis, and the multi-hop relational traversal of Labeled Property Graphs (`ADR-008`) inside a
+> single formally verified Ada/SPARK codebase. **100% of all specifications and
 > bodies in `src/` operate under `pragma SPARK_Mode (On);`**, including physical I/O (`src/nhe_o-io.adb`)
 > via contract-bound POSIX kernel syscalls (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `close`, `unlink`, `access`).
 
@@ -32,12 +33,12 @@ Developers are forced either to run a heavy fleet of external server daemons (Po
 
 **Nhé O** (crate `nhe_o`, Ada root package `Nhe_O`) is a single-binary, embeddable multi-model database management system written in **Ada 2022 and SPARK 2022**:
 - **SQLite-Style Embedded Footprint**: Runs directly in-process or as a lightweight local engine backed by a deterministic disk page file and Write-Ahead Log (WAL). Zero external servers required.
-- **PostgreSQL Syntax & Data Types**: Supports PostgreSQL-compatible SQL syntax (`$1` parameters, `::type` casts, `RETURNING`, `ON CONFLICT DO UPDATE`) and native PostgreSQL data types (`INT2`, `INT4`, `INT8`, `FLOAT4`, `FLOAT8`, `NUMERIC`, `BOOLEAN`, `TEXT`, `BYTEA`, `UUID`, `TIMESTAMPTZ`, `JSON`, `JSONB`, `VECTOR`).
-- **Native Vector Database & Quantized HNSW**: First-class `VECTOR(d)` column and value type (up to `4096` dimensions) with `Float32`, `Int8` (SQ8), and `1-bit` Binary Hamming quantization, Multi-Layer HNSW indexing, and formally verified L2 distance (`<->`), cosine distance (`<=>`), and negative inner product (`<#>`) operators.
-- **PostgreSQL JSON / JSONB Engine**: Structural validation and binary tree indexing with `->`, `->>`, `@>` (containment), and `?` (key-existence) operators.
-- **Full ACID, TOAST Overflow & Disk Persistence**: Multi-Version Concurrency Control (MVCC) with snapshot isolation (`xmin`/`xmax`) paired with CRC32-checksummed Write-Ahead Logging (WAL), slotted 4KB primary disk pages, 4KB TOAST overflow page chains, and Multi-Page B+Tree indexing.
-- **Redis-Grade Key-Value Cache & Dual-Mode Pub/Sub**: Direct high-speed KV operations (`GET`, `SET`, `DEL`, `INCR`, `EXPIRE`, `TTL`) with deterministic TTL expiration and LRU eviction, plus an in-process Pub/Sub message broker (`PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, pattern matching) supporting both immediate in-memory delivery and `DURABLE` WAL-committed notifications (`LISTEN`/`NOTIFY`).
-- **Universal Local LLM RAG, Labeled Property Graph & C/Python FFI SDK**: Built-in Hybrid RAG & 1-hop GraphRAG executor (`Nhe_O.RAG`) evolving into a full bi-directional CSR **Labeled Property Graph & Multi-Hop Knowledge GraphRAG Engine (`Nhe_O.Graph`, `SQL/PGQ MATCH`, `ADR-008` — Epic 06)**, exposed via a precondition-free C ABI (`include/nhe_o.h`, `lib/libnhe_o.so`) and Python `ctypes` SDK (`bindings/python/nhe_o.py`).
+- **PostgreSQL Syntax & Data Types**: Supports PostgreSQL-compatible SQL syntax (`$1` parameters, `::type` casts, `CREATE TABLE IF NOT EXISTS`, `RETURNING`, `ON CONFLICT DO UPDATE`) and native PostgreSQL data types (`INT2`, `INT4`, `INT8`, `FLOAT4`, `FLOAT8`, `NUMERIC`, `BOOLEAN`, `TEXT`, `BYTEA`, `UUID`, `TIMESTAMPTZ`, `JSON`, `JSONB`, `VECTOR`) via `Nhe_O.Types` and `Nhe_O.SQL` *(persistent Page-0 Catalog, Clock-Sweep Buffer Pool, and multi-table SQL Executor scheduled in **Epic 05**)*.
+- **Native Vector Database & Quantized HNSW**: First-class `VECTOR(d)` column and value type (up to `4096` dimensions) with `Float32`, scale-preserving `Int8` (SQ8), and `1-bit` Binary Hamming quantization, Multi-Layer HNSW indexing, and formally verified L2 distance (`<->`), cosine distance (`<=>`), and negative inner product (`<#>`) operators.
+- **PostgreSQL JSON / JSONB Engine**: Strict RFC 8259 structural validation, `\uXXXX` UTF-8 escape decoding, structured `JSONB_Document` storage, and `->`, `->>`, `@>` (multi-level structural containment), and `?` (key-existence) operators.
+- **Full ACID, `NO-STEAL` WAL, TOAST Overflow & Disk Persistence**: Multi-Version Concurrency Control (MVCC) with snapshot isolation (`xmin`/`xmax` over an 8,192-entry `Commit_Log`) paired with `NO-STEAL` CRC32-checksummed Write-Ahead Logging (WAL), 2-pass committed-only recovery, slotted 4KB primary disk pages (`"SLOT"`), non-overlapping 4KB TOAST overflow page chains (`"TOAS"`, `"VTST"`, `"RMET"`), and Multi-Page B+Tree indexing.
+- **Redis-Grade Dual-Mode Key-Value Store & Pub/Sub**: Direct high-speed KV operations (`GET`, `SET`, `DEL`, `INCRBY`, `EXPIRE`, `TTL`) with deterministic TTL expiration, LRU eviction, and optional `"KVMG"` WAL-durable persistence (`Set_Durable`, `Del_Durable`, `Expire_Durable`, `Incr_By_Durable`), plus an in-process Pub/Sub message broker (`PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, `*` glob pattern matching) supporting both immediate in-memory delivery and `DURABLE` WAL-committed notifications (`LISTEN`/`NOTIFY`).
+- **Universal Local LLM RAG, Labeled Property Graph & C/Python FFI SDK**: Two-stage Hybrid RAG (`Stage-1` HNSW + `Stage-2` `"VTST"` 4096-D exact TOAST re-ranking + `"RMET"` metadata TOAST) & 1-hop GraphRAG executor (`Nhe_O.RAG`) evolving into a full bi-directional CSR **Labeled Property Graph & Multi-Hop Knowledge GraphRAG Engine (`Nhe_O.Graph`, `SQL/PGQ MATCH`, `ADR-008` — Epic 06)**, exposed via a precondition-free C ABI (`include/nhe_o.h`, `lib/libnhe_o.so`) and Python `ctypes` SDK (`bindings/python/nhe_o.py`).
 - **100% SPARK Verified Codebase (Silver + Gold)**: Every single module specification and body (26/26 files across 14 units in `src/`, including `Nhe_O.IO` and `Nhe_O.C_API`) operates under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)`, achieving **3,776 / 3,776 formal checks proved (0 unproved, 0 warnings)** with `gnatprove 16.1.0`.
 
 ---
