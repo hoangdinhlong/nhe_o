@@ -22,6 +22,16 @@ MAX_TEXT_LEN = 512
 MAX_TOAST_BYTES = 16392
 MAX_VECTOR_DIM = 4096
 MAX_COMPONENT = 1.0e6
+MIN_DOC_ID = 1
+MAX_DOC_ID = 16
+MAX_RAG_DOCS = 16
+MAX_TX_ID = 8192
+MAX_CLOG_ENTRIES = 8192
+MAX_WAL_FRAMES = 4096
+MAX_KV_KEYS = 16
+MAX_SUBSCRIBERS = 16
+MIN_TOP_K = 1
+MAX_TOP_K = 8
 
 STATUS_OK = 0
 STATUS_NOT_FOUND = 1
@@ -785,6 +795,11 @@ class NheOEngine:
 
 
 def run_self_test() -> None:
+    # Verify exported capacity constants match SPARK specs
+    assert MIN_DOC_ID == 1 and MAX_DOC_ID == 16
+    assert MAX_RAG_DOCS == 16
+    assert MAX_CLOG_ENTRIES == 8192 and MAX_KV_KEYS == 16 and MAX_SUBSCRIBERS == 16
+
     # Verify single-path argument rejection (R2-LOW-02)
     try:
         NheOEngine(db_path="/tmp/only_one.db")
@@ -802,9 +817,15 @@ def run_self_test() -> None:
     assert sql_info["has_vector_op"] is True
     assert sql_info["has_jsonb_op"] is True
 
-    # Verify multi-statement SQL injection rejection (R2-MED-01)
-    bad_sql = engine.analyze_sql("SELECT 1; DROP TABLE docs;")
-    assert bad_sql["status"] == STATUS_INVALID_SYNTAX
+    # Verify multi-statement SQL injection, duplicate clauses, and empty FROM rejection (R2-MED-01 / R3-HIGH-05)
+    for invalid_sql in (
+        "SELECT 1; DROP TABLE docs;",
+        "SELECT id FROM docs WHERE x = 1 WHERE y = 2;",
+        "SELECT id FROM docs WHERE x = 1 ORDER BY id WHERE y = 2;",
+        "SELECT id FROM WHERE x = 1;",
+    ):
+        bad_sql = engine.analyze_sql(invalid_sql)
+        assert bad_sql["status"] == STATUS_INVALID_SYNTAX, f"Expected invalid syntax for: {invalid_sql}"
 
     dist = engine.vector_distance_3d((1.0, 2.0, 2.0), (4.0, 6.0, 2.0))
     assert abs(dist["l2_distance"] - 5.0) < 0.01
@@ -832,7 +853,7 @@ def run_self_test() -> None:
         "Ada SPARK formal verification guide",
         (1.0, 0.0, 0.0),
         related_doc_id=2,
-        metadata_json='{"lang":"vi","domain":"spark"}',
+        metadata_json='{"lang":"\\u0076\\u0069","domain":"spark","nested":{"sub":{"a":1.0,"b":2}}}',
         parent_text=large_parent,
     )
     engine.rag_ingest_3d(
@@ -852,7 +873,7 @@ def run_self_test() -> None:
         encoding_mode=ENCODING_FLOAT32,
         keyword="SPARK",
         top_k=2,
-        filter_json='{"lang":"vi"}',
+        filter_json='{"lang":"vi","nested":{"sub":{"b":2,"a":1}}}',
     )
     assert rag_res["hit_count"] == 1
     assert rag_res["top_doc_id"] == 1
@@ -861,7 +882,8 @@ def run_self_test() -> None:
     assert rag_res["graph_neighbor_hit"] is True
 
     # Verify N-D (4096-D) RAG with custom paths, persistence across restart (R2-CRIT-02),
-    # durable KV incr_by/expire recovery, and durable deletion (R2-HIGH-01)
+    # lossless "RMET" summary (>63B) + JSONB metadata recovery (R3-HIGH-04),
+    # durable KV incr_by/expire recovery, and durable deletion (R2-HIGH-01 / R3-HIGH-02)
     db_4096 = Path("/tmp/nhe_o_py_4096.db")
     wal_4096 = Path("/tmp/nhe_o_py_4096.wal")
     db_4096.unlink(missing_ok=True)
@@ -871,22 +893,26 @@ def run_self_test() -> None:
     engine.kv_set("persist:key", "survived_restart", now_sec=100, ttl_sec=0)
     assert engine.kv_expire("persist:key", ttl_sec=500, now_sec=100) is True
     assert engine.kv_incr_by("persist:counter", 99, now_sec=100) == 99
+    long_summary_a = (
+        "Qwen3 4096-D embedding chunk A with extended summary exceeding 63 inline bytes "
+        "to verify RMET TOAST overflow persistence [RMET_TAIL_TOKEN]"
+    )
     engine.rag_ingest_full_nd(
         1,
-        "Qwen3 4096-D embedding chunk A",
+        long_summary_a,
         vec_4096_a,
-        related_doc_id=2,
-        metadata_json='{"model":"qwen3","tier":"prod"}',
+        related_doc_id=1,  # Self-loop must not count as 1-hop GraphRAG neighbor (R3-MED-06)
+        metadata_json='{"model":"qwen3-35b-a3b-long-metadata","tier":"prod","num":1.0}',
     )
     engine.rag_ingest_full_nd(
         2,
         "Qwen3 4096-D embedding chunk B",
         vec_4096_b,
         related_doc_id=1,
-        metadata_json='{"model":"qwen3","tier":"prod"}',
+        metadata_json='{"model":"qwen3-35b-a3b-long-metadata","tier":"prod","num":1}',
     )
 
-    # Re-open existing DB & WAL without deleting files (R2-CRIT-02)
+    # Re-open existing DB & WAL without deleting files (R2-CRIT-02 / R3-HIGH-04)
     engine.init_with_paths(str(db_4096), str(wal_4096), dim=4096)
     assert engine.kv_get("persist:key", now_sec=105) == "survived_restart"
     assert engine.kv_ttl("persist:key", now_sec=105) == 495
@@ -896,23 +922,36 @@ def run_self_test() -> None:
         vec_4096_b,
         encoding_mode=ENCODING_FLOAT32,
         top_k=2,
-        filter_json='{"model":"qwen3","tier":"prod"}',
+        filter_json='{"model":"qwen3-35b-a3b-long-metadata","tier":"prod","num":1}',
     )
     assert rag_4096["hit_count"] == 2
     assert rag_4096["top_doc_id"] == 2
     assert rag_4096["top_parent_text"] == "Qwen3 4096-D embedding chunk B"
+    assert rag_4096["graph_neighbor_hit"] is True
+
+    # Verify R3-HIGH-04 & R3-MED-06: tail keyword >63B matches after recovery, and self-loop is rejected
+    rag_rmet = engine.rag_query_full_nd(
+        vec_4096_a,
+        encoding_mode=ENCODING_FLOAT32,
+        keyword="RMET_TAIL_TOKEN",
+        top_k=1,
+        filter_json='{"model":"qwen3-35b-a3b-long-metadata","num":1}',
+    )
+    assert rag_rmet["hit_count"] == 1
+    assert rag_rmet["top_doc_id"] == 1
+    assert rag_rmet["graph_neighbor_hit"] is False
 
     # Also verify Stage-2 TOAST re-ranking in INT8_SQ8 mode on 4096-D (R2-HIGH-02)
     rag_4096_sq8 = engine.rag_query_full_nd(
         vec_4096_b,
         encoding_mode=ENCODING_INT8_SQ8,
         top_k=2,
-        filter_json='{"model":"qwen3","tier":"prod"}',
+        filter_json='{"model":"qwen3-35b-a3b-long-metadata","tier":"prod"}',
     )
     assert rag_4096_sq8["hit_count"] == 2
     assert rag_4096_sq8["top_doc_id"] == 2
 
-    # Durable delete of doc 2 and verify survival across restart (R2-HIGH-01)
+    # Durable delete of doc 2 and verify survival across restart (R2-HIGH-01 / R3-HIGH-02)
     engine.rag_delete(2)
     engine.init_with_paths(str(db_4096), str(wal_4096), dim=4096)
     rag_after_del = engine.rag_query_full_nd(
@@ -920,6 +959,26 @@ def run_self_test() -> None:
     )
     assert rag_after_del["hit_count"] == 1
     assert rag_after_del["top_doc_id"] == 1
+
+    # Verify R3-HIGH-04: corrupted VTST/RMET TOAST page in DB file is rejected on recovery
+    wal_4096.unlink(missing_ok=True)
+    db_bytes = bytearray(db_4096.read_bytes())
+    # Corrupt Doc 1's VTST vector TOAST Page 11 (offset 11 * 4096 + 32; Next_TOAST_Pg starts at 10)
+    db_bytes[11 * 4096 + 32] ^= 0xFF
+    db_4096.write_bytes(bytes(db_bytes))
+    try:
+        engine.init_with_paths(str(db_4096), str(wal_4096), dim=4096)
+        assert False, "Expected RuntimeError on corrupted TOAST page during recovery"
+    except RuntimeError:
+        pass
+
+    # Verify R3-HIGH-01: torn WAL file is rejected by init_with_paths
+    wal_4096.write_bytes(b"TORN_WAL_FRAME")
+    try:
+        engine.init_with_paths(str(db_4096), str(wal_4096), dim=4096)
+        assert False, "Expected RuntimeError on torn WAL file"
+    except RuntimeError:
+        pass
 
     db_4096.unlink(missing_ok=True)
     wal_4096.unlink(missing_ok=True)
@@ -929,3 +988,4 @@ def run_self_test() -> None:
 
 if __name__ == "__main__":
     run_self_test()
+

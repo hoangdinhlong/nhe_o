@@ -542,7 +542,7 @@ package body Nhe_O.BTree is
    end Search_Key;
 
    -------------------------------------------------------------------------
-   --  Delete_Key (R2-MED-04)
+   --  Delete_Key (R2-MED-04, R3-MED-03)
    -------------------------------------------------------------------------
 
    procedure Delete_Key
@@ -550,8 +550,22 @@ package body Nhe_O.BTree is
       Key     : in     Integer_64;
       Removed :    out Boolean)
    is
-      Leaf_Id : constant BTree_Node_Id := Route_To_Leaf (Tree, Key);
-      Leaf    : BTree_Node             := Tree.Nodes (Leaf_Id);
+      subtype Compact_Index is Positive range 1 .. Max_BTree_Nodes * Max_Keys_Per_Node;
+      type Compact_Key_Array is array (Compact_Index) of Integer_64;
+      type Compact_Ptr_Array is array (Compact_Index) of BTree_Record_Pointer;
+
+      Leaf_Id      : constant BTree_Node_Id := Route_To_Leaf (Tree, Key);
+      Leaf         : BTree_Node             := Tree.Nodes (Leaf_Id);
+      Saved_Total  : Natural;
+      Saved_Splits : Natural;
+      Live_Keys    : Compact_Key_Array      := [others => 0];
+      Live_Ptrs    : Compact_Ptr_Array      := [others => (others => <>)];
+      Live_Count   : Natural range 0 .. Max_BTree_Nodes * Max_Keys_Per_Node := 0;
+      Start_Id     : BTree_Node_Id;
+      Child_Id     : BTree_Node_Id;
+      Cur_Node     : Optional_Node_Id;
+      Sub_Stat     : Engine_Status;
+      pragma Warnings (Off, Sub_Stat);
    begin
       Removed := False;
 
@@ -574,6 +588,55 @@ package body Nhe_O.BTree is
                Tree.Total_Keys := Tree.Total_Keys - 1;
             end if;
             Removed := True;
+
+            --  Reclaim empty/underflowed leaf nodes and stale internal separator keys
+            --  when a multi-node B+Tree leaf drops below minimum occupancy (R3-MED-03)
+            if Leaf.Num_Keys < 2 and then Tree.Node_Count > 1 then
+               Saved_Total  := Tree.Total_Keys;
+               Saved_Splits := Tree.Split_Count;
+
+               Start_Id := Tree.Root_Node;
+               for Depth in 1 .. Max_BTree_Depth loop
+                  pragma Loop_Invariant (Start_Id in 1 .. Tree.Node_Count);
+                  exit when Tree.Nodes (Start_Id).Kind = Node_Leaf;
+                  Child_Id := Tree.Nodes (Start_Id).Children (1);
+                  if Child_Id <= Tree.Node_Count then
+                     Start_Id := Child_Id;
+                  else
+                     exit;
+                  end if;
+               end loop;
+
+               if Tree.Nodes (Start_Id).Kind = Node_Leaf then
+                  Cur_Node := Start_Id;
+                  for Step in 1 .. Max_BTree_Nodes loop
+                     pragma Loop_Invariant
+                       (Live_Count <= (Step - 1) * Max_Keys_Per_Node);
+                     exit when Cur_Node = 0 or else Cur_Node > Tree.Node_Count;
+                     exit when Tree.Nodes (Cur_Node).Kind /= Node_Leaf;
+
+                     for K_Idx in 1 .. Tree.Nodes (Cur_Node).Num_Keys loop
+                        pragma Loop_Invariant
+                          (Live_Count <= (Step - 1) * Max_Keys_Per_Node + K_Idx - 1);
+                        Live_Count             := Live_Count + 1;
+                        Live_Keys (Live_Count) := Tree.Nodes (Cur_Node).Keys (K_Idx);
+                        Live_Ptrs (Live_Count) := Tree.Nodes (Cur_Node).Pointers (K_Idx);
+                     end loop;
+
+                     Cur_Node := Tree.Nodes (Cur_Node).Next_Leaf;
+                  end loop;
+               end if;
+
+               Init_BTree (Tree);
+               for Idx in 1 .. Live_Count loop
+                  pragma Loop_Invariant (Tree.Node_Count in 1 .. Max_BTree_Nodes);
+                  pragma Loop_Invariant (Tree.Root_Node in 1 .. Tree.Node_Count);
+                  Insert_Key (Tree, Live_Keys (Idx), Live_Ptrs (Idx), Sub_Stat);
+               end loop;
+               Tree.Total_Keys  := Saved_Total;
+               Tree.Split_Count := Saved_Splits;
+            end if;
+
             return;
          end if;
       end loop;

@@ -11,7 +11,7 @@ record why it is superseded in `../DECISIONS.md`.
 > (`JSONB`, `VECTOR`) of PostgreSQL, and the ultra-fast Key-Value caching and Pub/Sub semantics of
 > Redis inside a single formally verified Ada/SPARK codebase. **100% of all specifications and
 > bodies in `src/` operate under `pragma SPARK_Mode (On);`**, including physical I/O (`src/nhe_o-io.adb`)
-> via contract-bound POSIX kernel syscalls (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`, `unlink`).
+> via contract-bound POSIX kernel syscalls (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `close`, `unlink`, `access`).
 
 ---
 
@@ -37,7 +37,7 @@ Developers are forced either to run a heavy fleet of external server daemons (Po
 - **Full ACID, TOAST Overflow & Disk Persistence**: Multi-Version Concurrency Control (MVCC) with snapshot isolation (`xmin`/`xmax`) paired with CRC32-checksummed Write-Ahead Logging (WAL), slotted 4KB primary disk pages, 4KB TOAST overflow page chains, and Multi-Page B+Tree indexing.
 - **Redis-Grade Key-Value Cache & Dual-Mode Pub/Sub**: Direct high-speed KV operations (`GET`, `SET`, `DEL`, `INCR`, `EXPIRE`, `TTL`) with deterministic TTL expiration and LRU eviction, plus an in-process Pub/Sub message broker (`PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, pattern matching) supporting both immediate in-memory delivery and `DURABLE` WAL-committed notifications (`LISTEN`/`NOTIFY`).
 - **Universal Local LLM RAG & C/Python FFI SDK**: Built-in Hybrid RAG & 1-hop GraphRAG executor exposed via a precondition-free C ABI (`include/nhe_o.h`, `lib/libnhe_o.so`) and Python `ctypes` SDK (`bindings/python/nhe_o.py`).
-- **100% SPARK Verified Codebase (Silver + Gold)**: Every single module specification and body (26/26 files across 14 units in `src/`, including `Nhe_O.IO` and `Nhe_O.C_API`) operates under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)`, achieving **2,863 / 2,863 formal checks proved (0 unproved, 0 warnings)** with `gnatprove 16.1.0`.
+- **100% SPARK Verified Codebase (Silver + Gold)**: Every single module specification and body (26/26 files across 14 units in `src/`, including `Nhe_O.IO` and `Nhe_O.C_API`) operates under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)`, achieving **3,776 / 3,776 formal checks proved (0 unproved, 0 warnings)** with `gnatprove 16.1.0`.
 
 ---
 
@@ -56,7 +56,7 @@ Developers are forced either to run a heavy fleet of external server daemons (Po
 
 ## 4. Principles
 
-1. **100% `SPARK_Mode (On)` Everywhere (`BR-001` / `ADR-002`)**: No specification or body in `src/` may disable `SPARK_Mode`. Physical disk I/O in `Nhe_O.IO` binds directly to exception-free POSIX syscalls (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`, `unlink`) under `SPARK_Mode (On)`.
+1. **100% `SPARK_Mode (On)` Everywhere (`BR-001` / `ADR-002`)**: No specification or body in `src/` may disable `SPARK_Mode`. Physical disk I/O in `Nhe_O.IO` binds directly to exception-free POSIX syscalls (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `close`, `unlink`, `access`) under `SPARK_Mode (On)`.
 2. **Bounded & Deterministic Memory**: Avoid unbounded heap allocations inside the verified engine. Use bounded structures, fixed-size slotted pages (4096 bytes), and explicit capacity contracts (`Pre` / `Post` / `Type_Invariant`).
 3. **PostgreSQL Ergonomics in an Embedded Package**: Users should write familiar PostgreSQL queries, JSONB expressions, and `pgvector` operators without managing a database server.
 4. **ACID Without Compromise**: Caching speed must never corrupt durable state; MVCC visibility and WAL checksum invariants are enforced by formal contracts.

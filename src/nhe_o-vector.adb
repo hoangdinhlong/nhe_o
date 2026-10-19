@@ -416,26 +416,50 @@ package body Nhe_O.Vector is
          if Abs_C = 0.0 then
             Exp_Code := 0;
             Scaled   := 0.0;
-         elsif Abs_C <= 1.0e-24 then
+         elsif Abs_C <= 1.0e-20 then
             Exp_Code := 1;
-            Scaled   := Abs_C * 1.0e32;
+            Scaled   := Abs_C * 1.0e28;
          elsif Abs_C <= 1.0e-18 then
             Exp_Code := 2;
             Scaled   := Abs_C * 1.0e26;
-         elsif Abs_C <= 1.0e-12 then
+         elsif Abs_C <= 1.0e-16 then
             Exp_Code := 3;
-            Scaled   := Abs_C * 1.0e20;
-         elsif Abs_C <= 1.0e-6 then
+            Scaled   := Abs_C * 1.0e24;
+         elsif Abs_C <= 1.0e-14 then
             Exp_Code := 4;
-            Scaled   := Abs_C * 1.0e14;
-         elsif Abs_C <= 1.0 then
+            Scaled   := Abs_C * 1.0e22;
+         elsif Abs_C <= 1.0e-12 then
             Exp_Code := 5;
-            Scaled   := Abs_C * 1.0e8;
-         elsif Abs_C <= 1000.0 then
+            Scaled   := Abs_C * 1.0e20;
+         elsif Abs_C <= 1.0e-10 then
             Exp_Code := 6;
-            Scaled   := Abs_C * 1.0e5;
-         else
+            Scaled   := Abs_C * 1.0e18;
+         elsif Abs_C <= 1.0e-8 then
             Exp_Code := 7;
+            Scaled   := Abs_C * 1.0e16;
+         elsif Abs_C <= 1.0e-6 then
+            Exp_Code := 8;
+            Scaled   := Abs_C * 1.0e14;
+         elsif Abs_C <= 1.0e-4 then
+            Exp_Code := 9;
+            Scaled   := Abs_C * 1.0e12;
+         elsif Abs_C <= 1.0e-2 then
+            Exp_Code := 10;
+            Scaled   := Abs_C * 1.0e10;
+         elsif Abs_C <= 1.0 then
+            Exp_Code := 11;
+            Scaled   := Abs_C * 1.0e8;
+         elsif Abs_C <= 1.0e2 then
+            Exp_Code := 12;
+            Scaled   := Abs_C * 1.0e6;
+         elsif Abs_C <= 1.0e4 then
+            Exp_Code := 13;
+            Scaled   := Abs_C * 1.0e4;
+         elsif Abs_C <= 1.0e5 then
+            Exp_Code := 14;
+            Scaled   := Abs_C * 1.0e3;
+         else
+            Exp_Code := 15;
             Scaled   := Abs_C * 1.0e2;
          end if;
 
@@ -516,7 +540,7 @@ package body Nhe_O.Vector is
          Exp_Code := Shift_Right (Word, 27) and 16#0F#;
          Mantissa := Word and 16#07FF_FFFF#;
 
-         if Exp_Code > 7 or else Mantissa > Unsigned_32 (Max_Mantissa) then
+         if Mantissa > Unsigned_32 (Max_Mantissa) then
             V     := (Dim => Dim, Elements => [others => 0.0]);
             Valid := False;
             return;
@@ -532,17 +556,33 @@ package body Nhe_O.Vector is
             when 0 =>
                Val_Abs := 0.0;
             when 1 =>
-               Val_Abs := Float (Mantissa) * 1.0e-32;
+               Val_Abs := Float (Mantissa) * 1.0e-28;
             when 2 =>
                Val_Abs := Float (Mantissa) * 1.0e-26;
             when 3 =>
-               Val_Abs := Float (Mantissa) * 1.0e-20;
+               Val_Abs := Float (Mantissa) * 1.0e-24;
             when 4 =>
-               Val_Abs := Float (Mantissa) * 1.0e-14;
+               Val_Abs := Float (Mantissa) * 1.0e-22;
             when 5 =>
-               Val_Abs := Float (Mantissa) * 1.0e-8;
+               Val_Abs := Float (Mantissa) * 1.0e-20;
             when 6 =>
-               Val_Abs := Float (Mantissa) * 1.0e-5;
+               Val_Abs := Float (Mantissa) * 1.0e-18;
+            when 7 =>
+               Val_Abs := Float (Mantissa) * 1.0e-16;
+            when 8 =>
+               Val_Abs := Float (Mantissa) * 1.0e-14;
+            when 9 =>
+               Val_Abs := Float (Mantissa) * 1.0e-12;
+            when 10 =>
+               Val_Abs := Float (Mantissa) * 1.0e-10;
+            when 11 =>
+               Val_Abs := Float (Mantissa) * 1.0e-8;
+            when 12 =>
+               Val_Abs := Float (Mantissa) * 1.0e-6;
+            when 13 =>
+               Val_Abs := Float (Mantissa) * 1.0e-4;
+            when 14 =>
+               Val_Abs := Float (Mantissa) * 1.0e-3;
             when others =>
                Val_Abs := Float (Mantissa) * 1.0e-2;
          end case;

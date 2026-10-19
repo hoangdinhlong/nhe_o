@@ -158,7 +158,8 @@ package Nhe_O.KV is
           Pre    => Key.Length > 0
                     and then WAL_Path.Length > 0
                     and then (if Has_TTL then TTL_Sec > 0 and then Now <= Epoch_Seconds'Last - TTL_Sec),
-          Post   => Exists (Store, Key, Now);
+          Post   => (if Status = Status_Ok then Exists (Store, Key, Now)
+                     else Store = Store'Old);
 
    --  Durable DEL: removes Key from in-memory KV_Store and appends a WAL_Frame_KV record
    procedure Del_Durable
@@ -171,7 +172,8 @@ package Nhe_O.KV is
      with Global => null,
           Always_Terminates,
           Pre    => Key.Length > 0 and then WAL_Path.Length > 0,
-          Post   => not Exists (Store, Key, 0);
+          Post   => (if Status = Status_Ok then not Exists (Store, Key, 0)
+                     else Store = Store'Old and then not Removed);
 
    --  Durable EXPIRE: attaches a TTL to Key and appends a WAL_Frame_KV record when updated
    procedure Expire_Durable
@@ -189,7 +191,8 @@ package Nhe_O.KV is
                     and then WAL_Path.Length > 0
                     and then TTL_Sec > 0
                     and then Now <= Epoch_Seconds'Last - TTL_Sec,
-          Post   => (if Updated then Exists (Store, Key, Now));
+          Post   => (if Status = Status_Ok and then Updated then Exists (Store, Key, Now))
+                    and then (if Status /= Status_Ok then Store = Store'Old and then not Updated);
 
    --  Durable INCRBY: increments numeric value of Key and appends a WAL_Frame_KV record
    procedure Incr_By_Durable
@@ -204,7 +207,8 @@ package Nhe_O.KV is
      with Global => null,
           Always_Terminates,
           Pre    => Key.Length > 0 and then WAL_Path.Length > 0,
-          Post   => (if Status = Status_Ok then Exists (Store, Key, Now));
+          Post   => (if Status = Status_Ok then Exists (Store, Key, Now)
+                     else Store = Store'Old);
 
    --  Replay all WAL_Frame_KV records from WAL_Path into Store at recovery timestamp Now
    procedure Recover_KV_From_WAL

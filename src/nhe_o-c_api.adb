@@ -105,6 +105,7 @@ package body Nhe_O.C_API is
       Delete_File_If_Exists (G_DB_Path);
       Delete_File_If_Exists (G_WAL_Path);
       G_Next_Tx     := 1;
+      G_Next_KV_Seq := 1;
       G_KV_Store    := (others => <>);
       G_Broker      := (others => <>);
       Init_RAG_Engine (G_RAG_Engine, 3);
@@ -120,33 +121,33 @@ package body Nhe_O.C_API is
       Dim          : in     int;
       Out_Status   :    out int)
    is
-      DB_P         : Bounded_Text;
-      WAL_P        : Bounded_Text;
-      Probe_Frame  : WAL_Frame_Buffer;
-      Probe_WAL_Ok : Boolean;
-      Probe_EOF    : Boolean;
-      Probe_Page   : Page_Buffer;
-      Probe_DB_Ok  : Boolean;
-      Frame_Tx     : Valid_Tx_Id;
-      Frame_Pg     : Valid_Page_Id;
-      KV_Replayed  : Natural;
-      KV_Stat      : Engine_Status;
-      WAL_Replayed : Natural;
-      Max_Rec_Tx   : Tx_Id;
-      WAL_Stat     : Engine_Status;
-      RAG_Stat     : Engine_Status;
+      DB_P          : Bounded_Text;
+      WAL_P         : Bounded_Text;
+      WAL_Exists    : Boolean;
+      DB_Exists     : Boolean;
+      Probe_Frame   : WAL_Frame_Buffer;
+      Probe_WAL_Ok  : Boolean;
+      Probe_EOF     : Boolean;
+      Probe_Page    : Page_Buffer;
+      Probe_DB_Ok   : Boolean;
+      Probe_DB_EOF  : Boolean;
+      Frame_Tx      : Valid_Tx_Id;
+      Frame_Pg      : Valid_Page_Id;
+      KV_Replayed   : Natural;
+      KV_Stat       : Engine_Status;
+      WAL_Replayed  : Natural;
+      Max_Rec_Tx    : Tx_Id;
+      WAL_Stat      : Engine_Status;
+      RAG_Stat      : Engine_Status;
       pragma Warnings (Off, Probe_Frame);
-      pragma Warnings (Off, Probe_EOF);
       pragma Warnings (Off, Probe_Page);
       pragma Warnings (Off, Frame_Pg);
       pragma Warnings (Off, KV_Replayed);
-      pragma Warnings (Off, KV_Stat);
       pragma Warnings (Off, WAL_Replayed);
-      pragma Warnings (Off, WAL_Stat);
-      pragma Warnings (Off, RAG_Stat);
    begin
       G_Initialized := False;
       G_Next_Tx     := 1;
+      G_Next_KV_Seq := 1;
       G_DB_Path     := Make_Text ("/tmp/nhe_o_c_api.db");
       G_WAL_Path    := Make_Text ("/tmp/nhe_o_c_api.wal");
       G_KV_Store    := (others => <>);
@@ -173,63 +174,102 @@ package body Nhe_O.C_API is
       G_WAL_Path := WAL_P;
       Init_RAG_Engine (G_RAG_Engine, Vector_Dim (Dim));
 
-      --  Recover existing WAL / DB state when files already exist on disk (R2-CRIT-02)
-      Read_WAL_Frame (G_WAL_Path, 0, Probe_Frame, Probe_WAL_Ok, Probe_EOF);
-      if Probe_WAL_Ok then
-         Recover_KV_From_WAL
-           (Store        => G_KV_Store,
-            WAL_Path     => G_WAL_Path,
-            Now          => 0,
-            Max_Frames   => 256,
-            Replayed_Ops => KV_Replayed,
-            Status       => KV_Stat);
-         Redo_WAL_Recovery
-           (DB_Path          => G_DB_Path,
-            WAL_Path         => G_WAL_Path,
-            Max_Frames       => 256,
-            Replayed_Count   => WAL_Replayed,
-            Max_Recovered_Tx => Max_Rec_Tx,
-            Status           => WAL_Stat);
-         if Max_Rec_Tx in 1 .. Max_Tx_Id - 1 then
-            G_Next_Tx := Max_Rec_Tx + 1;
-         end if;
-
-         --  Advance G_Next_Tx past all valid WAL frames (including KV & uncommitted frames)
-         for Idx in 0 .. 255 loop
-            pragma Loop_Invariant (G_WAL_Path.Length > 0);
-            Read_WAL_Frame (G_WAL_Path, Idx, Probe_Frame, Probe_WAL_Ok, Probe_EOF);
-            exit when not Probe_WAL_Ok;
-            if Verify_WAL_Frame (Probe_Frame) then
-               Decode_WAL_Frame (Probe_Frame, Frame_Tx, Frame_Pg, Probe_Page);
-               if Frame_Tx >= G_Next_Tx and then Frame_Tx < Max_Tx_Id then
-                  G_Next_Tx := Frame_Tx + 1;
-               end if;
+      --  Recover existing WAL / DB state when files already exist on disk
+      --  and propagate any torn frame/page or CRC32 failure (R2-CRIT-02, R3-HIGH-01)
+      Check_File_Exists (G_WAL_Path, WAL_Exists);
+      if WAL_Exists then
+         Read_WAL_Frame (G_WAL_Path, 0, Probe_Frame, Probe_WAL_Ok, Probe_EOF);
+         if not Probe_WAL_Ok and then not Probe_EOF then
+            Out_Status := C_Status_IO_Error;
+            return;
+         elsif Probe_WAL_Ok then
+            Recover_KV_From_WAL
+              (Store        => G_KV_Store,
+               WAL_Path     => G_WAL_Path,
+               Now          => 0,
+               Max_Frames   => Max_WAL_Scan_Frames,
+               Replayed_Ops => KV_Replayed,
+               Status       => KV_Stat);
+            if KV_Stat /= Status_Ok then
+               G_KV_Store := (others => <>);
+               Out_Status := To_C_Status (KV_Stat);
+               return;
             end if;
-         end loop;
+
+            Redo_WAL_Recovery
+              (DB_Path          => G_DB_Path,
+               WAL_Path         => G_WAL_Path,
+               Max_Frames       => Max_WAL_Scan_Frames,
+               Replayed_Count   => WAL_Replayed,
+               Max_Recovered_Tx => Max_Rec_Tx,
+               Status           => WAL_Stat);
+            if WAL_Stat /= Status_Ok then
+               G_KV_Store := (others => <>);
+               Out_Status := To_C_Status (WAL_Stat);
+               return;
+            end if;
+
+            if Max_Rec_Tx in 1 .. Max_Tx_Id - 1 then
+               G_Next_Tx := Max_Rec_Tx + 1;
+            end if;
+
+            --  Advance G_Next_Tx and G_Next_KV_Seq past all valid WAL frames (R3-CRIT-01, R3-CRIT-02)
+            for Idx in 0 .. Max_WAL_Scan_Frames - 1 loop
+               pragma Loop_Invariant (G_WAL_Path.Length > 0);
+               Read_WAL_Frame (G_WAL_Path, Idx, Probe_Frame, Probe_WAL_Ok);
+               exit when not Probe_WAL_Ok;
+               if Verify_WAL_Frame (Probe_Frame) then
+                  Decode_WAL_Frame (Probe_Frame, Frame_Tx, Frame_Pg, Probe_Page);
+                  if Get_WAL_Frame_Kind (Probe_Frame) = WAL_Frame_KV then
+                     if Frame_Tx >= G_Next_KV_Seq and then Frame_Tx < Max_Tx_Id then
+                        G_Next_KV_Seq := Frame_Tx + 1;
+                     end if;
+                  else
+                     if Frame_Tx >= G_Next_Tx and then Frame_Tx < Max_Tx_Id then
+                        G_Next_Tx := Frame_Tx + 1;
+                     end if;
+                  end if;
+               end if;
+            end loop;
+         end if;
       end if;
 
-      Read_Page (G_DB_Path, 1, Probe_Page, Probe_DB_Ok);
-      if Probe_DB_Ok then
-         Recover_RAG_Engine
-           (Engine   => G_RAG_Engine,
-            Dim      => Vector_Dim (Dim),
-            DB_Path  => G_DB_Path,
-            WAL_Path => G_WAL_Path,
-            Status   => RAG_Stat);
-         for Slot in RAG_Doc_Slot loop
-            if G_RAG_Engine.Docs (Slot).Active then
-               if G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmin >= G_Next_Tx
-                 and then G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmin < Max_Tx_Id
-               then
-                  G_Next_Tx := G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmin + 1;
-               end if;
-               if G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmax >= G_Next_Tx
-                 and then G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmax < Max_Tx_Id
-               then
-                  G_Next_Tx := G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmax + 1;
-               end if;
+      Check_File_Exists (G_DB_Path, DB_Exists);
+      if DB_Exists then
+         Read_Page (G_DB_Path, 1, Probe_Page, Probe_DB_Ok, Probe_DB_EOF);
+         if not Probe_DB_Ok and then not Probe_DB_EOF then
+            G_KV_Store := (others => <>);
+            Out_Status := C_Status_IO_Error;
+            return;
+         elsif Probe_DB_Ok then
+            Recover_RAG_Engine
+              (Engine   => G_RAG_Engine,
+               Dim      => Vector_Dim (Dim),
+               DB_Path  => G_DB_Path,
+               WAL_Path => G_WAL_Path,
+               Status   => RAG_Stat);
+            if RAG_Stat /= Status_Ok then
+               G_KV_Store := (others => <>);
+               Init_RAG_Engine (G_RAG_Engine, 3);
+               Out_Status := To_C_Status (RAG_Stat);
+               return;
             end if;
-         end loop;
+
+            for Slot in RAG_Doc_Slot loop
+               if G_RAG_Engine.Docs (Slot).Active then
+                  if G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmin >= G_Next_Tx
+                    and then G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmin < Max_Tx_Id
+                  then
+                     G_Next_Tx := G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmin + 1;
+                  end if;
+                  if G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmax >= G_Next_Tx
+                    and then G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmax < Max_Tx_Id
+                  then
+                     G_Next_Tx := G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmax + 1;
+                  end if;
+               end if;
+            end loop;
+         end if;
       end if;
 
       G_Initialized := True;
@@ -410,22 +450,26 @@ package body Nhe_O.C_API is
       Key := To_Bounded_Ident (Key_Buf, Ident_Length (Key_Len));
       Val := To_Bounded_Text (Val_Buf, Text_Length (Val_Len));
 
-      if G_WAL_Path.Length > 0 and then G_Next_Tx < Max_Tx_Id then
+      if G_WAL_Path.Length > 0 then
+         if G_Next_KV_Seq = Max_Tx_Id then
+            Out_Status := C_Status_Capacity_Exceeded;
+            return;
+         end if;
          declare
             WAL_Stat : Engine_Status;
          begin
             Set_Durable
               (Store    => G_KV_Store,
                WAL_Path => G_WAL_Path,
-               Tx       => G_Next_Tx,
+               Tx       => G_Next_KV_Seq,
                Key      => Key,
                Val      => Val,
                Now      => Now_Sec,
                Has_TTL  => Has_TTL,
                TTL_Sec  => TTL_Val,
                Status   => WAL_Stat);
-            if WAL_Stat = Status_Ok and then G_Next_Tx < Max_Tx_Id then
-               G_Next_Tx := G_Next_Tx + 1;
+            if WAL_Stat = Status_Ok and then G_Next_KV_Seq < Max_Tx_Id then
+               G_Next_KV_Seq := G_Next_KV_Seq + 1;
             end if;
             Out_Status := To_C_Status (WAL_Stat);
          end;
@@ -492,19 +536,23 @@ package body Nhe_O.C_API is
       end if;
 
       Key := To_Bounded_Ident (Key_Buf, Ident_Length (Key_Len));
-      if G_WAL_Path.Length > 0 and then G_Next_Tx < Max_Tx_Id then
+      if G_WAL_Path.Length > 0 then
+         if G_Next_KV_Seq = Max_Tx_Id then
+            Out_Status := C_Status_Capacity_Exceeded;
+            return;
+         end if;
          declare
             WAL_Stat : Engine_Status;
          begin
             Del_Durable
               (Store    => G_KV_Store,
                WAL_Path => G_WAL_Path,
-               Tx       => G_Next_Tx,
+               Tx       => G_Next_KV_Seq,
                Key      => Key,
                Removed  => Removed,
                Status   => WAL_Stat);
-            if WAL_Stat = Status_Ok and then G_Next_Tx < Max_Tx_Id then
-               G_Next_Tx := G_Next_Tx + 1;
+            if Removed and then WAL_Stat = Status_Ok and then G_Next_KV_Seq < Max_Tx_Id then
+               G_Next_KV_Seq := G_Next_KV_Seq + 1;
             end if;
             Out_Removed := (if Removed then 1 else 0);
             Out_Status  := To_C_Status (WAL_Stat);
@@ -574,8 +622,12 @@ package body Nhe_O.C_API is
       end if;
 
       Key := To_Bounded_Ident (Key_Buf, Ident_Length (Key_Len));
-      if G_WAL_Path.Length > 0 and then G_Next_Tx in 1 .. Max_Tx_Id - 1 then
-         Tx := G_Next_Tx;
+      if G_WAL_Path.Length > 0 then
+         if G_Next_KV_Seq = Max_Tx_Id then
+            Out_Status := C_Status_Capacity_Exceeded;
+            return;
+         end if;
+         Tx := G_Next_KV_Seq;
          Expire_Durable
            (Store    => G_KV_Store,
             WAL_Path => G_WAL_Path,
@@ -585,8 +637,8 @@ package body Nhe_O.C_API is
             TTL_Sec  => TTL_Sec,
             Updated  => Updated,
             Status   => Status);
-         if Updated and then Status = Status_Ok then
-            G_Next_Tx := Tx + 1;
+         if Updated and then Status = Status_Ok and then Tx < Max_Tx_Id then
+            G_Next_KV_Seq := Tx + 1;
          end if;
          Out_Updated := (if Updated then 1 else 0);
          Out_Status  := To_C_Status (Status);
@@ -652,8 +704,12 @@ package body Nhe_O.C_API is
       end if;
 
       Key := To_Bounded_Ident (Key_Buf, Ident_Length (Key_Len));
-      if G_WAL_Path.Length > 0 and then G_Next_Tx in 1 .. Max_Tx_Id - 1 then
-         Tx := G_Next_Tx;
+      if G_WAL_Path.Length > 0 then
+         if G_Next_KV_Seq = Max_Tx_Id then
+            Out_Status := C_Status_Capacity_Exceeded;
+            return;
+         end if;
+         Tx := G_Next_KV_Seq;
          Incr_By_Durable
            (Store     => G_KV_Store,
             WAL_Path  => G_WAL_Path,
@@ -663,8 +719,8 @@ package body Nhe_O.C_API is
             Now       => Now_Sec,
             New_Val   => Out_New_Val,
             Status    => Status);
-         if Status = Status_Ok then
-            G_Next_Tx := Tx + 1;
+         if Status = Status_Ok and then Tx < Max_Tx_Id then
+            G_Next_KV_Seq := Tx + 1;
          end if;
          Out_Status := To_C_Status (Status);
       else
@@ -1025,7 +1081,7 @@ package body Nhe_O.C_API is
       end if;
 
       if G_Next_Tx = Max_Tx_Id
-        or else G_RAG_Engine.Vector_Graph.Dim /= G_RAG_Engine.Dim
+        or else not Is_Valid_RAG_Engine (G_RAG_Engine)
       then
          Out_Status := C_Status_Capacity_Exceeded;
          return;

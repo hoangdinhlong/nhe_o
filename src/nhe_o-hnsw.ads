@@ -92,6 +92,43 @@ package Nhe_O.HNSW is
                     and then Index.Entry_Node = 1
                     and then Is_Valid_HNSW (Index);
 
+   --  True iff Insert_Vector for Doc_Id can succeed without exceeding Max_HNSW_Nodes
+   --  (either via in-place update, inactive slot reuse, or growing Node_Count, R3-MED-04)
+   function Has_HNSW_Capacity
+     (Index  : HNSW_Index;
+      Doc_Id : Positive) return Boolean
+   is
+     (Index.Node_Count < Max_HNSW_Nodes
+      or else (for some I in 1 .. Index.Node_Count =>
+                 not Index.Nodes (I).Active
+                 or else Index.Nodes (I).Doc_Id = Doc_Id))
+     with Pre => Index.Node_Count <= Max_HNSW_Nodes;
+
+   --  Deactivate a document's vector node, scrub incoming neighbor edges, trim
+   --  trailing inactive nodes, and recompute Entry_Node / Top_Layer (R3-HIGH-02, R3-MED-04)
+   procedure Remove_Vector
+     (Index  : in out HNSW_Index;
+      Doc_Id : in     Positive)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Index.Node_Count <= Max_HNSW_Nodes,
+          Post   => Index.Dim = Index.Dim'Old
+                    and then Index.Node_Count <= Index.Node_Count'Old
+                    and then Is_Valid_HNSW (Index);
+
+   --  Restore a previously saved HNSW_Node snapshot into Index on MVCC rollback (R3-HIGH-02)
+   procedure Restore_Vector_Node
+     (Index     : in out HNSW_Index;
+      Doc_Id    : in     Positive;
+      Node_Snap : in     HNSW_Node)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Index.Node_Count <= Max_HNSW_Nodes
+                    and then Node_Snap.Bin_Vec.Dim = Index.Dim,
+          Post   => Index.Dim = Index.Dim'Old
+                    and then Index.Node_Count <= Max_HNSW_Nodes
+                    and then Is_Valid_HNSW (Index);
+
    --  Insert or update a vector in the HNSW graph, computing Binary (1-bit),
    --  scale-preserving Int8 (SQ8), and Matryoshka Float32 representations and
    --  linking distance-pruned small-world edges (CRIT-06, CRIT-07)

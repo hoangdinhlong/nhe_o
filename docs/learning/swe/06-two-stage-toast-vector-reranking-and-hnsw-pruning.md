@@ -72,7 +72,7 @@ In [`src/nhe_o-vector.adb`](../../../src/nhe_o-vector.adb), `Encode_Vector_TOAST
 |---|---|---|
 | `1..4` | `Magic` | ASCII `"VTST"` (`16#56#`, `16#54#`, `16#53#`, `16#54#`) |
 | `5..8` | `Dim` | Big-endian `Unsigned_32` dimension (`1 .. 4096`) |
-| `9 .. 8 + 4*Dim` | `Elements` | Big-endian tiered scientific `Float32` words (`Encode_Vector_TOAST` / `Decode_Vector_TOAST`: `Bit 31 = Sign`, `Bits 27..30 = Exp_Code 0..7`, `Bits 0..26 = Mantissa 0..10^8`) |
+| `9 .. 8 + 4*Dim` | `Elements` | Big-endian 15-tier scientific `Float32` words (`Encode_Vector_TOAST` / `Decode_Vector_TOAST`: `Bit 31 = Sign`, `Bits 27..30 = Exp_Code 0..14` stepping by $10^1$ per tier with `14 = 0.0`, `Bits 0..26 = Mantissa 0..10^8`) |
 
 During `Decode_Vector_TOAST`, `Magic = "VTST"` and `Raw_Dim = Expected_Dim` are verified first, and each restored `Float32` word is bounded by construction to `Vector_Component` (`-1.0e6 .. 1.0e6`) while preserving 8 decimal digits of precision across `[1.0e-7, 1.0e6]`, allowing `gnatprove` to prove 100% of all run-time and functional contract checks (`Post => (if Valid then V.Dim = Expected_Dim)`) without `Ada.Unchecked_Conversion`.
 

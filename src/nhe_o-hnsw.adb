@@ -208,6 +208,197 @@ package body Nhe_O.HNSW is
    end Add_Edge_Pruned;
 
    -------------------------------------------------------------------------
+   --  Remove_Vector (Deactivate + Scrub Incoming Edges + Trim & Recompute)
+   -------------------------------------------------------------------------
+
+   procedure Remove_Vector
+     (Index  : in out HNSW_Index;
+      Doc_Id : in     Positive)
+   is
+      New_Neighbors : Neighbor_List;
+      New_Deg       : Neighbor_Count;
+      Nbr_Id        : HNSW_Node_Id;
+      Found_Active  : Boolean := False;
+      Best_Entry    : HNSW_Node_Id := 1;
+      Best_Layer    : HNSW_Layer := 1;
+   begin
+      for I in 1 .. Index.Node_Count loop
+         pragma Loop_Invariant (Index.Dim = Index.Dim'Loop_Entry);
+         pragma Loop_Invariant (Index.Node_Count = Index.Node_Count'Loop_Entry);
+         if Index.Nodes (I).Active and then Index.Nodes (I).Doc_Id = Doc_Id then
+            Index.Nodes (I).Active := False;
+            Index.Nodes (I).Layers := [others => (others => <>)];
+         end if;
+      end loop;
+
+      --  Scrub incoming edges pointing to deactivated nodes across all layers
+      for Src in 1 .. Index.Node_Count loop
+         pragma Loop_Invariant (Index.Dim = Index.Dim'Loop_Entry);
+         pragma Loop_Invariant (Index.Node_Count = Index.Node_Count'Loop_Entry);
+         if Index.Nodes (Src).Active then
+            for L in HNSW_Layer loop
+               pragma Loop_Invariant (Index.Dim = Index.Dim'Loop_Entry);
+               pragma Loop_Invariant (Index.Node_Count = Index.Node_Count'Loop_Entry);
+               New_Neighbors := [others => 1];
+               New_Deg       := 0;
+               for E in 1 .. Index.Nodes (Src).Layers (L).Degree loop
+                  pragma Loop_Invariant (New_Deg < E);
+                  Nbr_Id := Index.Nodes (Src).Layers (L).Neighbors (E);
+                  if Nbr_Id <= Index.Node_Count
+                    and then Nbr_Id /= Src
+                    and then Index.Nodes (Nbr_Id).Active
+                  then
+                     New_Deg                 := New_Deg + 1;
+                     New_Neighbors (New_Deg) := Nbr_Id;
+                  end if;
+               end loop;
+               Index.Nodes (Src).Layers (L).Degree    := New_Deg;
+               Index.Nodes (Src).Layers (L).Neighbors := New_Neighbors;
+            end loop;
+         end if;
+      end loop;
+
+      --  Trim trailing deactivated node slots so Node_Count reflects live high-water mark
+      while Index.Node_Count > 0
+        and then not Index.Nodes (Index.Node_Count).Active
+      loop
+         pragma Loop_Variant (Decreases => Index.Node_Count);
+         pragma Loop_Invariant (Index.Dim = Index.Dim'Loop_Entry);
+         pragma Loop_Invariant (Index.Node_Count <= Index.Node_Count'Loop_Entry);
+         Index.Node_Count := Index.Node_Count - 1;
+      end loop;
+
+      --  Recompute Entry_Node and Top_Layer from remaining active nodes
+      for I in 1 .. Index.Node_Count loop
+         pragma Loop_Invariant (Best_Entry in 1 .. Index.Node_Count);
+         if Index.Nodes (I).Active then
+            if not Found_Active or else Index.Nodes (I).Top_Level > Best_Layer then
+               Found_Active := True;
+               Best_Entry   := I;
+               Best_Layer   := Index.Nodes (I).Top_Level;
+            end if;
+         end if;
+      end loop;
+
+      Index.Entry_Node := Best_Entry;
+      Index.Top_Layer  := Best_Layer;
+   end Remove_Vector;
+
+   procedure Restore_Vector_Node
+     (Index     : in out HNSW_Index;
+      Doc_Id    : in     Positive;
+      Node_Snap : in     HNSW_Node)
+   is
+      Target_Id       : HNSW_Node_Id := 1;
+      Found_Existing  : Boolean := False;
+      Reused_Inactive : Boolean := False;
+      Best_Id         : HNSW_Node_Id;
+      Best_Dst        : Non_Negative_Float;
+      Cand_Dst        : Non_Negative_Float;
+      Has_Peer        : Boolean;
+      Existing_Lim    : HNSW_Node_Count;
+      Found_Active    : Boolean := False;
+      Best_Entry      : HNSW_Node_Id := 1;
+      Best_Layer      : HNSW_Layer := 1;
+   begin
+      Remove_Vector (Index, Doc_Id);
+      if not Node_Snap.Active then
+         return;
+      end if;
+
+      for I in 1 .. Index.Node_Count loop
+         if Index.Nodes (I).Active and then Index.Nodes (I).Doc_Id = Doc_Id then
+            Target_Id      := I;
+            Found_Existing := True;
+            exit;
+         end if;
+      end loop;
+
+      if not Found_Existing then
+         for I in 1 .. Index.Node_Count loop
+            if not Index.Nodes (I).Active then
+               Target_Id       := I;
+               Reused_Inactive := True;
+               exit;
+            end if;
+         end loop;
+      end if;
+
+      if not Found_Existing and then not Reused_Inactive then
+         if Index.Node_Count = Max_HNSW_Nodes then
+            return;
+         end if;
+         Target_Id        := Index.Node_Count + 1;
+         Index.Node_Count := Target_Id;
+      end if;
+
+      Index.Nodes (Target_Id) := (
+         Active     => True,
+         Doc_Id     => Doc_Id,
+         TOAST_Root => Node_Snap.TOAST_Root,
+         Top_Level  => Node_Snap.Top_Level,
+         Prefix_Len => Node_Snap.Prefix_Len,
+         Int8_Scale => Node_Snap.Int8_Scale,
+         Float_Pref => Node_Snap.Float_Pref,
+         Int8_Pref  => Node_Snap.Int8_Pref,
+         Bin_Vec    => Node_Snap.Bin_Vec,
+         Layers     => [others => (others => <>)]
+      );
+
+      Existing_Lim := Index.Node_Count;
+      if Existing_Lim > 1 then
+         for L in 1 .. Index.Nodes (Target_Id).Top_Level loop
+            pragma Loop_Invariant (Index.Dim = Index.Dim'Loop_Entry);
+            pragma Loop_Invariant (Index.Node_Count = Index.Node_Count'Loop_Entry);
+
+            Best_Id  := 1;
+            Best_Dst := Float'Last;
+            Has_Peer := False;
+
+            for Existing_Id in 1 .. Existing_Lim loop
+               pragma Loop_Invariant (Index.Dim = Index.Dim'Loop_Entry);
+               pragma Loop_Invariant (Index.Node_Count = Index.Node_Count'Loop_Entry);
+
+               if Existing_Id /= Target_Id
+                 and then Index.Nodes (Existing_Id).Active
+                 and then Index.Nodes (Existing_Id).Top_Level >= L
+                 and then Index.Nodes (Existing_Id).Bin_Vec.Dim = Index.Dim
+               then
+                  Cand_Dst := Node_Pair_Distance (Index, Target_Id, Existing_Id);
+                  if not Has_Peer or else Cand_Dst < Best_Dst then
+                     Best_Dst := Cand_Dst;
+                     Best_Id  := Existing_Id;
+                     Has_Peer := True;
+                  end if;
+
+                  Add_Edge_Pruned (Index, L, Target_Id, Existing_Id, Force => False);
+                  Add_Edge_Pruned (Index, L, Existing_Id, Target_Id, Force => False);
+               end if;
+            end loop;
+
+            if Has_Peer then
+               Add_Edge_Pruned (Index, L, Target_Id, Best_Id, Force => True);
+               Add_Edge_Pruned (Index, L, Best_Id, Target_Id, Force => True);
+            end if;
+         end loop;
+      end if;
+
+      for I in 1 .. Index.Node_Count loop
+         pragma Loop_Invariant (Best_Entry in 1 .. Index.Node_Count);
+         if Index.Nodes (I).Active then
+            if not Found_Active or else Index.Nodes (I).Top_Level > Best_Layer then
+               Found_Active := True;
+               Best_Entry   := I;
+               Best_Layer   := Index.Nodes (I).Top_Level;
+            end if;
+         end if;
+      end loop;
+
+      Index.Entry_Node := Best_Entry;
+      Index.Top_Layer  := Best_Layer;
+   end Restore_Vector_Node;
+
+   -------------------------------------------------------------------------
    --  Insert_Vector (Doc_Id Deduplication + Closest-M Neighbor Selection)
    -------------------------------------------------------------------------
 

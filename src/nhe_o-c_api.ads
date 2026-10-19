@@ -45,6 +45,7 @@ package Nhe_O.C_API is
    --  Embedded C runtime state (KV Store, Pub/Sub Broker, Hybrid RAG Engine, and configurable paths)
    G_Initialized : Boolean       := False;
    G_Next_Tx     : Valid_Tx_Id   := 1;
+   G_Next_KV_Seq : Valid_Tx_Id   := 1;
    G_DB_Path     : Bounded_Text  := (Length => 0, Data => [others => ' ']);
    G_WAL_Path    : Bounded_Text  := (Length => 0, Data => [others => ' ']);
    G_KV_Store    : KV_Store      := (others => <>);
@@ -71,7 +72,7 @@ package Nhe_O.C_API is
 
    --  Initialize / reset embedded Nhe_O C runtime state with default paths and Dim = 3
    procedure C_Init (Out_Status : out int)
-     with Global        => (Output => (G_Initialized, G_Next_Tx, G_DB_Path,
+     with Global        => (Output => (G_Initialized, G_Next_Tx, G_Next_KV_Seq, G_DB_Path,
                                        G_WAL_Path, G_KV_Store, G_Broker, G_RAG_Engine)),
           Always_Terminates,
           Export        => True,
@@ -87,7 +88,7 @@ package Nhe_O.C_API is
       WAL_Path_Len : in     int;
       Dim          : in     int;
       Out_Status   :    out int)
-     with Global        => (Output => (G_Initialized, G_Next_Tx, G_DB_Path,
+     with Global        => (Output => (G_Initialized, G_Next_Tx, G_Next_KV_Seq, G_DB_Path,
                                        G_WAL_Path, G_KV_Store, G_Broker, G_RAG_Engine)),
           Always_Terminates,
           Export        => True,
@@ -147,7 +148,7 @@ package Nhe_O.C_API is
       TTL_Sec    : in     Integer_64;
       Out_Status :    out int)
      with Global        => (Input  => (G_Initialized, G_WAL_Path),
-                            In_Out => (G_Next_Tx, G_KV_Store)),
+                            In_Out => (G_Next_KV_Seq, G_KV_Store)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -175,7 +176,7 @@ package Nhe_O.C_API is
       Out_Removed :    out int;
       Out_Status  :    out int)
      with Global        => (Input  => (G_Initialized, G_WAL_Path),
-                            In_Out => (G_Next_Tx, G_KV_Store)),
+                            In_Out => (G_Next_KV_Seq, G_KV_Store)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -203,7 +204,7 @@ package Nhe_O.C_API is
       Out_Updated :    out int;
       Out_Status  :    out int)
      with Global        => (Input  => (G_Initialized, G_WAL_Path),
-                            In_Out => (G_Next_Tx, G_KV_Store)),
+                            In_Out => (G_Next_KV_Seq, G_KV_Store)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -231,7 +232,7 @@ package Nhe_O.C_API is
       Out_New_Val :    out Integer_64;
       Out_Status  :    out int)
      with Global        => (Input  => (G_Initialized, G_WAL_Path),
-                            In_Out => (G_Next_Tx, G_KV_Store)),
+                            In_Out => (G_Next_KV_Seq, G_KV_Store)),
           Always_Terminates,
           Export        => True,
           Convention    => C,

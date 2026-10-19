@@ -14,11 +14,25 @@
 extern "C" {
 #endif
 
-/* Fixed buffer capacities matching Nhe_O.Types, Nhe_O.Transaction, and Nhe_O.Vector */
-#define NHE_O_MAX_IDENT_LEN   64
-#define NHE_O_MAX_TEXT_LEN    512
-#define NHE_O_MAX_TOAST_BYTES 16392
-#define NHE_O_MAX_VECTOR_DIM  4096
+/* Fixed buffer capacities and domain bounds matching Nhe_O.Types, Nhe_O.Transaction, Nhe_O.RAG, Nhe_O.KV, and Nhe_O.PubSub */
+#define NHE_O_MAX_IDENT_LEN    64
+#define NHE_O_MAX_TEXT_LEN     512
+#define NHE_O_MAX_TOAST_BYTES  16392
+#define NHE_O_MAX_VECTOR_DIM   4096
+#define NHE_O_DOC_ID_MIN       1
+#define NHE_O_DOC_ID_MAX       16
+#define NHE_O_MIN_DOC_ID       1
+#define NHE_O_MAX_DOC_ID       16
+#define NHE_O_MAX_RAG_DOCS     16
+#define NHE_O_SUB_ID_MIN       1
+#define NHE_O_SUB_ID_MAX       16
+#define NHE_O_MAX_SUBSCRIBERS  16
+#define NHE_O_TOP_K_MIN        1
+#define NHE_O_TOP_K_MAX        8
+#define NHE_O_MAX_TX_ID        8192
+#define NHE_O_MAX_CLOG_ENTRIES 8192
+#define NHE_O_MAX_WAL_FRAMES   4096
+#define NHE_O_MAX_KV_KEYS      16
 
 /* Status codes returned in *out_status */
 typedef enum {

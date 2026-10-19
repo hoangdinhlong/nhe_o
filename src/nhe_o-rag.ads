@@ -21,27 +21,32 @@ package Nhe_O.RAG is
    subtype RAG_Doc_Count is Natural range 0 .. Max_RAG_Docs;
    subtype Optional_Doc_Id is Natural range 0 .. Max_RAG_Docs;
 
-   --  Upper bound on Next_TOAST_Pg guaranteeing room for 2 full TOAST chains (HIGH-09)
+   --  Upper bound on Next_TOAST_Pg guaranteeing room for 3 full TOAST chains
+   --  (Parent + Vector + Extended Metadata, HIGH-09 / R3-HIGH-04)
    Max_Safe_TOAST_Page : constant Valid_Page_Id :=
-     Max_Page_Id - (2 * Max_TOAST_Chunks);
+     Max_Page_Id - (3 * Max_TOAST_Chunks);
 
    type RAG_Document_Entry is record
-      Active            : Boolean           := False;
-      Doc_Id            : Positive          := 1;
-      Tuple_Hdr         : MVCC_Tuple_Header := (Xmin => 1, Xmax => 0);
-      Metadata          : JSONB_Document    := (others => <>);
-      Summary_Text      : Bounded_Text      := (Length => 0, Data => [others => ' ']);
-      Toast_Ptr         : TOAST_Pointer     := (others => <>);
-      Vec_Toast_Ptr     : TOAST_Pointer     := (others => <>); --  4096-D full vector TOAST (Q-003)
-      Related_Doc_Id    : Optional_Doc_Id   := 0;              --  1-hop GraphRAG entity edge
-      --  Prior MVCC tuple version preserved for historical snapshots & rollback (CRIT-04)
-      Has_Prior_Version   : Boolean           := False;
-      Prior_Tuple_Hdr     : MVCC_Tuple_Header := (Xmin => 1, Xmax => 0);
-      Prior_Metadata      : JSONB_Document    := (others => <>);
-      Prior_Summary       : Bounded_Text      := (Length => 0, Data => [others => ' ']);
-      Prior_Toast_Ptr     : TOAST_Pointer     := (others => <>);
-      Prior_Vec_Toast_Ptr : TOAST_Pointer     := (others => <>);
-      Prior_Related_Id    : Optional_Doc_Id   := 0;
+      Active               : Boolean           := False;
+      Doc_Id               : Positive          := 1;
+      Tuple_Hdr            : MVCC_Tuple_Header := (Xmin => 1, Xmax => 0);
+      Metadata             : JSONB_Document    := (others => <>);
+      Summary_Text         : Bounded_Text      := (Length => 0, Data => [others => ' ']);
+      Toast_Ptr            : TOAST_Pointer     := (others => <>);
+      Vec_Toast_Ptr        : TOAST_Pointer     := (others => <>); --  4096-D full vector TOAST (Q-003)
+      Meta_Toast_Ptr       : TOAST_Pointer     := (others => <>); --  Lossless summary+JSONB TOAST (R3-HIGH-04)
+      Related_Doc_Id       : Optional_Doc_Id   := 0;              --  1-hop GraphRAG entity edge
+      Cur_HNSW_Node        : HNSW_Node         := (others => <>); --  Active HNSW snapshot (R3-HIGH-02)
+      --  Prior MVCC tuple version preserved for historical snapshots & rollback (CRIT-04, R3-HIGH-02)
+      Has_Prior_Version    : Boolean           := False;
+      Prior_Tuple_Hdr      : MVCC_Tuple_Header := (Xmin => 1, Xmax => 0);
+      Prior_Metadata       : JSONB_Document    := (others => <>);
+      Prior_Summary        : Bounded_Text      := (Length => 0, Data => [others => ' ']);
+      Prior_Toast_Ptr      : TOAST_Pointer     := (others => <>);
+      Prior_Vec_Toast_Ptr  : TOAST_Pointer     := (others => <>);
+      Prior_Meta_Toast_Ptr : TOAST_Pointer     := (others => <>);
+      Prior_Related_Id     : Optional_Doc_Id   := 0;
+      Prior_HNSW_Node      : HNSW_Node         := (others => <>);
    end record;
 
    type RAG_Document_Table is array (RAG_Doc_Slot) of RAG_Document_Entry;
@@ -107,7 +112,8 @@ package Nhe_O.RAG is
      with Global => null,
           Post   => (if Keyword.Length = 0 then not Contains_Keyword'Result);
 
-   --  MVCC logical delete of a document at transaction Ctx (sets Xmax := Ctx.Id, CRIT-04)
+   --  MVCC logical delete of a document at transaction Ctx (sets Xmax := Ctx.Id
+   --  and removes Doc_Id from PK_Tree and Vector_Graph, CRIT-04 / R3-HIGH-02)
    procedure Delete_Document
      (Engine : in out RAG_Engine;
       Ctx    : in     Transaction_Context;
@@ -116,14 +122,17 @@ package Nhe_O.RAG is
      with Global => null,
           Always_Terminates,
           Pre    => Ctx.State = Tx_Active
-                    and then Engine.Vector_Graph.Dim = Engine.Dim,
+                    and then Engine.Vector_Graph.Dim = Engine.Dim
+                    and then Engine.Vector_Graph.Node_Count <= Max_HNSW_Nodes
+                    and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count,
           Post   => Engine.Dim = Engine.Dim'Old
                     and then Engine.Vector_Graph.Dim = Engine.Dim
-                    and then Engine.PK_Tree.Node_Count = Engine.PK_Tree.Node_Count'Old
-                    and then Engine.PK_Tree.Root_Node = Engine.PK_Tree.Root_Node'Old
+                    and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
                     and then Engine.Next_TOAST_Pg = Engine.Next_TOAST_Pg'Old;
 
-   --  Durable WAL-staged MVCC delete of a document at transaction Ctx (R2-HIGH-01)
+   --  Durable WAL-staged MVCC delete of a document at transaction Ctx (R2-HIGH-01, R3-HIGH-02)
    procedure Delete_Document
      (Engine   : in out RAG_Engine;
       Ctx      : in     Transaction_Context;
@@ -136,11 +145,14 @@ package Nhe_O.RAG is
           Pre    => Ctx.State = Tx_Active
                     and then DB_Path.Length > 0
                     and then WAL_Path.Length > 0
-                    and then Engine.Vector_Graph.Dim = Engine.Dim,
+                    and then Engine.Vector_Graph.Dim = Engine.Dim
+                    and then Engine.Vector_Graph.Node_Count <= Max_HNSW_Nodes
+                    and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count,
           Post   => Engine.Dim = Engine.Dim'Old
                     and then Engine.Vector_Graph.Dim = Engine.Dim
-                    and then Engine.PK_Tree.Node_Count = Engine.PK_Tree.Node_Count'Old
-                    and then Engine.PK_Tree.Root_Node = Engine.PK_Tree.Root_Node'Old
+                    and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
                     and then Engine.Next_TOAST_Pg = Engine.Next_TOAST_Pg'Old;
 
    --  Roll back in-memory RAG_Engine mutations (Docs, PK_Tree, Vector_Graph,

@@ -378,9 +378,7 @@ procedure Nhe_O_Main is
 
    --  9 & 10. Dual-Mode Pub/Sub & Universal Local LLM RAG verification helper
    procedure Verify_RAG_And_PubSub (Next_Tx_Id : in out Valid_Tx_Id)
-     with Global => (Input  => (DB_File, WAL_File, Page_Out,
-                                SQL_Query, SQL_No_Space_1, SQL_No_Space_2),
-                     In_Out => All_Passed),
+     with Pre => Next_Tx_Id <= Max_Tx_Id - 16,
           Always_Terminates
    is
       Broker         : PubSub_Broker;
@@ -416,8 +414,12 @@ procedure Nhe_O_Main is
       Local_Tx_Stat  : Engine_Status;
       Local_JSON_St  : Engine_Status;
    begin
-      --  9. Verify Dual-Mode Pub/Sub & WAL Commit Barrier (`ADR-004` / `BR-005` / `R2-MED-05`)
+      --  9. Verify Dual-Mode Pub/Sub & WAL Commit Barrier (`ADR-004` / `BR-005` / `R2-MED-05` / `R3-MED-05`)
       Print_Line ("[9/11] Verifying Dual-Mode Pub/Sub & WAL Commit Barrier (Nhe_O.PubSub)...");
+      Check (Matches_Channel (Make_Ident ("rag.*.indexed"), Make_Ident ("rag.doc1.indexed")));
+      Check (Matches_Channel (Make_Ident ("*.invalidation"), Make_Ident ("cache.invalidation")));
+      Check (Matches_Channel (Make_Ident ("*"), Make_Ident ("any.channel")));
+      Check (not Matches_Channel (Make_Ident ("rag.*.indexed"), Make_Ident ("rag.doc1.deleted")));
       Subscribe (Broker, Make_Ident ("cache.invalidation"), Sub_Exact, Sub_Stat);
       Check (Sub_Stat = Status_Ok);
       Subscribe (Broker, Make_Ident ("cache.*"), Sub_Wild, Sub_Stat);
@@ -463,7 +465,7 @@ procedure Nhe_O_Main is
       end if;
       Poll_Message (Broker, Sub_Durable, Msg_Out, Msg_Found);
       Check (Msg_Found and then Equal_Text (Msg_Out.Payload, Make_Text ("doc_id=1")));
-      Print_Line ("  => Passed: Immediate PUBLISH, Owner_Tx guard, and WAL-Commit-Gated NOTIFY verified.");
+      Print_Line ("  => Passed: Immediate PUBLISH, * glob wildcards, Owner_Tx guard, and WAL-Commit-Gated NOTIFY verified.");
 
       --  10. Verify Universal Local LLM RAG & Hybrid SQL Query Executor (`Nhe_O.RAG`)
       Print_Line ("[10/11] Verifying Universal Local LLM RAG & Hybrid SQL Executor (Nhe_O.RAG)...");
@@ -471,7 +473,7 @@ procedure Nhe_O_Main is
       Delete_File_If_Exists (WAL_File);
       Init_RAG_Engine (RAG_Store, Dim => 3);
       Put_Field (Meta_Doc_1, Make_Ident ("lang"), Make_Text ("vi"), JSONB_String, Local_JSON_St);
-      Put_Field (Meta_Doc_1, Make_Ident ("model"), Make_Text ("qwen-3.8-35b-a3b"), JSONB_String, Local_JSON_St);
+      Put_Field (Meta_Doc_1, Make_Ident ("model"), Make_Text ("qwen-3.8-35b-a3b-instruct-long-metadata-value-for-rmet"), JSONB_String, Local_JSON_St);
       Put_Field (Meta_Doc_2, Make_Ident ("lang"), Make_Text ("vi"), JSONB_String, Local_JSON_St);
       Put_Field (Meta_RAG_Query, Make_Ident ("lang"), Make_Text ("vi"), JSONB_String, Local_JSON_St);
 
@@ -502,7 +504,7 @@ procedure Nhe_O_Main is
             Staging        => RAG_Staging,
             Doc_Id         => 1,
             Metadata       => Meta_Doc_1,
-            Summary_Text   => Make_Text ("Qwen 3.8 35B A3B local LLM hybrid RAG guide"),
+            Summary_Text   => Make_Text ("Qwen 3.8 35B A3B local LLM hybrid RAG guide with extended summary exceeding 79 inline bytes [TAIL_KEYWORD]"),
             Embedding      => Make_Vector_3D (1.0, 0.0, 0.0),
             Parent_Payload => Parent_Chunk_1,
             Parent_Length  => 6_000,
@@ -524,7 +526,7 @@ procedure Nhe_O_Main is
          Check (False);
       end if;
 
-      --  Ingest an aborted update to Doc_Id = 1 and verify MVCC prior-version + Rollback_RAG_Tx (R2-CRIT-01)
+      --  Ingest an aborted update to Doc_Id = 1 and verify MVCC prior-version + Rollback_RAG_Tx (R2-CRIT-01 / R3-HIGH-02)
       Begin_Tx (Next_Tx_Id, Tx_RAG_Aborted);
       if RAG_Store.Next_TOAST_Pg <= Max_Safe_TOAST_Page then
          Ingest_Document
@@ -608,7 +610,7 @@ procedure Nhe_O_Main is
          Status            => RAG_Status);
       Check (RAG_Status = Status_Ok and then RAG_Res.Count = 0);
 
-      --  Verify Recover_RAG_Engine from Primary Slotted Page 1 + TOAST chains + JSONB Metadata (CRIT-01 / R2-HIGH-03)
+      --  Verify Recover_RAG_Engine from Primary Slotted Page 1 + TOAST chains + lossless "RMET" Summary/JSONB Metadata (CRIT-01 / R2-HIGH-03 / R3-HIGH-04)
       Recover_RAG_Engine (RAG_Recovered, 3, DB_File, WAL_File, RAG_Status);
       Check (RAG_Status = Status_Ok and then RAG_Recovered.Doc_Count = 2);
       Execute_Hybrid_RAG_Query
@@ -619,16 +621,18 @@ procedure Nhe_O_Main is
          Query_Vec         => Make_Vector_3D (0.95, 0.05, 0.0),
          Encoding          => Encoding_Int8_SQ8,
          Use_Meta_Filter   => True,
-         Filter_Meta       => Meta_RAG_Query,
+         Filter_Meta       => Meta_Doc_1,
          Use_Keyword_Boost => True,
-         Keyword           => Make_Text ("Qwen"),
+         Keyword           => Make_Text ("TAIL_KEYWORD"),
          Top_K             => 2,
          Result            => RAG_Res,
          Top_Parent_Chunk  => Fetched_Chunk,
          Status            => RAG_Status);
-      Check (RAG_Status = Status_Ok and then RAG_Res.Count = 2 and then RAG_Res.Hits (1).Doc_Id = 1);
+      Check (RAG_Status = Status_Ok and then RAG_Res.Count = 1
+             and then RAG_Res.Hits (1).Doc_Id = 1 and then RAG_Res.Hits (1).Keyword_Match);
 
-      --  Verify R2-HIGH-01: durable Delete_Document + crash recovery
+      --  Verify R2-HIGH-01 & R3-HIGH-02: durable Delete_Document removes Doc_Id = 2 from HNSW/PK_Tree + crash recovery,
+      --  while historical snapshots (Tx_RAG.Id < Tx_RAG_Del.Id) still recall and rank Doc_Id = 2 even when Top_K = 1
       Begin_Tx (Next_Tx_Id, Tx_RAG_Del);
       Delete_Document (RAG_Store, Tx_RAG_Del, DB_File, WAL_File, Doc_Id => 2, Status => RAG_Status);
       Check (RAG_Status = Status_Ok and then RAG_Store.Doc_Count = 1);
@@ -636,6 +640,23 @@ procedure Nhe_O_Main is
       Commit_Tx (Tx_RAG_Del, DB_File, WAL_File, 1, Local_Slot_Buf, Local_Tx_Stat);
       Check (Local_Tx_Stat = Status_Ok);
       Set_CLOG_State (RAG_Store.CLOG, Tx_RAG_Del.Id, Tx_Committed);
+
+      Execute_Hybrid_RAG_Query
+        (Engine            => RAG_Store,
+         Snapshot          => Tx_RAG.Id,
+         DB_Path           => DB_File,
+         SQL_Query         => SQL_No_Space_1,
+         Query_Vec         => Make_Vector_3D (0.7, 0.7, 0.0),
+         Encoding          => Encoding_Float32,
+         Use_Meta_Filter   => False,
+         Filter_Meta       => Meta_RAG_Query,
+         Use_Keyword_Boost => False,
+         Keyword           => Make_Text (""),
+         Top_K             => 1,
+         Result            => RAG_Res,
+         Top_Parent_Chunk  => Fetched_Chunk,
+         Status            => RAG_Status);
+      Check (RAG_Status = Status_Ok and then RAG_Res.Count = 1 and then RAG_Res.Hits (1).Doc_Id = 2);
 
       Recover_RAG_Engine (RAG_Recovered, 3, DB_File, WAL_File, RAG_Status);
       Check (RAG_Status = Status_Ok and then RAG_Recovered.Doc_Count = 1);
@@ -645,7 +666,7 @@ procedure Nhe_O_Main is
       Unsubscribe (Broker, Sub_Durable);
       Delete_File_If_Exists (DB_File);
       Delete_File_If_Exists (WAL_File);
-      Print_Line ("  => Passed: Hybrid SQL + JSONB + Stage-2 TOAST Re-Rank + Durable Delete + Recovery verified.");
+      Print_Line ("  => Passed: Hybrid SQL + JSONB + RMET TOAST + Stage-2 Re-Rank + Durable Delete + Recovery verified.");
    end Verify_RAG_And_PubSub;
 
    --  11. C ABI / FFI SDK (`Nhe_O.C_API`) verification variables
@@ -680,9 +701,11 @@ begin
    end if;
    if Has_CLI_Arg1 and then not Equal_Text (CLI_Arg1, Make_Text ("--verify")) then
       Run_CLI_Command (CLI_Arg1, CLI_Handled);
-      if CLI_Handled then
-         return;
+      if not CLI_Handled then
+         Print_Line ("[CLI] Error: unrecognized CLI flag (expected --verify, --sql, --kv, or --rag-demo).");
+         Set_Exit_Failure;
       end if;
+      return;
    end if;
 
    Print_Line ("=====================================================================");
@@ -727,7 +750,9 @@ begin
    Analyze_SQL (SQL_Bad_Comment, SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Invalid_Syntax);
 
-   --  Verify R2-MED-01: whitespace-free comment/quote keywords and multi-statement rejection
+   --  Verify R2-MED-01 & R3-HIGH-05: whitespace-free comment/quote keywords, multi-statement rejection,
+   --  clause ordering, duplicate clause rejection, empty FROM rejection, non-numeric LIMIT rejection,
+   --  IF NOT EXISTS, and identifier/tx validation
    Analyze_SQL (SQL_No_Space_1, SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Ok and then SQL_Desc.Kind = Stmt_Select and then SQL_Desc.Limit_Value = 1);
    Analyze_SQL (SQL_No_Space_2, SQL_Desc, SQL_Status);
@@ -736,6 +761,25 @@ begin
    Check (SQL_Status = Status_Invalid_Syntax);
    Analyze_SQL (SQL_Lead_Semi, SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT , FROM docs;"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs LIMIT 5 WHERE x = 1;"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs WHERE x = 1 WHERE y = 2;"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs WHERE x = 1 ORDER BY id WHERE y = 2;"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT id FROM WHERE x = 1;"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs LIMIT abc;"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT id FROM 12345;"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("BEGIN DROP TABLE docs;"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("CREATE TABLE IF NOT EXISTS docs (id BIGINT, emb VECTOR(4096));"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Kind = Stmt_Create_Table
+          and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("docs")));
 
    Resolve_Pg_Type (Make_Ident ("JSONB"), Resolved_T, Type_Valid);
    Check (Type_Valid and then Resolved_T = Pg_JSONB);
@@ -747,7 +791,7 @@ begin
    Check (not Type_Valid);
    Resolve_Pg_Type (Make_Ident ("NUMERIC(10,2)"), Resolved_T, Type_Valid);
    Check (Type_Valid and then Resolved_T = Pg_Numeric);
-   Print_Line ("  => Passed: PostgreSQL SELECT/DDL, comment/quote sanitization, and VECTOR(1..4096) verified.");
+   Print_Line ("  => Passed: PostgreSQL SELECT/DDL, clause grammar, and VECTOR(1..4096) verified.");
 
    --  2. Verify Vector Similarity & 4096-D Int8 / Binary Quantization (`ADR-003`)
    Print_Line ("[2/11] Verifying 4096-D Vector Engine & Int8/Binary Quantization (Nhe_O.Vector)...");
@@ -780,7 +824,7 @@ begin
    Check (Deq_Vec_Sat.Elements (1) >= Max_Component - 1.0
           and then Deq_Vec_Sat.Elements (2) <= -Max_Component + 1.0);
 
-   --  Verify 4096-D Float32 TOAST serialization round-trip with "VTST" header & sub-micro precision (Q-003 / R2-HIGH-02)
+   --  Verify 4096-D Float32 TOAST serialization round-trip with "VTST" header & 15-tier precision (Q-003 / R2-HIGH-02 / R3-MED-02)
    Encode_Vector_TOAST (Vec_4096_A, Vec_Toast_Buf, Vec_Toast_Len);
    Check (Vec_Toast_Len = Vector_TOAST_Byte_Length (4096));
    Decode_Vector_TOAST (Vec_Toast_Buf, Vec_Toast_Len, 4096, Vec_Dec_4096, Vec_Dec_Ok);
@@ -788,10 +832,13 @@ begin
    Check (abs (Vec_Dec_4096.Elements (1) - 1.0) < 0.0001
           and then abs (Vec_Dec_4096.Elements (2048) - (-1.0)) < 0.0001);
 
-   Encode_Vector_TOAST (Vec_Small, Vec_Toast_Buf, Vec_Toast_Len);
+   Encode_Vector_TOAST (Make_Vector_3D (1.0e-7, 1.234567e-6, -9.876543e-4), Vec_Toast_Buf, Vec_Toast_Len);
    Check (Vec_Toast_Len = Vector_TOAST_Byte_Length (3));
    Decode_Vector_TOAST (Vec_Toast_Buf, Vec_Toast_Len, 3, Vec_Dec_Small, Vec_Dec_Ok);
-   Check (Vec_Dec_Ok and then abs (Vec_Dec_Small.Elements (1) - 1.0e-7) < 1.0e-9);
+   Check (Vec_Dec_Ok
+          and then abs (Vec_Dec_Small.Elements (1) - 1.0e-7) < 1.0e-9
+          and then abs (Vec_Dec_Small.Elements (2) - 1.234567e-6) < 1.0e-11
+          and then abs (Vec_Dec_Small.Elements (3) - (-9.876543e-4)) < 1.0e-8);
    Decode_Vector_TOAST (Vec_Toast_Buf, Vec_Toast_Len, 4, Vec_Dec_Small, Vec_Dec_Ok);
    Check (not Vec_Dec_Ok);
 
@@ -800,7 +847,7 @@ begin
    Ham_Dist := Hamming_Distance (Q_Bin_A, Q_Bin_B);
    Check (Ham_Dist = 2);
    Check (Hamming_Distance (Q_Bin_A, Q_Bin_A) = 0);
-   Print_Line ("  => Passed: 4096-D Float32, SQ8 scale-aware L2, Binary Hamming, and Vector TOAST verified.");
+   Print_Line ("  => Passed: 4096-D Float32, SQ8 scale-aware L2, Binary Hamming, and 15-tier Vector TOAST verified.");
 
    --  3. Verify PostgreSQL JSON / JSONB Engine (`->`, `->>`, `@>`, `?`)
    Print_Line ("[3/11] Verifying PostgreSQL JSON/JSONB Engine (Nhe_O.JSON)...");
@@ -831,6 +878,17 @@ begin
    Parse_JSONB (Make_Text ("{""a"":1,,""b"":2}"), Doc_Parsed, JSON_Stat);
    Check (JSON_Stat = Status_Invalid_Syntax);
 
+   --  Verify R3-MED-01: RFC 8259 escape decoding (including \uXXXX) and canonical number/multi-level nested @> containment
+   Parse_JSONB (Make_Text ("{""msg"":""a\nb\u0041"", ""num"":1.0, ""sub"":{""nested"":{""y"":2,""x"":1}}, ""arr"":[{""k"":1.0,""m"":2}]}"), Doc_Parsed, JSON_Stat);
+   Check (JSON_Stat = Status_Ok);
+   Parse_JSONB (Make_Text ("{""msg"":""anbA""}"), Doc_Filter, JSON_Stat);
+   Check (JSON_Stat = Status_Ok and then not Contains (Doc_Parsed, Doc_Filter));
+   Parse_JSONB (Make_Text ("{""msg"":""a\nbu0041""}"), Doc_Filter, JSON_Stat);
+   Check (JSON_Stat = Status_Ok and then not Contains (Doc_Parsed, Doc_Filter));
+   Parse_JSONB (Make_Text ("{""msg"":""a\nbA"", ""num"":1, ""sub"":{""nested"":{""x"":1}}, ""arr"":[{""m"":2,""k"":1}]}"), Doc_Filter, JSON_Stat);
+   Check (JSON_Stat = Status_Ok and then Contains (Doc_Parsed, Doc_Filter));
+
+   Doc_Filter := (others => <>);
    Put_Field (Doc_Main, Make_Ident ("bad_num"), Make_Text ("not_a_number"), JSONB_Number, JSON_Stat);
    Check (JSON_Stat = Status_Invalid_Syntax);
 
@@ -846,7 +904,7 @@ begin
    Get_Field_Text (Doc_Main, Make_Ident ("engine"), Field_Hit, Field_Val);
    Check (Field_Hit and then Equal_Text (Field_Val, Make_Text ("Nhe_O")));
    Check (Contains (Doc_Main, Doc_Filter));
-   Print_Line ("  => Passed: RFC 8259 JSON validator, Parse_JSONB, and `?`, `->`, `->>`, `@>` verified.");
+   Print_Line ("  => Passed: RFC 8259 JSON validator, escape decoding, and `?`, `->`, `->>`, `@>` verified.");
 
    --  4. Verify ACID MVCC Visibility, CLOG, Slotted Page & Disk WAL/Page Persistence
    Print_Line ("[4/11] Verifying ACID Transactions, CLOG MVCC, Slotted Page & WAL I/O...");
@@ -857,8 +915,11 @@ begin
    Tuple_1 := (Xmin => Tx_1.Id, Xmax => 0);
    Check (Is_Tuple_Visible (Tuple_1, Tx_1.Snapshot));
 
-   --  Verify CLOG rejects uncommitted/aborted tuple and out-of-range Tx_Id (CRIT-04 / R2-CRIT-01)
+   --  Verify CLOG rejects uncommitted/aborted tuple and supports Tx_Id > 1024 up to 8192 (CRIT-04 / R2-CRIT-01 / R3-CRIT-01)
    Check (not Is_Tx_Committed (CLOG_Test, 2000));
+   Set_CLOG_State (CLOG_Test, 2000, Tx_Committed);
+   Check (Is_Tx_Committed (CLOG_Test, 2000));
+   Set_CLOG_State (CLOG_Test, 2000, Tx_Idle);
    Begin_Tx (Next_Tx, Tx_Uncomm);
    Tuple_Uncomm := (Xmin => Tx_1.Id, Xmax => 0);
    Check (not Is_Tuple_Visible (Tuple_Uncomm, Tx_Uncomm.Snapshot, CLOG_Test));
@@ -905,7 +966,7 @@ begin
    NUL_Path.Data (6) := ASCII.NUL;
    Write_Page (NUL_Path, 0, Page_Out, NUL_Write_Ok);
    Check (not NUL_Write_Ok);
-   Print_Line ("  => Passed: CLOG MVCC visibility, 4KB Slotted_Page, and positional WAL I/O verified.");
+   Print_Line ("  => Passed: 8192-entry CLOG MVCC visibility, 4KB Slotted_Page, and positional WAL I/O verified.");
 
    --  5. Verify 4KB TOAST Overflow Page Chains, NO-STEAL & 2-Pass Committed-Only WAL Recovery (`CRIT-05` / `R2-CRIT-01`)
    Print_Line ("[5/11] Verifying 4KB TOAST Overflow Page Chains, NO-STEAL & 2-Pass WAL Recovery...");
@@ -1015,11 +1076,19 @@ begin
    Check (BTree_Scan.Items (1).Key = Big_Key_Base + 30
           and then BTree_Scan.Items (10).Key = Big_Key_Base + 120);
 
-   --  Verify R2-MED-04: Delete_Key removes key and decrements Total_Keys
+   --  Verify R2-MED-04 & R3-MED-03: Delete_Key removes key, decrements Total_Keys, and compacts underflowed leaves
    Delete_Key (Tree_Idx, Big_Key_Base + 50, BTree_Del_Ok);
    Check (BTree_Del_Ok and then Tree_Idx.Total_Keys = 19);
    Search_Key (Tree_Idx, Big_Key_Base + 50, BTree_Hit, BTree_Ptr);
    Check (not BTree_Hit);
+   Delete_Key (Tree_Idx, Big_Key_Base + 60, BTree_Del_Ok);
+   Check (BTree_Del_Ok and then Tree_Idx.Total_Keys = 18);
+   Insert_Key
+     (Tree   => Tree_Idx,
+      Key    => Big_Key_Base + 50,
+      Ptr    => (Target_Page => 5, Target_Slot => 5, TOAST_Root => 105),
+      Status => BTree_Stat);
+   Check (BTree_Stat = Status_Ok and then Tree_Idx.Total_Keys = 19);
 
    Encode_Node_Page (Tree_Idx.Nodes (Tree_Idx.Root_Node), BTree_Page);
    Decode_Node_Page (BTree_Page, BTree_Dec_Nd, BTree_Dec_Ok);
@@ -1030,7 +1099,7 @@ begin
    BTree_Page (25) := BTree_Page (25) xor 16#FF#;
    Decode_Node_Page (BTree_Page, BTree_Dec_Nd, BTree_Dec_Ok);
    Check (not BTree_Dec_Ok);
-   Print_Line ("  => Passed: 20-key multi-level B+Tree splits, Delete_Key, 64-bit keys, and CRC32 page verified.");
+   Print_Line ("  => Passed: 20-key multi-level B+Tree splits, Delete_Key compaction, 64-bit keys, and CRC32 page verified.");
 
    --  7. Verify Multi-Layer HNSW Graph Index (`Nhe_O.HNSW`)
    Print_Line ("[7/11] Verifying Multi-Layer HNSW Vector Graph Index (Nhe_O.HNSW)...");
@@ -1060,6 +1129,12 @@ begin
    end loop;
    Check (Graph_Idx.Node_Count = 10);
 
+   --  Verify R3-HIGH-02 / R3-MED-04: Remove_Vector deactivates and trims trailing node
+   Remove_Vector (Graph_Idx, Doc_Id => 10);
+   Check (Graph_Idx.Node_Count = 9 and then Has_HNSW_Capacity (Graph_Idx, 10));
+   Insert_Vector (Graph_Idx, Doc_Id => 10, Vec => Make_Vector_3D (0.0, 10.0, 10.0), TOAST_Root => 20, Layer_Hint => 1, Status => HNSW_Stat);
+   Check (HNSW_Stat = Status_Ok and then Graph_Idx.Node_Count = 10);
+
    Search_KNN (Graph_Idx, Make_Vector_3D (1.0, 0.0, 0.0), Encoding_Float32, K => 2, Results => KNN_Float_Res);
    Check (KNN_Float_Res.Count = 2 and then KNN_Float_Res.Items (1).Doc_Id = 1);
 
@@ -1068,9 +1143,9 @@ begin
 
    Search_KNN (Graph_Idx, Make_Vector_3D (1.0, 0.0, 0.0), Encoding_Binary_1Bit, K => 2, Results => KNN_Bin_Res);
    Check (KNN_Bin_Res.Count = 2 and then KNN_Bin_Res.Items (1).Doc_Id in 1 .. 2);
-   Print_Line ("  => Passed: 10-node HNSW graph, Doc_Id dedup, and Float32/Int8-SQ8/Binary recall verified.");
+   Print_Line ("  => Passed: 10-node HNSW graph, Remove_Vector, Doc_Id dedup, and Float32/Int8-SQ8/Binary recall verified.");
 
-   --  8. Verify Redis-Compatible Key-Value Cache, TTL & WAL Persistence (`Q-004` / `R2-HIGH-05`)
+   --  8. Verify Redis-Compatible Key-Value Cache, TTL & WAL Persistence (`Q-004` / `R2-HIGH-05` / `R3-HIGH-03`)
    Print_Line ("[8/11] Verifying Redis-Compatible Key-Value Cache, TTL & WAL Recovery (Nhe_O.KV)...");
    Delete_File_If_Exists (KV_WAL_File);
    Set (Cache, Make_Ident ("session:42"), Make_Text ("user_long"), Now => 1000, Has_TTL => True, TTL_Sec => 60);
@@ -1091,13 +1166,19 @@ begin
    Del (Cache, Make_Ident ("metrics:hits"), KV_Removed);
    Check (KV_Removed);
 
-   --  Verify optional WAL-backed KV durability and truncation detection (Q-004 / R2-HIGH-05)
+   --  Verify optional WAL-backed KV durability, rollback on I/O error, and truncation detection (Q-004 / R2-HIGH-05 / R3-HIGH-03)
+   Set_Durable (Cache, NUL_Path, 1, Make_Ident ("bad:wal"), Make_Text ("should_rollback"), 2000, False, 0, KV_Status);
+   Check (KV_Status = Status_IO_Error and then not Exists (Cache, Make_Ident ("bad:wal"), Now => 2000));
+
    Set_Durable (Cache, KV_WAL_File, 1, Make_Ident ("durable:k1"), Make_Text ("v1"), 2000, True, 500, KV_Status);
    Check (KV_Status = Status_Ok);
    Set_Durable (Cache, KV_WAL_File, 2, Make_Ident ("durable:k2"), Make_Text ("v2"), 2000, False, 0, KV_Status);
    Check (KV_Status = Status_Ok);
    Del_Durable (Cache, KV_WAL_File, 3, Make_Ident ("durable:k2"), KV_Removed, KV_Status);
    Check (KV_Removed and then KV_Status = Status_Ok);
+   --  Deleting a non-existent key does not append a redundant WAL frame (R3-HIGH-03)
+   Del_Durable (Cache, KV_WAL_File, 4, Make_Ident ("durable:missing"), KV_Removed, KV_Status);
+   Check (not KV_Removed and then KV_Status = Status_Ok);
 
    Recover_KV_From_WAL (Cache_Rec, KV_WAL_File, 2100, 2, KV_Rec_Cnt, KV_Status);
    Check (KV_Status = Status_Capacity_Exceeded);
@@ -1108,7 +1189,7 @@ begin
    Check (KV_Status = Status_Ok and then Equal_Text (KV_Val, Make_Text ("v1")));
    Check (not Exists (Cache_Rec, Make_Ident ("durable:k2"), Now => 2100));
    Delete_File_If_Exists (KV_WAL_File);
-   Print_Line ("  => Passed: Redis SETEX, GET, DEL, TTL, INCRBY, and KV WAL recovery/truncation guard verified.");
+   Print_Line ("  => Passed: Redis SETEX, GET, DEL, TTL, INCRBY, WAL-before-Data rollback, and KV WAL recovery verified.");
 
    --  9 & 10. Verify Dual-Mode Pub/Sub & Universal Local LLM RAG
    Verify_RAG_And_PubSub (Next_Tx);

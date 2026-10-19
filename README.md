@@ -20,9 +20,36 @@
 7. **Dual-Mode Pub/Sub Messaging**: Bounded ring-buffer broker supporting `PUBLISH`, `SUBSCRIBE`, `UNSUBSCRIBE`, wildcard pattern subscriptions (`*`), and PostgreSQL-style `DURABLE` WAL-committed notification dispatch (`LISTEN`/`NOTIFY`).
 8. **Universal Local LLM Hybrid RAG & C/Python SDK**: Single-pass execution combining B+Tree PK lookup, HNSW ANN vector search, JSONB metadata pre-filtering (`@>`), lexical keyword boosting, TOAST chunk retrieval, and 1-hop GraphRAG expansion — exposed via a formally verified C ABI (`include/nhe_o.h`, `lib/libnhe_o.so`) and Python `ctypes` SDK (`bindings/python/nhe_o.py`).
 9. **100% SPARK Verification Mandate (`BR-001` / `ADR-002` / `ADR-005`)**:
-   - **100% of specifications, bodies, and entrypoints** (all 26 files across 14 units in `src/`) operate under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)`.
-   - **2,863 / 2,863 Formal Checks Proved (100% SPARK Stone, Bronze, Silver & Gold Contracts)**: Verified by `gnatprove 16.1.0` (`Why3` + `Z3` + `cvc5` + `Alt-Ergo`) with `0 unproved` checks and `0 warnings`.
-   - **Contract-Bound POSIX I/O (`src/nhe_o-io.adb`)**: Physical disk operations bypass exception-raising `Ada.Streams.Stream_IO` and bind directly in `SPARK_Mode (On)` to atomic POSIX kernel syscalls (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `close`, `unlink`).
+   - **100% of specifications, bodies, and entrypoints** (all 26 files across 14 units in `src/`) operate under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)` and zero `pragma Assume` statements.
+   - **3,776 / 3,776 Formal Checks Proved (100% SPARK Stone, Bronze, Silver & Gold Contracts)**: Verified by `gnatprove 16.1.0` (`Why3` + `Z3` + `cvc5` + `Alt-Ergo`) with `0 unproved` checks, `0 justified` checks, and `0 warnings` (max proof time `1s`).
+   - **Contract-Bound POSIX I/O (`src/nhe_o-io.adb`)**: Physical disk operations bypass exception-raising `Ada.Streams.Stream_IO` and bind directly in `SPARK_Mode (On)` to atomic POSIX kernel syscalls (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `close`, `unlink`, `access`).
+
+---
+
+## SPARK Formal Verification Levels (Stone → Platinum)
+
+Evaluated across all **14 compilation units (26 `.ads`/`.adb` files)** in `src/` via `gnatprove -P nhe_o.gpr --mode=all --level=2`:
+
+| SPARK Level | Assurance Objective | Coverage / Proved % | Proved Checks (`gnatprove`) | Details |
+|---|---|---|---|---|
+| **Stone** | Valid SPARK 2022 Subset (`SPARK_Mode (On)`) | **100.0%** (`26 / 26` files) | `14 / 14` units (`254 / 254` Ada subprograms/packages + `10` POSIX C syscall bindings) | Zero `SPARK_Mode (Off)` anywhere in `src/` (`BR-001`). |
+| **Bronze** | Initialization & Correct Data Flow (`--mode=flow`) | **100.0%** | **`1,267 / 1,267`** (`0 unproved`) | `165` Data Dependencies, `883` Initialization, `2` Non-Aliasing, `217` Flow Termination. |
+| **Silver** | Absence of Run-Time Errors (AoRTE) & Termination | **100.0%** | **`1,348 / 1,348`** prover checks (`2,615 / 2,615` incl. Bronze) | `1,314` Run-time Checks (overflow, range, index, division, discriminant) + `34` Prover Termination checks (`0` `pragma Assume`). |
+| **Gold** | Proof of Key Integrity Properties & Functional Contracts | **100.0%** of specified contracts | **`1,161 / 1,161`** prover checks (`3,776 / 3,776` cumulative) | `732` Functional Contracts (`Pre`/`Post`) + `429` Inductive Loop Invariants & Assertions (`0 unproved`, `0 justified`). |
+| **Platinum** | Full Functional Equivalence & Complete Ghost Model Proof | **~35%** *(Scoped to Core Invariants)* | Proven on core state machines; full Ghost relational model planned for Epic 05+ | Proves `CLOG` state machine, `BTree.Total_Keys` conservation, `KV` `WAL-before-Data` rollback (`Store = Store'Old`), and C ABI defensive bounds. |
+
+### `gnatprove` Check Breakdown (`3,776 / 3,776` Total — `0 Unproved`, `0 Warnings`)
+
+| Category | Total | Flow Analysis | SMT Provers (`cvc5`, `Z3`, `Alt-Ergo`) | Justified | Unproved |
+|---|---:|---:|---:|---:|---:|
+| Data Dependencies | `165` | `165` | — | `0` | `0` |
+| Initialization | `883` | `883` | — | `0` | `0` |
+| Non-Aliasing | `2` | `2` | — | `0` | `0` |
+| Run-time Checks (AoRTE) | `1,314` | — | `1,314` (`cvc5` 79%, `Z3` 17%, `Trivial` 3%, `Alt-Ergo` 1%) | `0` | `0` |
+| Assertions & Loop Invariants | `429` | — | `429` (`cvc5` 92%, `Z3` 8%) | `0` | `0` |
+| Functional Contracts (`Pre`/`Post`) | `732` | — | `732` (`cvc5` 88%, `Z3` 9%, `Trivial` 3%) | `0` | `0` |
+| Termination | `251` | `217` | `34` (`cvc5` 100%) | `0` | `0` |
+| **Total** | **`3,776`** | **`1,267` (34%)** | **`2,509` (66%)** | **`0`** | **`0`** |
 
 ---
 
@@ -44,7 +71,7 @@ Following professional Ada Quality & Style Guide (`Mixed_Case_With_Underscores` 
 | `Nhe_O.SQL` | `src/nhe_o-sql.ad[sb]` | `SPARK_Mode (On)` | PostgreSQL SQL dialect tokenizer, parser, and statement classifier |
 | `Nhe_O.RAG` | `src/nhe_o-rag.ad[sb]` | `SPARK_Mode (On)` | Universal Local LLM Hybrid RAG & 1-hop GraphRAG query executor |
 | `Nhe_O.C_API` | `src/nhe_o-c_api.ad[sb]` | `SPARK_Mode (On)` | Precondition-free defensive C ABI / FFI boundary (`include/nhe_o.h`, `lib/libnhe_o.so`) |
-| `Nhe_O.IO` | `src/nhe_o-io.ad[sb]` | `SPARK_Mode (On)` | Contract-bound POSIX syscall I/O (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `close`, `unlink`) |
+| `Nhe_O.IO` | `src/nhe_o-io.ad[sb]` | `SPARK_Mode (On)` | Contract-bound POSIX syscall I/O (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `close`, `unlink`, `access`) |
 | `Nhe_O_Main` | `src/nhe_o_main.adb` | `SPARK_Mode (On)` | 11-suite verification harness and interactive CLI (`--verify`, `--sql`, `--kv`, `--rag-demo`) |
 
 ---
@@ -67,7 +94,7 @@ alr run
 gprbuild -P nhe_o_lib.gpr
 python3 bindings/python/nhe_o.py
 
-# 4. Run formal SPARK verification (2,863 / 2,863 checks proved — 0 unproved)
+# 4. Run formal SPARK verification (3,776 / 3,776 checks proved — 0 unproved)
 gnatprove -P nhe_o.gpr --mode=all --level=2 -j24
 ```
 

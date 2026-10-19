@@ -13,18 +13,18 @@ Defined in `src/nhe_o-io.ads` (`WAL_Header_Size = 24`, `WAL_Frame_Size = 4120`) 
 | Byte Offset (1-indexed) | Size | Field | Description |
 |---|---|---|---|
 | `1 .. 4` | 4 B | `Magic` | ASCII `"NHEO"` (`16#4E#, 16#48#, 16#45#, 16#4F#`) |
-| `5 .. 8` | 4 B | `Tx_Id` | `Valid_Tx_Id` (`1 .. 1_000_000_000`) |
+| `5 .. 8` | 4 B | `Tx_Id` | `Valid_Tx_Id` (`1 .. 8192`, `Max_Tx_Id = Max_CLOG_Entries`, `R3-CRIT-01`) |
 | `9 .. 12` | 4 B | `Page_Id` | Target 4KB page index (`Valid_Page_Id`, `0 .. 1_048_575`) |
 | `13 .. 16` | 4 B | `CRC32` | IEEE 802.3 CRC-32 (`Compute_WAL_CRC32`) over `Tx_Id (4B)`, `Page_Id (4B)`, `Frame_Kind (1B)`, and `Page_Payload (4096B)` |
 | `17` | 1 B | `Frame_Kind` | `0 = WAL_Frame_Data`, `1 = WAL_Frame_Commit`, `2 = WAL_Frame_KV` (`CRIT-05`, `Q-004`) |
 | `18 .. 24` | 7 B | `Reserved` | Zero-filled (`0`, verified by `Verify_WAL_Frame`) |
 | `25 .. 4120` | 4096 B | `Page_Payload` | Complete 4096-byte page image |
 
-- **NO-STEAL Write Rule (`Write_TOAST_Chain`, `Ingest_Document`, `Delete_Document`, `Commit_Tx`, `R2-CRIT-01`)**:
+- **NO-STEAL Write & Pre-Commit Verification Rule (`Write_TOAST_Chain`, `Ingest_Document`, `Delete_Document`, `Commit_Tx`, `R2-CRIT-01`, `R3-CRIT-02`)**:
   - Active transactions (`Tx_Active`) append `WAL_Frame_Data` frames to `.wal` without mutating `.db` in-place.
-  - `Commit_Tx` first appends the `WAL_Frame_Commit` barrier frame to `.wal`, then materializes all `WAL_Frame_Data` frames belonging to `Ctx.Id` and the final committed page to `.db`.
-- **2-Pass Recovery Rule (`Redo_WAL_Recovery`, `CRIT-05`)**:
-  - **Pass 1 (Analysis)**: Scans sequential frames `0 .. Max_Frames - 1`, verifies `Verify_WAL_Frame`, and marks `CLOG (Tx_Id) := Tx_Committed` iff `Frame_Kind = WAL_Frame_Commit`.
+  - `Commit_Tx` first pre-scans existing `.wal` frames up to `Max_WAL_Scan_Frames = 4096`, verifying `Verify_WAL_Frame` (CRC32 + `"NHEO"` magic) and `Hit_EOF` before appending `WAL_Frame_Commit`, then materializes all `WAL_Frame_Data` frames belonging to `Ctx.Id` and the final committed page to `.db`.
+- **2-Pass Recovery Rule (`Redo_WAL_Recovery`, `CRIT-05`, `R3-CRIT-01`)**:
+  - **Pass 1 (Analysis)**: Scans sequential frames `0 .. Max_Frames - 1` (up to `Max_WAL_Scan_Frames = 4096`), verifies `Verify_WAL_Frame`, and marks `CLOG (Tx_Id) := Tx_Committed` iff `Frame_Kind = WAL_Frame_Commit`.
   - **Pass 2 (Redo)**: Replays `WAL_Frame_Data` and `WAL_Frame_Commit` pages to `.db` iff `Is_Tx_Committed (CLOG, Tx_Id)`.
 
 ---
@@ -46,20 +46,21 @@ Defined in `src/nhe_o-transaction.ad[sb]` (`Encode_Slotted_Page` / `Decode_Slott
 | `153 .. 3992` | 3840 B | `Tuples (1..16)` | Sixteen 240-byte tuple cells (`Row_Id: 4B`, `Xmin: 4B`, `Xmax: 4B`, `Related_Id: 4B`, `TOAST_Pointer: 16B`, `Inline_Data: 208B`) |
 | `3993 .. 4096` | 104 B | `Reserved_Tail` | Zero-padded free space |
 
-### 2.1 RAG Tuple `Inline_Data (1 .. 208)` Layout (`Build_RAG_Slotted_Page`, `R2-HIGH-03`)
+### 2.1 RAG Tuple `Inline_Data (1 .. 208)` Layout (`Build_RAG_Slotted_Page`, `R2-HIGH-03`, `R3-HIGH-04`)
 | Inline Offset | Size | Field | Description |
 |---|---|---|---|
 | `1 .. 16` | 16 B | `Vec_Toast_Ptr` | Inline 16-byte `TOAST_Pointer` to the `"VTST"` 4096-D `Float32` vector TOAST chain |
-| `17` | 1 B | `Summary_Len` | Exact byte length of `Summary_Text` (`0 .. 79`) |
-| `18 .. 96` | 79 B | `Summary_Text` | Up to 79 bytes of document summary text (`17 + 1 .. 17 + Summary_Len`) |
-| `97` | 1 B | `Meta_Count` | Number of serialized `JSONB_Document` fields (`0 .. 16`) |
-| `98 .. 208` | 111 B | `Packed_JSONB` | Sequential `[Key_Len: 1B (1..24), Val_Len: 1B (0..32), Kind_Code: 1B, Key_Bytes, Val_Bytes]` entries |
+| `17` | 1 B | `Summary_Len` | Inline byte length of `Summary_Text` (`0 .. 63`) |
+| `18 .. 80` | 63 B | `Summary_Text` | Up to 63 inline fast-path bytes of document summary text (`17 + 1 .. 17 + Summary_Len`) |
+| `81 .. 96` | 16 B | `Meta_Toast_Ptr` | Inline 16-byte `TOAST_Pointer` to the `"RMET"` extended summary (`> 63 B`) & JSONB metadata TOAST chain (`R3-HIGH-04`, zeroed when inline-only) |
+| `97` | 1 B | `Meta_Count` | `0 .. 16` inline fast-path `JSONB_Document` fields |
+| `98 .. 208` | 111 B | `Packed_JSONB` | Sequential `[Key_Len: 1B (1..64), Val_Len: 1B (0..108), Kind_Code: 1B, Key_Bytes, Val_Bytes]` inline fast-path entries |
 
 ---
 
-## 3. Inline 16-Byte TOAST Pointer, 4096-Byte `"TOAS"` Page & `"VTST"` Vector Payload
+## 3. Inline 16-Byte TOAST Pointer, 4096-Byte `"TOAS"` Page, `"VTST"` Vector & `"RMET"` Metadata Payloads
 
-Defined in `src/nhe_o-transaction.ad[sb]` (`Encode_TOAST_Pointer`, `Decode_TOAST_Pointer`, `Write_TOAST_Chain`, `Read_TOAST_Chain`, `BR-006`) and `src/nhe_o-vector.ad[sb]` (`Encode_Vector_TOAST`, `Decode_Vector_TOAST`, `R2-HIGH-02`).
+Defined in `src/nhe_o-transaction.ad[sb]` (`Encode_TOAST_Pointer`, `Decode_TOAST_Pointer`, `Write_TOAST_Chain`, `Read_TOAST_Chain`, `BR-006`), `src/nhe_o-vector.ad[sb]` (`Encode_Vector_TOAST`, `Decode_Vector_TOAST`, `R2-HIGH-02`, `R3-MED-02`), and `src/nhe_o-rag.adb` (`Encode_Meta_TOAST`, `Decode_Meta_TOAST`, `R3-HIGH-04`).
 
 ### 3.1 16-Byte Inline `TOAST_Pointer`
 | Byte Offset | Size | Field | Invariant |
@@ -76,14 +77,23 @@ Defined in `src/nhe_o-transaction.ad[sb]` (`Encode_TOAST_Pointer`, `Decode_TOAST
 | `5 .. 8` | 4 B | `Next_Page_Id` | Next overflow page ID (`0` on terminal chunk) |
 | `9 .. 12` | 4 B | `Chunk_Bytes` | Active payload bytes in this page (`1 .. 4080`) |
 | `13 .. 16` | 4 B | `Chunk_CRC32` | IEEE 802.3 CRC-32 over payload bytes `17 .. 16 + Chunk_Bytes` |
-| `17 .. 4096` | 4080 B | `Chunk_Data` | Raw slice of oversized parent chunk or `"VTST"` 4096-D `Float32` vector |
+| `17 .. 4096` | 4080 B | `Chunk_Data` | Raw slice of oversized parent chunk, `"VTST"` 4096-D `Float32` vector, or `"RMET"` extended summary/JSONB metadata |
 
-### 3.3 `"VTST"` Vector TOAST Payload (`Encode_Vector_TOAST`, `R2-HIGH-02`)
+### 3.3 `"VTST"` Vector TOAST Payload (`Encode_Vector_TOAST`, `R2-HIGH-02`, `R3-MED-02`)
 | Byte Offset | Size | Field | Description |
 |---|---|---|---|
 | `1 .. 4` | 4 B | `Magic` | ASCII `"VTST"` (`16#56#, 16#54#, 16#53#, 16#54#`) |
 | `5 .. 8` | 4 B | `Dim` | Embedding dimension (`1 .. 4096`, 32-bit Big-Endian) |
-| `9 .. 8 + Dim*4` | `Dim * 4` B | `Elements (1..Dim)` | 32-bit Big-Endian tiered scientific Float32 words (`Encode_Vector_TOAST` / `Decode_Vector_TOAST`: `Bit 31 = Sign`, `Bits 27..30 = Exp_Code 0..7`, `Bits 0..26 = Mantissa 0..10^8`) |
+| `9 .. 8 + Dim*4` | `Dim * 4` B | `Elements (1..Dim)` | 32-bit Big-Endian 15-tier scientific Float32 words (`Encode_Vector_TOAST` / `Decode_Vector_TOAST`: `Bit 31 = Sign`, `Bits 27..30 = Exp_Code 0..14` stepping by $10^1$ per tier from $10^5$ down to $10^{-8}$ with `14 = 0.0`, `Bits 0..26 = Mantissa 0..10^8` retaining 7–8 significant decimal digits across all magnitudes) |
+
+### 3.4 `"RMET"` Extended Summary & JSONB Metadata TOAST Payload (`Encode_Meta_TOAST`, `R3-HIGH-04`)
+| Byte Offset | Size | Field | Description |
+|---|---|---|---|
+| `1 .. 4` | 4 B | `Magic` | ASCII `"RMET"` (`16#52#, 16#4D#, 16#45#, 16#54#`) |
+| `5 .. 6` | 2 B | `Summary_Length` | Exact byte length of full `Summary_Text` (`0 .. 512`, 16-bit Big-Endian) |
+| `7 .. 6 + Summary_Length` | `0 .. 512` B | `Summary_Bytes` | Full `Summary_Text` (`Bounded_Text.Data (1 .. Summary_Length)`) |
+| `7 + Summary_Length` | 1 B | `Meta_Count` | Number of active `JSONB_Document` fields (`0 .. 16`) |
+| `8 + Summary_Length .. Total` | Variable | `JSONB_Entries` | `Meta_Count` sequential entries: `[Key_Len: 1B (1..64), Val_Len_Hi: 1B, Val_Len_Lo: 1B (0..512), Kind_Code: 1B, Key_Bytes (1..Key_Len), Val_Bytes (1..Val_Len)]` |
 
 ---
 

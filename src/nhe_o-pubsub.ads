@@ -58,7 +58,8 @@ package Nhe_O.PubSub is
       Items    : Staged_Notify_Array := [others => (others => <>)];
    end record;
 
-   --  Match exact channel or trailing '*' prefix wildcard (e.g. "events.*")
+   --  Match exact channel or glob '*' wildcard pattern at any position
+   --  (e.g., "*", "events.*", "*.error", "rag.*.indexed"; R3-MED-05)
    function Matches_Channel
      (Pattern : Bounded_Ident;
       Channel : Bounded_Ident) return Boolean

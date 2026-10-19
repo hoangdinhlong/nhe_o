@@ -20,9 +20,7 @@ package body Nhe_O.Transaction is
       State : in     Tx_State)
    is
    begin
-      if Id <= Max_CLOG_Entries then
-         CLOG (Id) := State;
-      end if;
+      CLOG (Id) := State;
    end Set_CLOG_State;
 
    procedure Put_U32_BE
@@ -255,24 +253,80 @@ package body Nhe_O.Transaction is
       Page     : in     Page_Buffer;
       Status   :    out Engine_Status)
    is
-      Max_Commit_Scan : constant := 256;
-      Checksum        : Unsigned_32;
+      Checksum     : Unsigned_32;
       pragma Warnings (Off, Checksum);
-      Frame           : WAL_Frame_Buffer;
-      Scan_Frame      : WAL_Frame_Buffer;
-      Scan_Page       : Page_Buffer;
-      Scan_Tx         : Valid_Tx_Id;
-      Scan_Pg         : Valid_Page_Id;
-      WAL_Ok          : Boolean;
-      Page_Ok         : Boolean;
-      Scan_Ok         : Boolean;
-      Scan_EOF        : Boolean;
+      Frame        : WAL_Frame_Buffer;
+      Scan_Frame   : WAL_Frame_Buffer;
+      Scan_Page    : Page_Buffer;
+      Scan_Tx      : Valid_Tx_Id;
+      Scan_Pg      : Valid_Page_Id;
+      WAL_Exists   : Boolean;
+      WAL_Ok       : Boolean;
+      Page_Ok      : Boolean;
+      Scan_Ok      : Boolean;
+      Scan_EOF     : Boolean;
+      Hit_EOF      : Boolean := False;
+      Total_Frames : Natural := 0;
    begin
+      if Has_Embedded_NUL (DB_Path) or else Has_Embedded_NUL (WAL_Path) then
+         Ctx.State := Tx_Aborted;
+         Status    := Status_IO_Error;
+         return;
+      end if;
+
       Encode_WAL_Frame (Ctx.Id, Page_Id, Page, Checksum, Frame, WAL_Frame_Commit);
       if not Verify_WAL_Frame (Frame) then
          Ctx.State := Tx_Aborted;
          Status    := Status_Tx_Aborted;
          return;
+      end if;
+
+      --  0. Pre-commit WAL scan: verify all existing frames & ensure EOF is reached
+      --     within Max_WAL_Scan_Frames before writing the commit barrier (R3-CRIT-02)
+      Check_File_Exists (WAL_Path, WAL_Exists);
+      if WAL_Exists then
+         for Step in 1 .. Max_WAL_Scan_Frames - 1 loop
+            pragma Loop_Invariant (Total_Frames = Step - 1);
+            Read_WAL_Frame
+              (WAL_Path, Valid_Page_Id (Step - 1), Scan_Frame, Scan_Ok, Scan_EOF);
+            if not Scan_Ok then
+               if Scan_EOF then
+                  Hit_EOF := True;
+                  exit;
+               else
+                  Ctx.State := Tx_Aborted;
+                  Status    := Status_IO_Error;
+                  return;
+               end if;
+            end if;
+
+            if not Verify_WAL_Frame (Scan_Frame) then
+               Ctx.State := Tx_Aborted;
+               Status    := Status_IO_Error;
+               return;
+            end if;
+
+            Total_Frames := Step;
+         end loop;
+
+         if not Hit_EOF then
+            pragma Warnings (GNATprove, Off, "is set by");
+            Read_WAL_Frame
+              (WAL_Path, Valid_Page_Id (Max_WAL_Scan_Frames - 1),
+               Scan_Frame, Scan_Ok, Scan_EOF);
+            pragma Warnings (GNATprove, On, "is set by");
+            if Scan_Ok then
+               Ctx.State := Tx_Aborted;
+               Status    := (if Verify_WAL_Frame (Scan_Frame)
+                             then Status_Capacity_Exceeded
+                             else Status_IO_Error);
+               return;
+            elsif not Scan_EOF then
+               Ctx.State := Tx_Aborted;
+               Status    := Status_IO_Error;
+               return;
+            end if;
+         end if;
       end if;
 
       --  1. Write-Ahead Log commit barrier frame first (WAL protocol)
@@ -284,19 +338,18 @@ package body Nhe_O.Transaction is
       end if;
 
       --  2. NO-STEAL materialization: flush all WAL_Frame_Data pages staged by Ctx.Id
-      --     to DB_Path only after the commit barrier frame is durable on disk (R2-CRIT-01)
-      for Step in 1 .. Max_Commit_Scan loop
-         Read_WAL_Frame (WAL_Path, Valid_Page_Id (Step - 1), Scan_Frame, Scan_Ok, Scan_EOF);
-         if not Scan_Ok then
-            exit when Scan_EOF;
+      --     to DB_Path only after the commit barrier frame is durable on disk (R2-CRIT-01, R3-CRIT-02)
+      for Step in 1 .. Total_Frames loop
+         pragma Loop_Invariant (Total_Frames < Max_WAL_Scan_Frames);
+         Read_WAL_Frame
+           (WAL_Path, Valid_Page_Id (Step - 1), Scan_Frame, Scan_Ok);
+         if not Scan_Ok or else not Verify_WAL_Frame (Scan_Frame) then
             Ctx.State := Tx_Aborted;
             Status    := Status_IO_Error;
             return;
          end if;
 
-         if Verify_WAL_Frame (Scan_Frame)
-           and then Get_WAL_Frame_Kind (Scan_Frame) = WAL_Frame_Data
-         then
+         if Get_WAL_Frame_Kind (Scan_Frame) = WAL_Frame_Data then
             Decode_WAL_Frame (Scan_Frame, Scan_Tx, Scan_Pg, Scan_Page);
             if Scan_Tx = Ctx.Id then
                Write_Page (DB_Path, Scan_Pg, Scan_Page, Page_Ok);
@@ -906,11 +959,16 @@ package body Nhe_O.Transaction is
          Total_Frames := Step;
       end loop;
 
-      --  Detect WAL overflow if Max_Frames was reached before EOF
+      --  Detect WAL overflow or torn/corrupted frame if Max_Frames was reached before EOF
       if not Hit_EOF and then Max_Frames < Max_Page_Id then
          Read_WAL_Frame (WAL_Path, Valid_Page_Id (Max_Frames), Frame, Read_Ok, Is_EOF);
-         if Read_Ok or else not Is_EOF then
-            Status := Status_Capacity_Exceeded;
+         if Read_Ok then
+            Status := (if Verify_WAL_Frame (Frame)
+                       then Status_Capacity_Exceeded
+                       else Status_IO_Error);
+            return;
+         elsif not Is_EOF then
+            Status := Status_IO_Error;
             return;
          end if;
       end if;

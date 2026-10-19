@@ -20,7 +20,7 @@ Status legend: ☐ todo · ◐ in progress · ☑ done
 | 5 | Prove 100% SPARK Stone, Bronze (Flow), Silver (AoRTE), and Gold contracts across `Nhe_O.Catalog`, `Nhe_O.Buffer_Pool`, and `Nhe_O.Executor` via `gnatprove -P nhe_o.gpr` (`0 unproved` checks) | ☐ | — |
 
 ## Notes / sequencing
-- Prerequisite Grooming Epic **04 (`04-post-epic-03-grooming-and-hardening`)** has completed Round 1 (24/24) and Round 2 (16/16) in Tasks 1–11; Round 3 remediation (`Tasks 12–16`, covering 18 findings `R3-CRIT-01`..`R3-LOW-04`) is in progress before starting Task 1 of Epic 05.
+- Prerequisite Grooming Epic **04 (`04-post-epic-03-grooming-and-hardening`)** is complete (`16/16` tasks done; all 58 findings across Rounds 1, 2, and 3 remediated and verified at `3,776 / 3,776` SPARK checks proved). Ready to begin Task 1 of Epic 05.
 
 ## Open questions
 - None (`Q-001`..`Q-004` are all answered in `docs/OPEN-QUESTIONS.md`).

@@ -7,9 +7,16 @@ with Nhe_O.IO;    use Nhe_O.IO;
 
 package Nhe_O.Transaction is
 
-   Max_Tx_Id : constant := 1_000_000_000;
+   --  Bounded Commit Log (CLOG) & Transaction ID domain (R3-CRIT-01 / BR-002):
+   --  Max_Tx_Id equals Max_CLOG_Entries so every Valid_Tx_Id has a direct CLOG slot
+   --  with zero horizon cliff above 1024.
+   Max_CLOG_Entries : constant := 8192;
+   Max_Tx_Id        : constant := Max_CLOG_Entries;
    type Tx_Id is range 0 .. Max_Tx_Id;
    subtype Valid_Tx_Id is Tx_Id range 1 .. Max_Tx_Id;
+
+   --  Default WAL scan bound for Commit_Tx, Recover_RAG_Engine & C_Init_With_Paths (R3-CRIT-02)
+   Max_WAL_Scan_Frames : constant Positive := 4096;
 
    type Tx_State is (Tx_Idle, Tx_Active, Tx_Committed, Tx_Aborted);
 
@@ -25,8 +32,6 @@ package Nhe_O.Transaction is
       State    : Tx_State    := Tx_Idle;
    end record;
 
-   --  Bounded Commit Log (CLOG) for MVCC Snapshot Isolation (CRIT-04 / R2-CRIT-01 / BR-002)
-   Max_CLOG_Entries : constant := 1024;
    subtype CLOG_Tx_Index is Valid_Tx_Id range 1 .. Max_CLOG_Entries;
    type Commit_Log is array (CLOG_Tx_Index) of Tx_State;
    Default_CLOG : constant Commit_Log := [others => Tx_Idle];
@@ -37,14 +42,17 @@ package Nhe_O.Transaction is
       Id    : in     Valid_Tx_Id;
       State : in     Tx_State)
      with Global => null,
-          Always_Terminates;
+          Always_Terminates,
+          Post   => CLOG (Id) = State
+                    and then (for all K in CLOG_Tx_Index =>
+                                (if K /= Id then CLOG (K) = CLOG'Old (K)));
 
-   --  True iff transaction Id has committed according to CLOG (R2-CRIT-01)
+   --  True iff transaction Id has committed according to CLOG (R2-CRIT-01, R3-CRIT-01)
    function Is_Tx_Committed
      (CLOG : Commit_Log;
       Id   : Tx_Id) return Boolean
    is
-     (if Id in 1 .. Max_CLOG_Entries then CLOG (Id) = Tx_Committed
+     (if Id in CLOG_Tx_Index then CLOG (Id) = Tx_Committed
       else False);
 
    --  MVCC Snapshot Visibility Rule (BR-002):

@@ -44,6 +44,14 @@ package Nhe_O.IO is
                     and then (for all I in 1 .. Path.Length =>
                                 C_Path (I) = Path.Data (I));
 
+   --  Check whether a path exists on disk via POSIX access(F_OK) (R3-HIGH-01)
+   procedure Check_File_Exists
+     (File_Path : in     Bounded_Text;
+      Exists    :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => File_Path.Length > 0;
+
    --  Write a 4096-byte slotted page to the database file at offset Page_Id * 4096
    procedure Write_Page
      (File_Path : in     Bounded_Text;
@@ -63,6 +71,19 @@ package Nhe_O.IO is
      with Global => null,
           Always_Terminates,
           Pre    => File_Path.Length > 0;
+
+   --  Read a 4096-byte slotted page at Page_Id, distinguishing clean EOF (0 bytes at
+   --  page boundary) from torn pages or I/O errors (R3-HIGH-01)
+   procedure Read_Page
+     (File_Path : in     Bounded_Text;
+      Page_Id   : in     Valid_Page_Id;
+      Buffer    :    out Page_Buffer;
+      Success   :    out Boolean;
+      Is_EOF    :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => File_Path.Length > 0,
+          Post   => not (Success and Is_EOF);
 
    --  Write a CRC32-framed WAL record at exact 0-based index Frame_Idx via positional pwrite
    procedure Write_WAL_Frame

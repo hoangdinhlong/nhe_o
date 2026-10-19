@@ -6,28 +6,31 @@ package body Nhe_O.PubSub is
      (Pattern : Bounded_Ident;
       Channel : Bounded_Ident) return Boolean
    is
-      Prefix_Len : Natural;
+      subtype DP_Index is Natural range 0 .. Max_Ident_Len;
+      type DP_Array is array (DP_Index) of Boolean;
+      DP : DP_Array := [0 => True, others => False];
    begin
       if Pattern.Length = 0 or else Channel.Length = 0 then
          return False;
       end if;
 
-      --  Check for wildcard '*' at the end of Pattern
-      if Pattern.Data (Pattern.Length) = '*' then
-         Prefix_Len := Pattern.Length - 1;
-         if Channel.Length < Prefix_Len then
-            return False;
+      for P in 1 .. Pattern.Length loop
+         pragma Loop_Invariant (P in 1 .. Pattern.Length);
+         if Pattern.Data (P) = '*' then
+            for C in 1 .. Channel.Length loop
+               pragma Loop_Invariant (C in 1 .. Channel.Length);
+               DP (C) := DP (C) or else DP (C - 1);
+            end loop;
+         else
+            for C in reverse 1 .. Channel.Length loop
+               pragma Loop_Invariant (C in 1 .. Channel.Length);
+               DP (C) := DP (C - 1) and then (Pattern.Data (P) = Channel.Data (C));
+            end loop;
+            DP (0) := False;
          end if;
-         for I in 1 .. Prefix_Len loop
-            pragma Loop_Invariant (I in 1 .. Prefix_Len);
-            if Pattern.Data (I) /= Channel.Data (I) then
-               return False;
-            end if;
-         end loop;
-         return True;
-      else
-         return Equal_Ident (Pattern, Channel);
-      end if;
+      end loop;
+
+      return DP (Channel.Length);
    end Matches_Channel;
 
    procedure Subscribe

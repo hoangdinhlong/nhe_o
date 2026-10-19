@@ -119,6 +119,18 @@ package body Nhe_O.IO is
           Convention    => C,
           External_Name => "unlink";
 
+   F_OK : constant int := 0;
+
+   function Posix_Access
+     (Path : C_Path_String;
+      Mode : int) return int
+     with Side_Effects,
+          Global        => null,
+          Always_Terminates,
+          Import        => True,
+          Convention    => C,
+          External_Name => "access";
+
    function Has_Embedded_NUL (Path : Bounded_Text) return Boolean is
    begin
       for I in 1 .. Path.Length loop
@@ -144,6 +156,23 @@ package body Nhe_O.IO is
       end loop;
       C_Path (Path.Length + 1) := ASCII.NUL;
    end To_C_Path;
+
+   procedure Check_File_Exists
+     (File_Path : in     Bounded_Text;
+      Exists    :    out Boolean)
+   is
+      C_Path : C_Path_String;
+      Rc     : int;
+   begin
+      if Has_Embedded_NUL (File_Path) then
+         Exists := False;
+         return;
+      end if;
+
+      To_C_Path (File_Path, C_Path);
+      Rc     := Posix_Access (C_Path, F_OK);
+      Exists := (Rc = 0);
+   end Check_File_Exists;
 
    procedure Write_Page
      (File_Path : in     Bounded_Text;
@@ -187,7 +216,8 @@ package body Nhe_O.IO is
      (File_Path : in     Bounded_Text;
       Page_Id   : in     Valid_Page_Id;
       Buffer    :    out Page_Buffer;
-      Success   :    out Boolean)
+      Success   :    out Boolean;
+      Is_EOF    :    out Boolean)
    is
       C_Path  : C_Path_String;
       Fd      : int;
@@ -195,16 +225,17 @@ package body Nhe_O.IO is
       N_Read  : Ssize_T;
       Close_R : int;
    begin
-      Buffer := [others => 0];
+      Buffer  := [others => 0];
+      Success := False;
+      Is_EOF  := False;
+
       if Has_Embedded_NUL (File_Path) then
-         Success := False;
          return;
       end if;
 
       To_C_Path (File_Path, C_Path);
       Fd := Posix_Open (C_Path, O_RDONLY + O_CLOEXEC, 0);
       if Fd < 0 then
-         Success := False;
          return;
       end if;
 
@@ -217,10 +248,28 @@ package body Nhe_O.IO is
 
       if N_Read = Ssize_T (Nhe_O.Page_Size) and then Close_R = 0 then
          Success := True;
+         Is_EOF  := False;
+      elsif N_Read = 0 and then Close_R = 0 then
+         Buffer  := [others => 0];
+         Success := False;
+         Is_EOF  := True;
       else
          Buffer  := [others => 0];
          Success := False;
+         Is_EOF  := False;
       end if;
+   end Read_Page;
+
+   procedure Read_Page
+     (File_Path : in     Bounded_Text;
+      Page_Id   : in     Valid_Page_Id;
+      Buffer    :    out Page_Buffer;
+      Success   :    out Boolean)
+   is
+      Ignored_EOF : Boolean;
+      pragma Warnings (Off, Ignored_EOF);
+   begin
+      Read_Page (File_Path, Page_Id, Buffer, Success, Ignored_EOF);
    end Read_Page;
 
    procedure Write_WAL_Frame
