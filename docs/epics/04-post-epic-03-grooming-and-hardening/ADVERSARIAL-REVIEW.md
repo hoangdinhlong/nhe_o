@@ -142,9 +142,9 @@ Conducted on `2026-10-19` across all 26 Ada/SPARK 2022 source files (`src/*.ads`
 
 ---
 
-# Part IV — Rounds 4–8 Convergence Adversarial Audits (`R4-CRIT-01` .. `R7-LOW-01` & Round 8 Zero-Defect Verification)
+# Part IV — Rounds 4–11 Convergence & Fast-Loop Adversarial Audits (`R4-CRIT-01` .. `R10-MED-01` & Round 11 Zero-Defect Verification)
 
-Conducted on `2026-10-20` as an iterative fix-and-re-audit convergence loop across all 26 Ada/SPARK 2022 source files (`src/*.ads`, `src/*.adb`), C header (`include/nhe_o.h`), Python SDK (`bindings/python/nhe_o.py`), and `docs/`. Round 4 uncovered 12 deep boundary/protocol findings (`R4-CRIT-01`, `R4-HIGH-01`..`R4-HIGH-04`, `R4-MED-01`..`R4-MED-05`, `R4-LOW-01`..`R4-LOW-02`), Round 5 uncovered 3 residual edge-case findings (`R5-HIGH-01`, `R5-MED-01`, `R5-LOW-01`), Round 7 challenged Round 6's initial convergence pass and uncovered 7 unimplemented/incomplete claims and protocol edge cases (`R7-HIGH-01`..`R7-HIGH-03`, `R7-MED-01`..`R7-MED-03`, `R7-LOW-01`), and Round 8 verified convergence with **0 issues found** (`4,077 / 4,077` checks proved, `0 unproved`, `0 warnings`).
+Conducted on `2026-10-20` as an iterative fix-and-re-audit convergence loop across all 26 Ada/SPARK 2022 source files (`src/*.ads`, `src/*.adb`), C header (`include/nhe_o.h`), Python SDK (`bindings/python/nhe_o.py`), and `docs/`. Round 4 uncovered 12 deep boundary/protocol findings (`R4-CRIT-01`, `R4-HIGH-01`..`R4-HIGH-04`, `R4-MED-01`..`R4-MED-05`, `R4-LOW-01`..`R4-LOW-02`), Round 5 uncovered 3 residual edge-case findings (`R5-HIGH-01`, `R5-MED-01`, `R5-LOW-01`), Round 7 challenged Round 6's initial convergence pass and uncovered 7 unimplemented/incomplete claims and protocol edge cases (`R7-HIGH-01`..`R7-HIGH-03`, `R7-MED-01`..`R7-MED-03`, `R7-LOW-01`), Fast-Loop Rounds 9–10 uncovered 4 SQL/JSON/contract-strength findings (`R9-HIGH-01`, `R9-MED-01`, `R9-MED-02`, `R10-MED-01`), and Round 11 verified convergence with **0 issues found** (`4,246 / 4,246` checks proved, `0 unproved`, `0 warnings`).
 
 ## 10. Round 4 Findings (`R4-CRIT-01` .. `R4-LOW-02`)
 
