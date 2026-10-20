@@ -99,12 +99,19 @@ package Nhe_O.Vector is
           Post   => L2_Distance'Result = Sqrt_Bounded (L2_Distance_Squared (A, B))
                     and then L2_Distance'Result <= Float (A.Dim) * 4.0e12;
 
-   --  pgvector `<=>` operator: Cosine distance in [0.0 .. 2.0]
+   --  pgvector `<=>` operator: Cosine distance 1 - cos(A, B) in [0.0 .. 2.0].
+   --  Scale-invariant: each vector is normalized by its own largest absolute
+   --  component first, so tiny (down to subnormal) and huge vectors are handled
+   --  exactly like their rescaled versions. Only an exact all-zero vector (no
+   --  direction) yields the documented value 1.0.
    function Cosine_Distance
      (A, B : Vector_Value) return Float
      with Global => null,
           Pre    => A.Dim = B.Dim,
-          Post   => Cosine_Distance'Result in 0.0 .. 2.0;
+          Post   => Cosine_Distance'Result in 0.0 .. 2.0
+                    and then (if (for all I in 1 .. A.Dim => A.Elements (I) = 0.0)
+                                or else (for all I in 1 .. B.Dim => B.Elements (I) = 0.0)
+                              then Cosine_Distance'Result = 1.0);
 
    --  Quantize Float32 vector to Int8 (SQ8) symmetric scalar quantization
    function Quantize_To_Int8 (V : Vector_Value) return Quantized_Int8_Vector

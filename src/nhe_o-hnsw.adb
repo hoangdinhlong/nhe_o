@@ -288,7 +288,8 @@ package body Nhe_O.HNSW is
    procedure Restore_Vector_Node
      (Index     : in out HNSW_Index;
       Doc_Id    : in     Positive;
-      Node_Snap : in     HNSW_Node)
+      Node_Snap : in     HNSW_Node;
+      Status    :    out Engine_Status)
    is
       Target_Id       : HNSW_Node_Id := 1;
       Found_Existing  : Boolean := False;
@@ -304,10 +305,15 @@ package body Nhe_O.HNSW is
    begin
       Remove_Vector (Index, Doc_Id);
       if not Node_Snap.Active then
+         Status := Status_Ok;
          return;
       end if;
 
       for I in 1 .. Index.Node_Count loop
+         pragma Loop_Invariant (not Found_Existing);
+         pragma Loop_Invariant
+           (for all J in 1 .. I - 1 =>
+              not (Index.Nodes (J).Active and then Index.Nodes (J).Doc_Id = Doc_Id));
          if Index.Nodes (I).Active and then Index.Nodes (I).Doc_Id = Doc_Id then
             Target_Id      := I;
             Found_Existing := True;
@@ -317,6 +323,8 @@ package body Nhe_O.HNSW is
 
       if not Found_Existing then
          for I in 1 .. Index.Node_Count loop
+            pragma Loop_Invariant (not Reused_Inactive);
+            pragma Loop_Invariant (for all J in 1 .. I - 1 => Index.Nodes (J).Active);
             if not Index.Nodes (I).Active then
                Target_Id       := I;
                Reused_Inactive := True;
@@ -327,6 +335,8 @@ package body Nhe_O.HNSW is
 
       if not Found_Existing and then not Reused_Inactive then
          if Index.Node_Count = Max_HNSW_Nodes then
+            --  Every slot holds another active document: nothing to reuse
+            Status := Status_Capacity_Exceeded;
             return;
          end if;
          Target_Id        := Index.Node_Count + 1;
@@ -384,6 +394,12 @@ package body Nhe_O.HNSW is
          end loop;
       end if;
 
+      --  Add_Edge_Pruned only rewires Layers; re-stating the identity fields
+      --  (unchanged at run time) keeps the Status_Ok postcondition provable
+      --  without a whole-pool frame condition on every edge update
+      Index.Nodes (Target_Id).Active := True;
+      Index.Nodes (Target_Id).Doc_Id := Doc_Id;
+
       for I in 1 .. Index.Node_Count loop
          pragma Loop_Invariant (Best_Entry in 1 .. Index.Node_Count);
          if Index.Nodes (I).Active then
@@ -397,6 +413,23 @@ package body Nhe_O.HNSW is
 
       Index.Entry_Node := Best_Entry;
       Index.Top_Layer  := Best_Layer;
+
+      pragma Assert
+        (Target_Id <= Index.Node_Count
+         and then Index.Nodes (Target_Id).Active
+         and then Index.Nodes (Target_Id).Doc_Id = Doc_Id);
+      Status := Status_Ok;
+   end Restore_Vector_Node;
+
+   procedure Restore_Vector_Node
+     (Index     : in out HNSW_Index;
+      Doc_Id    : in     Positive;
+      Node_Snap : in     HNSW_Node)
+   is
+      Status : Engine_Status;
+      pragma Warnings (Off, Status);
+   begin
+      Restore_Vector_Node (Index, Doc_Id, Node_Snap, Status);
    end Restore_Vector_Node;
 
    -------------------------------------------------------------------------
@@ -556,8 +589,11 @@ package body Nhe_O.HNSW is
                end if;
             end loop;
 
-            --  Guarantee that the single closest peer on layer L links back to Target_Id
-            --  (replacing its farthest neighbor if full) so Target_Id is never orphaned.
+            --  Force a bidirectional edge with the single closest peer on layer L
+            --  (replacing that peer's farthest neighbor if full). This does NOT keep
+            --  Target_Id reachable forever: later insertions may prune the edge and
+            --  Remove_Vector drops edges, so nodes can lose all incoming edges.
+            --  Search_KNN therefore finishes with an exhaustive pass.
             if Has_Peer then
                Add_Edge_Pruned (Index, L, Target_Id, Best_Id, Force => True);
                Add_Edge_Pruned (Index, L, Best_Id, Target_Id, Force => True);
@@ -582,50 +618,40 @@ package body Nhe_O.HNSW is
    end Insert_Vector;
 
    -------------------------------------------------------------------------
-   --  Search_KNN (Upper-Layer Greedy Routing + Layer-1 Greedy & Beam Search)
+   --  Search_KNN (Upper-Layer Greedy Routing + Layer-1 Greedy & Beam Search
+   --              + Exhaustive Completion + Exact Top-K Selection)
    -------------------------------------------------------------------------
 
-   procedure Insert_Candidate_Sorted
-     (Results : in out HNSW_Search_Result;
-      Max_K   : in     KNN_Result_Index;
-      Cand    : in     HNSW_Candidate)
-     with Pre  => Results.Count <= Max_K,
-          Post => Results.Count <= Max_K
+   type Node_Flag_Array is array (HNSW_Node_Id) of Boolean;
+   type Node_Dist_Array is array (HNSW_Node_Id) of Non_Negative_Float;
+
+   --  Distance from the query to node N, computed at most once per search:
+   --  the first evaluation is cached in Dist (N) and marked in Visited (N)
+   procedure Evaluate_Cached
+     (Index    : in     HNSW_Index;
+      Query    : in     Vector_Value;
+      Q_Int8   : in     Quantized_Int8_Vector;
+      Q_Binary : in     Quantized_Binary_Vector;
+      Encoding : in     Vector_Encoding_Kind;
+      N        : in     HNSW_Node_Id;
+      Visited  : in out Node_Flag_Array;
+      Dist     : in out Node_Dist_Array;
+      Visits   : in out Natural)
+     with Pre  => Index.Nodes (N).Bin_Vec.Dim = Q_Binary.Dim
+                  and then Query.Dim = Q_Binary.Dim
+                  and then Q_Int8.Dim = Q_Binary.Dim,
+          Post => Visited (N)
+                  and then (if Visited'Old (N) then Dist (N) = Dist'Old (N))
    is
-      Pos : KNN_Result_Index;
    begin
-      --  Avoid duplicate Node_Id
-      for I in 1 .. Results.Count loop
-         if Results.Items (I).Node_Id = Cand.Node_Id then
-            return;
+      if not Visited (N) then
+         Dist (N)    := Node_Distance (Index.Nodes (N), Query, Q_Int8, Q_Binary, Encoding);
+         Visited (N) := True;
+         if Visits < Natural'Last then
+            Visits := Visits + 1;
          end if;
-      end loop;
-
-      if Results.Count = Max_K
-        and then Cand.Distance >= Results.Items (Results.Count).Distance
-      then
-         return;
       end if;
-
-      if Results.Count < Max_K then
-         Results.Count := Results.Count + 1;
-      end if;
-
-      Pos := Results.Count;
-      for I in 1 .. Results.Count - 1 loop
-         if Cand.Distance < Results.Items (I).Distance then
-            Pos := I;
-            exit;
-         end if;
-      end loop;
-
-      for I in reverse Pos .. Results.Count - 1 loop
-         pragma Loop_Invariant (Results.Count <= Max_K);
-         Results.Items (I + 1) := Results.Items (I);
-      end loop;
-
-      Results.Items (Pos) := Cand;
-   end Insert_Candidate_Sorted;
+   end Evaluate_Cached;
 
    procedure Search_KNN
      (Index    : in     HNSW_Index;
@@ -634,16 +660,22 @@ package body Nhe_O.HNSW is
       K        : in     KNN_Result_Index;
       Results  :    out HNSW_Search_Result)
    is
-      type Visited_Array is array (HNSW_Node_Id) of Boolean;
-      Visited   : Visited_Array := [others => False];
+      Visited   : Node_Flag_Array := [others => False];
+      Chosen    : Node_Flag_Array := [others => False];
+      Dist      : Node_Dist_Array := [others => 0.0];
+      Visits    : Natural         := 0;
       Q_Int8    : constant Quantized_Int8_Vector   := Quantize_To_Int8 (Query);
       Q_Binary  : constant Quantized_Binary_Vector := Quantize_To_Binary (Query);
-      Cur_Node  : HNSW_Node_Id;
+      Cur_Node  : HNSW_Node_Id    := 1;
+      Hop_Node  : HNSW_Node_Id;
       Cur_Dist  : Non_Negative_Float;
       Nbr_Id    : HNSW_Node_Id;
-      Nbr_Dist  : Non_Negative_Float;
       Improved  : Boolean;
       Bound_K   : KNN_Result_Index;
+      Entry_Ok  : Boolean         := False;
+      Found     : Boolean;
+      Best_Id   : HNSW_Node_Id;
+      Best_Dist : Non_Negative_Float;
    begin
       Results := (
          Count         => 0,
@@ -661,162 +693,187 @@ package body Nhe_O.HNSW is
          Bound_K := Index.Node_Count;
       end if;
 
+      --  Routing entry point: Entry_Node when active, else the first active node
       if Index.Entry_Node <= Index.Node_Count
         and then Index.Nodes (Index.Entry_Node).Active
       then
          Cur_Node := Index.Entry_Node;
+         Entry_Ok := True;
       else
-         Cur_Node := 1;
          for I in 1 .. Index.Node_Count loop
             if Index.Nodes (I).Active then
                Cur_Node := I;
+               Entry_Ok := True;
                exit;
             end if;
          end loop;
-         if not Index.Nodes (Cur_Node).Active then
-            return;
-         end if;
       end if;
 
-      if Index.Nodes (Cur_Node).Bin_Vec.Dim /= Query.Dim then
-         return;
-      end if;
+      if Entry_Ok and then Index.Nodes (Cur_Node).Bin_Vec.Dim = Query.Dim then
+         Evaluate_Cached
+           (Index, Query, Q_Int8, Q_Binary, Encoding, Cur_Node, Visited, Dist, Visits);
+         Cur_Dist := Dist (Cur_Node);
 
-      Cur_Dist :=
-        Node_Distance (Index.Nodes (Cur_Node), Query, Q_Int8, Q_Binary, Encoding);
-
-      --  Phase 1: Upper-layer greedy routing (Top_Layer down to layer 2)
-      if Index.Top_Layer >= 2 then
-         for L in reverse 2 .. Index.Top_Layer loop
-            for Hop in 1 .. Max_HNSW_Nodes loop
-               Improved := False;
-               for N_Idx in 1 .. Index.Nodes (Cur_Node).Layers (L).Degree loop
-                  Nbr_Id := Index.Nodes (Cur_Node).Layers (L).Neighbors (N_Idx);
-                  if Nbr_Id in 1 .. Index.Node_Count
-                    and then Index.Nodes (Nbr_Id).Active
-                    and then Index.Nodes (Nbr_Id).Bin_Vec.Dim = Query.Dim
-                  then
-                     Nbr_Dist :=
-                       Node_Distance
-                         (Index.Nodes (Nbr_Id), Query, Q_Int8, Q_Binary, Encoding);
-                     if Nbr_Dist < Cur_Dist then
-                        Cur_Dist := Nbr_Dist;
-                        Cur_Node := Nbr_Id;
-                        Improved := True;
+         --  Phase 1: Upper-layer greedy routing (Top_Layer down to layer 2)
+         if Index.Top_Layer >= 2 then
+            for L in reverse 2 .. Index.Top_Layer loop
+               for Hop in 1 .. Max_HNSW_Nodes loop
+                  Improved := False;
+                  Hop_Node := Cur_Node;
+                  for N_Idx in 1 .. Index.Nodes (Hop_Node).Layers (L).Degree loop
+                     Nbr_Id := Index.Nodes (Hop_Node).Layers (L).Neighbors (N_Idx);
+                     if Nbr_Id in 1 .. Index.Node_Count
+                       and then Index.Nodes (Nbr_Id).Active
+                       and then Index.Nodes (Nbr_Id).Bin_Vec.Dim = Query.Dim
+                     then
+                        Evaluate_Cached
+                          (Index, Query, Q_Int8, Q_Binary, Encoding, Nbr_Id,
+                           Visited, Dist, Visits);
+                        if Dist (Nbr_Id) < Cur_Dist then
+                           Cur_Dist := Dist (Nbr_Id);
+                           Cur_Node := Nbr_Id;
+                           Improved := True;
+                        end if;
                      end if;
-                  end if;
+                  end loop;
+                  exit when not Improved;
                end loop;
-               exit when not Improved;
+            end loop;
+         end if;
+
+         --  Phase 2a: Layer-1 greedy descent to a local minimum
+         for Hop in 1 .. Max_HNSW_Nodes loop
+            Improved := False;
+            Hop_Node := Cur_Node;
+            for N_Idx in 1 .. Index.Nodes (Hop_Node).Layers (1).Degree loop
+               Nbr_Id := Index.Nodes (Hop_Node).Layers (1).Neighbors (N_Idx);
+               if Nbr_Id in 1 .. Index.Node_Count
+                 and then Index.Nodes (Nbr_Id).Active
+                 and then Index.Nodes (Nbr_Id).Bin_Vec.Dim = Query.Dim
+               then
+                  Evaluate_Cached
+                    (Index, Query, Q_Int8, Q_Binary, Encoding, Nbr_Id,
+                     Visited, Dist, Visits);
+                  if Dist (Nbr_Id) < Cur_Dist then
+                     Cur_Dist := Dist (Nbr_Id);
+                     Cur_Node := Nbr_Id;
+                     Improved := True;
+                  end if;
+               end if;
+            end loop;
+            exit when not Improved;
+         end loop;
+
+         --  Phase 2b: Multi-wave small-world beam expansion on Layer 1
+         for Wave in 1 .. 4 loop
+            for N_Id in 1 .. Index.Node_Count loop
+               if Visited (N_Id) and then Index.Nodes (N_Id).Active then
+                  for Edge_Idx in 1 .. Index.Nodes (N_Id).Layers (1).Degree loop
+                     Nbr_Id := Index.Nodes (N_Id).Layers (1).Neighbors (Edge_Idx);
+                     if Nbr_Id in 1 .. Index.Node_Count
+                       and then not Visited (Nbr_Id)
+                       and then Index.Nodes (Nbr_Id).Active
+                       and then Index.Nodes (Nbr_Id).Bin_Vec.Dim = Query.Dim
+                     then
+                        Evaluate_Cached
+                          (Index, Query, Q_Int8, Q_Binary, Encoding, Nbr_Id,
+                           Visited, Dist, Visits);
+                     end if;
+                  end loop;
+               end if;
             end loop;
          end loop;
       end if;
 
-      --  Phase 2a: Layer-1 greedy descent to local minimum, recording visited nodes
-      Visited (Cur_Node) := True;
-      Results.Visited_Nodes := 1;
-      Insert_Candidate_Sorted
-        (Results,
-         Bound_K,
-         (Node_Id    => Cur_Node,
-          Doc_Id     => Index.Nodes (Cur_Node).Doc_Id,
-          TOAST_Root => Index.Nodes (Cur_Node).TOAST_Root,
-          Distance   => Cur_Dist));
-
-      for Hop in 1 .. Max_HNSW_Nodes loop
-         pragma Loop_Invariant (Results.Count <= Bound_K);
-         Improved := False;
-         for N_Idx in 1 .. Index.Nodes (Cur_Node).Layers (1).Degree loop
-            pragma Loop_Invariant (Results.Count <= Bound_K);
-            Nbr_Id := Index.Nodes (Cur_Node).Layers (1).Neighbors (N_Idx);
-            if Nbr_Id in 1 .. Index.Node_Count
-              and then Index.Nodes (Nbr_Id).Active
-              and then Index.Nodes (Nbr_Id).Bin_Vec.Dim = Query.Dim
-            then
-               Nbr_Dist :=
-                 Node_Distance
-                   (Index.Nodes (Nbr_Id), Query, Q_Int8, Q_Binary, Encoding);
-               if not Visited (Nbr_Id) then
-                  Visited (Nbr_Id) := True;
-                  if Results.Visited_Nodes < Natural'Last then
-                     Results.Visited_Nodes := Results.Visited_Nodes + 1;
-                  end if;
-                  Insert_Candidate_Sorted
-                    (Results,
-                     Bound_K,
-                     (Node_Id    => Nbr_Id,
-                      Doc_Id     => Index.Nodes (Nbr_Id).Doc_Id,
-                      TOAST_Root => Index.Nodes (Nbr_Id).TOAST_Root,
-                      Distance   => Nbr_Dist));
-               end if;
-               if Nbr_Dist < Cur_Dist then
-                  Cur_Dist := Nbr_Dist;
-                  Cur_Node := Nbr_Id;
-                  Improved := True;
-               end if;
-            end if;
-         end loop;
-         exit when not Improved;
+      --  Phase 3: Exhaustive completion. Pruned or removed edges can leave live
+      --  nodes unreachable from the entry point, so every active node of the
+      --  query dimension not reached above is evaluated here (at most
+      --  Max_HNSW_Nodes distance computations in total thanks to the cache).
+      for N_Id in 1 .. Index.Node_Count loop
+         if not Visited (N_Id)
+           and then Index.Nodes (N_Id).Active
+           and then Index.Nodes (N_Id).Bin_Vec.Dim = Query.Dim
+         then
+            Evaluate_Cached
+              (Index, Query, Q_Int8, Q_Binary, Encoding, N_Id, Visited, Dist, Visits);
+         end if;
       end loop;
+      Results.Visited_Nodes := Visits;
 
-      --  Phase 2b: Multi-wave small-world beam expansion on Layer 1
-      for Wave in 1 .. 4 loop
-         pragma Loop_Invariant (Results.Count <= Bound_K);
-         for N_Id in 1 .. Index.Node_Count loop
-            pragma Loop_Invariant (Results.Count <= Bound_K);
-            if Visited (N_Id) and then Index.Nodes (N_Id).Active then
-               for Edge_Idx in 1 .. Index.Nodes (N_Id).Layers (1).Degree loop
-                  pragma Loop_Invariant (Results.Count <= Bound_K);
-                  Nbr_Id := Index.Nodes (N_Id).Layers (1).Neighbors (Edge_Idx);
-                  if Nbr_Id in 1 .. Index.Node_Count
-                    and then not Visited (Nbr_Id)
-                    and then Index.Nodes (Nbr_Id).Active
-                    and then Index.Nodes (Nbr_Id).Bin_Vec.Dim = Query.Dim
-                  then
-                     Visited (Nbr_Id) := True;
-                     if Results.Visited_Nodes < Natural'Last then
-                        Results.Visited_Nodes := Results.Visited_Nodes + 1;
-                     end if;
-                     Nbr_Dist :=
-                       Node_Distance
-                         (Index.Nodes (Nbr_Id), Query, Q_Int8, Q_Binary, Encoding);
-                     Insert_Candidate_Sorted
-                       (Results,
-                        Bound_K,
-                        (Node_Id    => Nbr_Id,
-                         Doc_Id     => Index.Nodes (Nbr_Id).Doc_Id,
-                         TOAST_Root => Index.Nodes (Nbr_Id).TOAST_Root,
-                         Distance   => Nbr_Dist));
-                  end if;
-               end loop;
-            end if;
-         end loop;
-      end loop;
+      --  Phase 4: Exact top-K selection. Each round picks the unchosen evaluated
+      --  node with the smallest distance (lowest Node_Id on ties), so results
+      --  come out sorted, duplicate-free, and exact over all evaluated nodes.
+      for R in 1 .. Bound_K loop
+         pragma Loop_Invariant (Results.Count = R - 1);
+         pragma Loop_Invariant
+           (for all I in 1 .. Results.Count =>
+              Results.Items (I).Node_Id <= Index.Node_Count
+              and then Index.Nodes (Results.Items (I).Node_Id).Active
+              and then Index.Nodes (Results.Items (I).Node_Id).Bin_Vec.Dim = Query.Dim
+              and then Index.Nodes (Results.Items (I).Node_Id).Doc_Id
+                         = Results.Items (I).Doc_Id
+              and then Index.Nodes (Results.Items (I).Node_Id).TOAST_Root
+                         = Results.Items (I).TOAST_Root
+              and then Chosen (Results.Items (I).Node_Id));
+         pragma Loop_Invariant
+           (for all I in 2 .. Results.Count =>
+              Results.Items (I - 1).Distance <= Results.Items (I).Distance);
+         pragma Loop_Invariant
+           (for all I in 1 .. Results.Count =>
+              (for all J in 1 .. I - 1 =>
+                 Results.Items (J).Node_Id /= Results.Items (I).Node_Id));
+         pragma Loop_Invariant
+           (if Results.Count > 0 then
+              (for all N in 1 .. Index.Node_Count =>
+                 (if Visited (N)
+                    and then not Chosen (N)
+                    and then Index.Nodes (N).Active
+                    and then Index.Nodes (N).Bin_Vec.Dim = Query.Dim
+                  then Results.Items (Results.Count).Distance <= Dist (N))));
 
-      --  If any disconnected node remains and Results.Count < Bound_K, inspect it
-      if Results.Count < Bound_K then
+         Found     := False;
+         Best_Id   := 1;
+         Best_Dist := 0.0;
          for N_Id in 1 .. Index.Node_Count loop
-            pragma Loop_Invariant (Results.Count <= Bound_K);
-            if not Visited (N_Id)
+            pragma Loop_Invariant
+              (if Found then
+                 Best_Id < N_Id
+                 and then Visited (Best_Id)
+                 and then not Chosen (Best_Id)
+                 and then Index.Nodes (Best_Id).Active
+                 and then Index.Nodes (Best_Id).Bin_Vec.Dim = Query.Dim
+                 and then Best_Dist = Dist (Best_Id));
+            pragma Loop_Invariant
+              (for all M in 1 .. N_Id - 1 =>
+                 (if Visited (M)
+                    and then not Chosen (M)
+                    and then Index.Nodes (M).Active
+                    and then Index.Nodes (M).Bin_Vec.Dim = Query.Dim
+                  then Found and then Best_Dist <= Dist (M)));
+
+            if Visited (N_Id)
+              and then not Chosen (N_Id)
               and then Index.Nodes (N_Id).Active
               and then Index.Nodes (N_Id).Bin_Vec.Dim = Query.Dim
+              and then (not Found or else Dist (N_Id) < Best_Dist)
             then
-               Visited (N_Id) := True;
-               if Results.Visited_Nodes < Natural'Last then
-                  Results.Visited_Nodes := Results.Visited_Nodes + 1;
-               end if;
-               Nbr_Dist :=
-                 Node_Distance
-                   (Index.Nodes (N_Id), Query, Q_Int8, Q_Binary, Encoding);
-               Insert_Candidate_Sorted
-                 (Results,
-                  Bound_K,
-                  (Node_Id    => N_Id,
-                   Doc_Id     => Index.Nodes (N_Id).Doc_Id,
-                   TOAST_Root => Index.Nodes (N_Id).TOAST_Root,
-                   Distance   => Nbr_Dist));
+               Found     := True;
+               Best_Id   := N_Id;
+               Best_Dist := Dist (N_Id);
             end if;
          end loop;
-      end if;
+
+         exit when not Found;
+
+         Chosen (Best_Id) := True;
+         Results.Count    := Results.Count + 1;
+         Results.Items (Results.Count) := (
+            Node_Id    => Best_Id,
+            Doc_Id     => Index.Nodes (Best_Id).Doc_Id,
+            TOAST_Root => Index.Nodes (Best_Id).TOAST_Root,
+            Distance   => Best_Dist
+         );
+      end loop;
    end Search_KNN;
 
 end Nhe_O.HNSW;

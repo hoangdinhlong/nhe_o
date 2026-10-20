@@ -116,7 +116,38 @@ package Nhe_O.HNSW is
                     and then Index.Node_Count <= Index.Node_Count'Old
                     and then Is_Valid_HNSW (Index);
 
-   --  Restore a saved HNSW_Node snapshot into Index on MVCC rollback (BR-002)
+   --  Restore a saved HNSW_Node snapshot into Index on MVCC rollback (BR-002).
+   --  Any current node of Doc_Id is removed first; an inactive snapshot only
+   --  removes. Status_Ok iff the snapshot state was restored (for an active
+   --  snapshot: an active node of Doc_Id is present afterwards);
+   --  Status_Capacity_Exceeded iff all Max_HNSW_Nodes slots hold other
+   --  active documents, in which case Doc_Id has no node.
+   procedure Restore_Vector_Node
+     (Index     : in out HNSW_Index;
+      Doc_Id    : in     Positive;
+      Node_Snap : in     HNSW_Node;
+      Status    :    out Engine_Status)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Index.Node_Count <= Max_HNSW_Nodes
+                    and then Node_Snap.Bin_Vec.Dim = Index.Dim,
+          Post   => Index.Dim = Index.Dim'Old
+                    and then Index.Node_Count <= Max_HNSW_Nodes
+                    and then Is_Valid_HNSW (Index)
+                    and then Status in Status_Ok | Status_Capacity_Exceeded
+                    and then (if not Node_Snap.Active then Status = Status_Ok)
+                    and then (if Status = Status_Ok and then Node_Snap.Active then
+                                (for some I in 1 .. Index.Node_Count =>
+                                   Index.Nodes (I).Active
+                                   and then Index.Nodes (I).Doc_Id = Doc_Id))
+                    and then (if Status = Status_Capacity_Exceeded then
+                                Index.Node_Count = Max_HNSW_Nodes
+                                and then (for all I in HNSW_Node_Id =>
+                                            Index.Nodes (I).Active
+                                            and then Index.Nodes (I).Doc_Id /= Doc_Id));
+
+   --  Restore_Vector_Node without a status (a full index leaves Doc_Id absent;
+   --  use the overload above to detect that case)
    procedure Restore_Vector_Node
      (Index     : in out HNSW_Index;
       Doc_Id    : in     Positive;
@@ -166,8 +197,15 @@ package Nhe_O.HNSW is
                     and then Q_Float.Dim = Q_Binary.Dim
                     and then Q_Int8.Dim = Q_Binary.Dim;
 
-   --  Hierarchical ANN search: greedy upper-layer descent (Top_Layer .. 2) followed by
-   --  layer-1 greedy descent + multi-wave small-world beam expansion
+   --  Hierarchical k-NN search: greedy upper-layer descent (Top_Layer .. 2),
+   --  layer-1 greedy descent and multi-wave beam expansion seed the candidate
+   --  distances; a final exhaustive pass then evaluates every node the graph
+   --  walk did not reach (graph edges may be pruned or removed, so a live node
+   --  can be unreachable), and the result is the exact top-K of all active
+   --  nodes of matching dimension by Node_Distance (ties: lower Node_Id first),
+   --  sorted by non-decreasing Distance, without duplicate nodes. Each node's
+   --  distance is computed at most once per search. Visited_Nodes counts the
+   --  distinct nodes evaluated.
    procedure Search_KNN
      (Index    : in     HNSW_Index;
       Query    : in     Vector_Value;
@@ -179,6 +217,20 @@ package Nhe_O.HNSW is
           Pre    => Query.Dim = Index.Dim
                     and then Index.Node_Count <= Max_HNSW_Nodes,
           Post   => Results.Count <= K
-                    and then Results.Count <= Index.Node_Count;
+                    and then Results.Count <= Index.Node_Count
+                    and then (for all I in 1 .. Results.Count =>
+                                Results.Items (I).Node_Id <= Index.Node_Count
+                                and then Index.Nodes (Results.Items (I).Node_Id).Active
+                                and then Index.Nodes (Results.Items (I).Node_Id).Bin_Vec.Dim
+                                           = Query.Dim
+                                and then Index.Nodes (Results.Items (I).Node_Id).Doc_Id
+                                           = Results.Items (I).Doc_Id
+                                and then Index.Nodes (Results.Items (I).Node_Id).TOAST_Root
+                                           = Results.Items (I).TOAST_Root)
+                    and then (for all I in 2 .. Results.Count =>
+                                Results.Items (I - 1).Distance <= Results.Items (I).Distance)
+                    and then (for all I in 1 .. Results.Count =>
+                                (for all J in 1 .. I - 1 =>
+                                   Results.Items (J).Node_Id /= Results.Items (I).Node_Id));
 
 end Nhe_O.HNSW;
