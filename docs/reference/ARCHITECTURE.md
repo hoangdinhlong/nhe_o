@@ -17,7 +17,7 @@ How we build the vision in `VISION.md`. This is the **map** for design decisions
                                       | (Precondition-Free Defensive C ABI)
 +-------------------------------------v---------------------------------------+
 |            Nhé O (`Nhe_O`) Embedded DBMS — 100% pragma SPARK_Mode (On)      |
-|      [4,077 / 4,077 Checks Proved: 100% SPARK Silver + Gold Contracts]      |
+|      [4,246 / 4,246 Checks Proved: 100% SPARK Silver + Gold Contracts]      |
 |                                                                             |
 |  +----------------------+ +-------------------+ +------------------------+  |
 |  |  PostgreSQL SQL &    | |   Redis-Compatible| |  Dual-Mode Pub/Sub     |  |
@@ -84,7 +84,7 @@ How we build the vision in `VISION.md`. This is the **map** for design decisions
 | Concern | Choice |
 |---------|--------|
 | **Language** | Ada 2022 (`-gnat2022`) |
-| **Formal Verification** | 100% SPARK 2022 (`pragma SPARK_Mode (On);` in all 26 files — **100% Stone, Bronze, Silver AoRTE & Gold Contracts**: `4,077 / 4,077` checks proved by `gnatprove 16.1.0` with `Z3`, `cvc5`, `Alt-Ergo`) |
+| **Formal Verification** | 100% SPARK 2022 (`pragma SPARK_Mode (On);` in all 26 files — **100% Stone, Bronze, Silver AoRTE & Gold Contracts**: `4,246 / 4,246` checks proved by `gnatprove 16.1.0` with `Z3`, `cvc5`, `Alt-Ergo`) |
 | **Compiler & Build** | Alire `2.1.1` / GNAT `16.1.0` / `gprbuild 26.0.1` (`nhe_o.gpr` & `nhe_o_lib.gpr`) |
 | **Storage Layout** | 4096-byte Primary Slotted Pages + 4KB TOAST Overflow Chains (`pread`/`pwrite`) + Positional CRC32 WAL (`lseek`/`pwrite`/`fsync`) |
 | **Concurrency / Isolation** | MVCC Snapshot Isolation (`xmin`/`xmax`) |

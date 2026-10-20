@@ -115,7 +115,7 @@ package body Nhe_O.KV is
       Is_Int :    out Boolean)
      with Global => null,
           Always_Terminates,
-          Post   => True
+          Post   => (if not Is_Int then Parsed = 0)
    is
       Start_Idx : Positive := 1;
       Neg       : Boolean  := False;

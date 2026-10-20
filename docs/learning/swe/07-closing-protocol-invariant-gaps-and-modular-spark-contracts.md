@@ -1,6 +1,6 @@
 # Closing Protocol Invariant Gaps & Preventing VC Explosion with Modular SPARK Contracts
 
-> **Takeaway:** Proving 100% Absence of Run-Time Errors (Silver) and local subprogram contracts (Gold) does not automatically prevent cross-module **protocol invariant gaps**—such as mismatched horizon constants (`Max_CLOG_Entries` vs. `Max_Tx_Id`), silent scan truncation (`Max_WAL_Scan_Frames`), or self-overlapping page range reuse. Closing these gaps requires unifying domain subtypes across package boundaries, validating all capacity/notify preconditions *before* appending WAL frames, and factoring multi-level recursive-style validators (`@>` JSONB containment) into non-recursive helpers carrying explicit `with Post => True, Global => null` contracts to prevent `gnatprove` contextual-inlining blowup.
+> **Takeaway:** Proving 100% Absence of Run-Time Errors (Silver) and local subprogram contracts (Gold) does not automatically prevent cross-module **protocol invariant gaps**—such as mismatched horizon constants (`Max_CLOG_Entries` vs. `Max_Tx_Id`), silent scan truncation (`Max_WAL_Scan_Frames`), or self-overlapping page range reuse. Closing these gaps requires unifying domain subtypes across package boundaries, validating all capacity/notify preconditions *before* appending WAL frames, and factoring multi-level recursive-style validators (`@>` JSONB containment and SQL clause analyzers) into non-recursive helpers carrying explicit modular contracts (`Global => null, Always_Terminates` and concise non-tautological `Post` bounds) to prevent `gnatprove` contextual-inlining blowup.
 
 **Tags:** swe
 **Related ADRs:** [ADR-006](../../DECISIONS.md), [ADR-007](../../DECISIONS.md)
@@ -46,8 +46,8 @@ Rather than allowing `Valid_Tx_Id` to exceed `CLOG`'s index range and silently i
 ### Pattern 2: Range-Overlap Predicates & Pre-WAL Validation
 Before reusing a retired TOAST page range or advancing `Engine.Next_TOAST_Pg`, [`src/nhe_o-rag.adb`](../../../src/nhe_o-rag.adb) checks `Is_TOAST_Range_Free (Engine, Cand_Start, Cand_Count, Exclude_Slot)` across all active and retained pointers (`Toast_Ptr`, `Vec_Toast_Ptr`, `Meta_Toast_Ptr`, `Prior_*`), and verifies disjointness (`not Ranges_Overlap (...)`) between the newly allocated parent, vector, and metadata chains within the same `Ingest_Document` call. All in-memory capacity and `Stage_Notify` checks execute *before* writing the first `"TOAS"` or `.wal` frame to disk.
 
-### Pattern 3: Modular Helper Contracts (`Post => True, Global => null`) to Prevent Inlining Blowup
-In [`src/nhe_o-json.adb`](../../../src/nhe_o-json.adb), attaching an explicit contract (`with Post => True, Global => null;`) to each level of the structural `@>` hierarchy (`Values_Match_Scalar`, `Flat_Object_Contains`, `Leaf_Array_Contains`, `Leaf_Object_Contains`, `Inner_Array_Contains`, `Inner_Object_Contains`, `Array_Contains`, `Object_Contains`, `Field_Values_Contain`) instructs `gnatprove` to verify each helper **modularly** once, rather than inlining its body into every caller loop. Result: all 29 subprograms and packages in `Nhe_O.JSON` prove in under 1 second!
+### Pattern 3: Modular Helper Contracts (`Global => null, Always_Terminates` + Concise `Post`) to Prevent Inlining Blowup
+In [`src/nhe_o-json.adb`](../../../src/nhe_o-json.adb) and [`src/nhe_o-sql.adb`](../../../src/nhe_o-sql.adb), attaching explicit modular contracts (`with Global => null, Always_Terminates;` and concise non-tautological `Post` bounds on `Sanitize_SQL`, `Parse_Limit_Clause`, `Count_Select_Columns`, and `Count_Create_Table_Columns`) instructs `gnatprove` to verify complex helpers **modularly** rather than contextually inlining large loops into every caller. Result: all 29 subprograms in `Nhe_O.JSON` and all 32 subprograms in `Nhe_O.SQL` prove with max proof time under 1 second! (See [`swe/09-eliminating-tautological-contracts-and-contextual-inlining-in-spark.md`](09-eliminating-tautological-contracts-and-contextual-inlining-in-spark.md) for why concise non-tautological `Post` contracts beat literal `Post => True`.)
 
 ---
 
@@ -63,4 +63,4 @@ In [`src/nhe_o-json.adb`](../../../src/nhe_o-json.adb), attaching an explicit co
 
 1. **Why can a defensive `if Id <= Max_CLOG_Entries` guard pass 100% of `gnatprove` Silver (AoRTE) checks while still causing a critical MVCC visibility bug?**
 2. **Why must `Ingest_Document` validate `Stage_Notify` capacity and HNSW/B+Tree index capacity *before* calling `Write_TOAST_Chain`?**
-3. **Why does adding `with Post => True, Global => null;` to a non-recursive helper function in a `.adb` body dramatically speed up `gnatprove` when that helper is called inside nested loops?**
+3. **Why does adding a concise `Post` contract to a non-recursive helper function in a `.adb` body dramatically speed up `gnatprove` when that helper is called inside nested loops?**

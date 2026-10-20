@@ -76,7 +76,8 @@ package Nhe_O.JSON is
       Doc    :    out JSONB_Document;
       Status :    out Engine_Status)
      with Global => null,
-          Always_Terminates;
+          Always_Terminates,
+          Post   => (if Status /= Status_Ok then Doc.Count = 0);
 
    --  PostgreSQL `->` operator: Extract JSON object field as a valid JSON value
    --  (e.g., string values are returned quoted as `"val"`)
@@ -88,7 +89,8 @@ package Nhe_O.JSON is
       Kind  :    out JSONB_Value_Kind)
      with Global => null,
           Always_Terminates,
-          Post   => (if Found then Has_Key (Doc, Key));
+          Post   => Found = Has_Key (Doc, Key)
+                    and then (if not Found then Val.Length = 0);
 
    --  PostgreSQL `->>` operator: Extract JSON object field as unquoted TEXT
    procedure Get_Field_Text
@@ -98,7 +100,8 @@ package Nhe_O.JSON is
       Val   :    out Bounded_Text)
      with Global => null,
           Always_Terminates,
-          Post   => (if Found then Has_Key (Doc, Key));
+          Post   => Found = Has_Key (Doc, Key)
+                    and then (if not Found then Val.Length = 0);
 
    --  PostgreSQL `@>` operator: Does Left JSONB contain all key/value entries of Right JSONB?
    function Contains

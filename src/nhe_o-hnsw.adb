@@ -124,7 +124,8 @@ package body Nhe_O.HNSW is
       A_Id  : HNSW_Node_Id;
       B_Id  : HNSW_Node_Id) return Non_Negative_Float
      with Global => null,
-          Post   => Node_Pair_Distance'Result >= 0.0
+          Post   => Node_Pair_Distance'Result <=
+                      Float (Matryoshka_Index'Last) * 4.0 * Max_Component * Max_Component
    is
       Max_Sq : constant Non_Negative_Float := 4.0 * Max_Component * Max_Component;
       Len    : constant Matryoshka_Index :=

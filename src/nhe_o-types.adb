@@ -7,7 +7,11 @@ package body Nhe_O.Types is
    begin
       Res.Length := S'Length;
       for I in 1 .. S'Length loop
-         pragma Loop_Invariant (I in 1 .. S'Length);
+         pragma Loop_Invariant
+           (I in 1 .. S'Length
+            and then Res.Length = S'Length
+            and then (for all J in 1 .. I - 1 =>
+                        Res.Data (J) = S (S'First + (J - 1))));
          Res.Data (I) := S (S'First + (I - 1));
       end loop;
       return Res;
@@ -18,7 +22,11 @@ package body Nhe_O.Types is
    begin
       Res.Length := S'Length;
       for I in 1 .. S'Length loop
-         pragma Loop_Invariant (I in 1 .. S'Length);
+         pragma Loop_Invariant
+           (I in 1 .. S'Length
+            and then Res.Length = S'Length
+            and then (for all J in 1 .. I - 1 =>
+                        Res.Data (J) = S (S'First + (J - 1))));
          Res.Data (I) := S (S'First + (I - 1));
       end loop;
       return Res;
@@ -71,7 +79,10 @@ package body Nhe_O.Types is
          return False;
       end if;
       for I in 1 .. A.Length loop
-         pragma Loop_Invariant (I in 1 .. A.Length);
+         pragma Loop_Invariant
+           (I in 1 .. A.Length
+            and then (for all J in 1 .. I - 1 =>
+                        To_Lower_Char (A.Data (J)) = To_Lower_Char (B.Data (J))));
          if To_Lower_Char (A.Data (I)) /= To_Lower_Char (B.Data (I)) then
             return False;
          end if;

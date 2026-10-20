@@ -51,8 +51,7 @@ package body Nhe_O.Transaction is
    function Update_CRC32_Byte
      (CRC : Unsigned_32;
       B   : Byte) return Unsigned_32
-     with Global => null,
-          Post   => True
+     with Global => null
    is
       C : Unsigned_32 := CRC xor Unsigned_32 (B);
    begin
@@ -69,8 +68,7 @@ package body Nhe_O.Transaction is
    function Update_CRC32_U32
      (CRC : Unsigned_32;
       Val : Unsigned_32) return Unsigned_32
-     with Global => null,
-          Post   => True
+     with Global => null
    is
       C : Unsigned_32 := CRC;
    begin
@@ -104,8 +102,7 @@ package body Nhe_O.Transaction is
       Page_U32  : Unsigned_32;
       Kind_Byte : Byte;
       Page      : Page_Buffer) return Unsigned_32
-     with Global => null,
-          Post   => True
+     with Global => null
    is
       CRC : Unsigned_32 := 16#FFFF_FFFF#;
    begin

@@ -43,7 +43,8 @@ package Nhe_O.SQL is
      with Global => null,
           Always_Terminates,
           Post   => (if Status = Status_Ok then Result.Kind /= Stmt_Unknown
-                     else Result.Kind = Stmt_Unknown);
+                     else Result.Kind = Stmt_Unknown)
+                    and then (if Query.Length = 0 then Status = Status_Invalid_Syntax);
 
    --  Resolve a PostgreSQL type keyword (e.g. "INT4", "JSONB", "VECTOR(1536)") to Pg_Data_Type
    procedure Resolve_Pg_Type
@@ -51,6 +52,8 @@ package Nhe_O.SQL is
       Resolved     :    out Pg_Data_Type;
       Valid        :    out Boolean)
      with Global => null,
-          Always_Terminates;
+          Always_Terminates,
+          Post   => (if Type_Keyword.Length = 0 then not Valid)
+                    and then (if not Valid then Resolved = Pg_Text);
 
 end Nhe_O.SQL;

@@ -35,12 +35,15 @@ interview prep, and friendly to anyone who clones the project to learn by doing.
 - [`06-two-stage-toast-vector-reranking-and-hnsw-pruning.md`](swe/06-two-stage-toast-vector-reranking-and-hnsw-pruning.md) — Two-Stage 4096-D Vector TOAST Re-Ranking, Scale-Aware SQ8 & Distance-Pruned HNSW in SPARK: combining compact HNSW RAM Stage-1 candidate generation with on-disk `"VTST"` TOAST Stage-2 exact 4096-D re-ranking (`ADR-003`, `ADR-006`).
 - [`07-closing-protocol-invariant-gaps-and-modular-spark-contracts.md`](swe/07-closing-protocol-invariant-gaps-and-modular-spark-contracts.md) — Closing Protocol Invariant Gaps & Preventing VC Explosion with Modular SPARK Contracts: unifying `Max_CLOG_Entries = Max_Tx_Id`, preventing multi-chain TOAST page self-overlap, and proving multi-level JSONB `@>` containment modularly (`ADR-006`, `ADR-007`).
 - [`08-formally-verified-property-graph-csr-and-sql-pgq-in-spark.md`](swe/08-formally-verified-property-graph-csr-and-sql-pgq-in-spark.md) — Formally Verified Property Graphs in SPARK: Bi-Directional CSR Adjacency, `SQL/PGQ MATCH` & Cycle-Safe Termination (`ADR-008`).
+- [`09-eliminating-tautological-contracts-and-contextual-inlining-in-spark.md`](swe/09-eliminating-tautological-contracts-and-contextual-inlining-in-spark.md) — Eliminating Tautological Contracts & Controlling Contextual Inlining in SPARK: replacing vacuous subtype-range postconditions and literal `Post => True` placeholders with concise, non-tautological modular contracts (`ADR-002`, `ADR-003`, `ADR-005`, `ADR-006`).
 
 
 ### ai/
 - [`01-toast-overflow-and-vector-quantization-for-local-llm-rag.md`](ai/01-toast-overflow-and-vector-quantization-for-local-llm-rag.md) — 4KB TOAST Overflow Pages & Vector Quantization (`Float32` / `Int8` / `Binary`) for Universal Local LLM RAG: scaling up to 4096-D embeddings and parent-document chunks while saving 4x–32x HNSW RAM alongside local LLMs (`ADR-003`).
+- [`02-two-tier-adversarial-fast-loop-for-formal-methods.md`](ai/02-two-tier-adversarial-fast-loop-for-formal-methods.md) — Two-Tier Adversarial Fast-Loop for Formally Verified Systems: decoupling the ~1.5s inner compile-and-test adversarial convergence loop from the outer `gnatprove` heavy formal verification gate (`ADR-002`, `ADR-005`, `ADR-007`).
 - *(Cross-cutting AI × SWE)* [`swe/06-two-stage-toast-vector-reranking-and-hnsw-pruning.md`](swe/06-two-stage-toast-vector-reranking-and-hnsw-pruning.md) — Two-Stage 4096-D Vector TOAST Re-Ranking, Scale-Aware SQ8 & Distance-Pruned HNSW (`ADR-006`).
 - *(Cross-cutting AI × SWE)* [`swe/08-formally-verified-property-graph-csr-and-sql-pgq-in-spark.md`](swe/08-formally-verified-property-graph-csr-and-sql-pgq-in-spark.md) — Formally Verified Property Graphs in SPARK & Multi-Hop Knowledge GraphRAG (`ADR-008`).
+- *(Cross-cutting AI × SWE)* [`ai/02-two-tier-adversarial-fast-loop-for-formal-methods.md`](ai/02-two-tier-adversarial-fast-loop-for-formal-methods.md) — Two-Tier Adversarial Fast-Loop for Formally Verified Systems (`ADR-002`, `ADR-007`).
 
 
 ## Writing a lesson

@@ -60,14 +60,17 @@ package Nhe_O.Vector is
    function Make_Vector_3D
      (X, Y, Z : Vector_Component) return Vector_Value
      with Global => null,
-          Post   => Make_Vector_3D'Result.Dim = 3;
+          Post   => Make_Vector_3D'Result.Dim = 3
+                    and then Make_Vector_3D'Result.Elements (1) = X
+                    and then Make_Vector_3D'Result.Elements (2) = Y
+                    and then Make_Vector_3D'Result.Elements (3) = Z;
 
    --  pgvector `<->` operator: Squared Euclidean (L2) distance
    function L2_Distance_Squared
      (A, B : Vector_Value) return Non_Negative_Float
      with Global => null,
           Pre    => A.Dim = B.Dim,
-          Post   => L2_Distance_Squared'Result >= 0.0;
+          Post   => L2_Distance_Squared'Result <= Float (A.Dim) * 4.0e12;
 
    --  Inner product (dot product)
    function Inner_Product
@@ -84,14 +87,17 @@ package Nhe_O.Vector is
    --  Newton-Raphson bounded square root in pure SPARK
    function Sqrt_Bounded (X : Non_Negative_Float) return Non_Negative_Float
      with Global => null,
-          Post   => Sqrt_Bounded'Result >= 0.0;
+          Post   => (if X = 0.0 then Sqrt_Bounded'Result = 0.0
+                     elsif X >= 1.0 then Sqrt_Bounded'Result in 1.0 .. X
+                     else Sqrt_Bounded'Result in X .. 1.0);
 
    --  pgvector `<->` operator: Euclidean (L2) distance
    function L2_Distance
      (A, B : Vector_Value) return Non_Negative_Float
      with Global => null,
           Pre    => A.Dim = B.Dim,
-          Post   => L2_Distance'Result >= 0.0;
+          Post   => L2_Distance'Result = Sqrt_Bounded (L2_Distance_Squared (A, B))
+                    and then L2_Distance'Result <= Float (A.Dim) * 4.0e12;
 
    --  pgvector `<=>` operator: Cosine distance in [0.0 .. 2.0]
    function Cosine_Distance
@@ -116,20 +122,24 @@ package Nhe_O.Vector is
    function Int8_L2_Distance_Squared
      (A, B : Quantized_Int8_Vector) return Natural
      with Global => null,
-          Pre    => A.Dim = B.Dim;
+          Pre    => A.Dim = B.Dim,
+          Post   => Int8_L2_Distance_Squared'Result <= A.Dim * 64_516;
 
    --  Scale-aware Euclidean (L2) distance between two Int8 (SQ8) vectors
    function Int8_L2_Distance
      (A, B : Quantized_Int8_Vector) return Non_Negative_Float
      with Global => null,
           Pre    => A.Dim = B.Dim,
-          Post   => Int8_L2_Distance'Result >= 0.0;
+          Post   => Int8_L2_Distance'Result =
+                      L2_Distance (Dequantize_From_Int8 (A), Dequantize_From_Int8 (B))
+                    and then Int8_L2_Distance'Result <= Float (A.Dim) * 4.0e12;
 
    --  Inner product in Int8 quantized integer domain (guaranteed overflow-free)
    function Int8_Inner_Product
      (A, B : Quantized_Int8_Vector) return Integer
      with Global => null,
-          Pre    => A.Dim = B.Dim;
+          Pre    => A.Dim = B.Dim,
+          Post   => Int8_Inner_Product'Result in (-(A.Dim * 16_129)) .. A.Dim * 16_129;
 
    --  Quantize Float32 vector to 1-bit Binary representation (bit = 1 iff V(i) > 0.0)
    function Quantize_To_Binary (V : Vector_Value) return Quantized_Binary_Vector

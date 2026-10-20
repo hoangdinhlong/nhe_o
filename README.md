@@ -21,7 +21,7 @@
 8. **Universal Local LLM Hybrid RAG, Property Graph & C/Python SDK**: Two-stage Hybrid RAG execution combining B+Tree PK lookup, Stage-1 HNSW candidate generation, Stage-2 `"VTST"` 4096-D exact TOAST re-ranking, `"RMET"` lossless summary/JSONB metadata TOAST chains, `@>` pre-filtering, lexical keyword boosting, and 1-hop GraphRAG expansion — evolving into a full bi-directional CSR **Labeled Property Graph & Multi-Hop Knowledge GraphRAG Engine (`Nhe_O.Graph`, `SQL/PGQ MATCH` in Epic 06 / `ADR-008`)** — exposed via a formally verified C ABI (`include/nhe_o.h`, `lib/libnhe_o.so`) and Python `ctypes` SDK (`bindings/python/nhe_o.py`).
 9. **100% SPARK Verification Mandate (`BR-001` / `ADR-002` / `ADR-005`)**:
    - **100% of specifications, bodies, and entrypoints** (all 26 files across 14 units in `src/`) operate under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)` and zero `pragma Assume` statements.
-   - **4,077 / 4,077 Formal Checks Proved (100% SPARK Stone, Bronze, Silver & Gold Contracts)**: Verified by `gnatprove 16.1.0` (`Why3` + `Z3` + `cvc5` + `Alt-Ergo`) with `0 unproved` checks, `0 justified` checks, and `0 warnings` (max proof time `< 1s`).
+   - **4,246 / 4,246 Formal Checks Proved (100% SPARK Stone, Bronze, Silver & Gold Contracts)**: Verified by `gnatprove 16.1.0` (`Why3` + `Z3` + `cvc5` + `Alt-Ergo`) with `0 unproved` checks, `0 justified` checks, and `0 warnings` (max proof time `< 1s`).
    - **Contract-Bound POSIX I/O (`src/nhe_o-io.adb`)**: Physical disk operations bypass exception-raising `Ada.Streams.Stream_IO` and bind directly in `SPARK_Mode (On)` to atomic POSIX kernel syscalls (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `close`, `unlink`, `access`).
 
 ---
@@ -32,24 +32,24 @@ Evaluated across all **14 compilation units (26 `.ads`/`.adb` files)** in `src/`
 
 | SPARK Level | Assurance Objective | Coverage / Proved % | Proved Checks (`gnatprove`) | Details |
 |---|---|---|---|---|
-| **Stone** | Valid SPARK 2022 Subset (`SPARK_Mode (On)`) | **100.0%** (`26 / 26` files) | `14 / 14` units (`260 / 260` Ada subprograms/packages + `10` POSIX C syscall bindings) | Zero `SPARK_Mode (Off)` anywhere in `src/` (`BR-001`). |
-| **Bronze** | Initialization & Correct Data Flow (`--mode=flow`) | **100.0%** | **`1,309 / 1,309`** (`0 unproved`) | `167` Data Dependencies, `920` Initialization, `2` Non-Aliasing, `220` Flow Termination. |
-| **Silver** | Absence of Run-Time Errors (AoRTE) & Termination | **100.0%** | **`1,489 / 1,489`** prover checks (`2,798 / 2,798` incl. Bronze) | `1,432` Run-time Checks (overflow, range, index, division, discriminant) + `57` Prover Termination checks (`0` `pragma Assume`). |
-| **Gold** | Proof of Key Integrity Properties & Functional Contracts | **100.0%** of specified contracts | **`1,279 / 1,279`** prover checks (`4,077 / 4,077` cumulative) | `777` Functional Contracts (`Pre`/`Post`) + `502` Inductive Loop Invariants & Assertions (`0 unproved`, `0 justified`). |
+| **Stone** | Valid SPARK 2022 Subset (`SPARK_Mode (On)`) | **100.0%** (`26 / 26` files) | `14 / 14` units (`257 / 257` Ada subprograms/packages + `10` POSIX C syscall bindings) | Zero `SPARK_Mode (Off)` anywhere in `src/` (`BR-001`). |
+| **Bronze** | Initialization & Correct Data Flow (`--mode=flow`) | **100.0%** | **`1,316 / 1,316`** (`0 unproved`) | `171` Data Dependencies, `920` Initialization, `2` Non-Aliasing, `223` Flow Termination. |
+| **Silver** | Absence of Run-Time Errors (AoRTE) & Termination | **100.0%** | **`1,587 / 1,587`** prover checks (`2,903 / 2,903` incl. Bronze) | `1,519` Run-time Checks (overflow, range, index, division, discriminant) + `68` Prover Termination checks (`0` `pragma Assume`). |
+| **Gold** | Proof of Key Integrity Properties & Functional Contracts | **100.0%** of specified contracts | **`1,343 / 1,343`** prover checks (`4,246 / 4,246` cumulative) | `807` Functional Contracts (`Pre`/`Post`) + `536` Inductive Loop Invariants & Assertions (`0 unproved`, `0 justified`, `0` `Post => True` tautologies). |
 | **Platinum** | Full Functional Equivalence & Complete Ghost Model Proof | **~35%** *(Scoped to Core Invariants)* | Proven on core state machines; full Ghost relational model planned for Epic 05+ | Proves `CLOG` state machine, `BTree.Total_Keys` conservation, `KV` `WAL-before-Data` rollback (`Store = Store'Old`), and C ABI defensive bounds. |
 
-### `gnatprove` Check Breakdown (`4,077 / 4,077` Total — `0 Unproved`, `0 Warnings`)
+### `gnatprove` Check Breakdown (`4,246 / 4,246` Total — `0 Unproved`, `0 Warnings`)
 
 | Category | Total | Flow Analysis | SMT Provers (`cvc5`, `Z3`, `Alt-Ergo`) | Justified | Unproved |
 |---|---:|---:|---:|---:|---:|
-| Data Dependencies | `167` | `167` | — | `0` | `0` |
+| Data Dependencies | `171` | `171` | — | `0` | `0` |
 | Initialization | `920` | `920` | — | `0` | `0` |
 | Non-Aliasing | `2` | `2` | — | `0` | `0` |
-| Run-time Checks (AoRTE) | `1,432` | — | `1,432` (`cvc5` 95%, `Trivial` 4%, `Z3` 1%) | `0` | `0` |
-| Assertions & Loop Invariants | `502` | — | `502` (`cvc5` 98%, `Z3` 1%, `Trivial` <1%) | `0` | `0` |
-| Functional Contracts (`Pre`/`Post`) | `777` | — | `777` (`cvc5` 95%, `Trivial` 3%, `Z3` 2%) | `0` | `0` |
-| Termination | `277` | `220` | `57` (`cvc5` 100%) | `0` | `0` |
-| **Total** | **`4,077`** | **`1,309` (32%)** | **`2,768` (68%)** | **`0`** | **`0`** |
+| Run-time Checks (AoRTE) | `1,519` | — | `1,519` (`cvc5` 96%, `Trivial` 4%, `Z3` 1%) | `0` | `0` |
+| Assertions & Loop Invariants | `536` | — | `536` (`cvc5` 99%, `Z3` 1%, `Trivial` <1%) | `0` | `0` |
+| Functional Contracts (`Pre`/`Post`) | `807` | — | `807` (`cvc5` 95%, `Z3` 3%, `Trivial` 2%) | `0` | `0` |
+| Termination | `291` | `223` | `68` (`cvc5` 100%) | `0` | `0` |
+| **Total** | **`4,246`** | **`1,316` (31%)** | **`2,930` (69%)** | **`0`** | **`0`** |
 
 ---
 
@@ -94,7 +94,7 @@ alr run
 gprbuild -P nhe_o_lib.gpr
 python3 bindings/python/nhe_o.py
 
-# 4. Run formal SPARK verification (4,077 / 4,077 checks proved — 0 unproved)
+# 4. Run formal SPARK verification (4,246 / 4,246 checks proved — 0 unproved)
 gnatprove -P nhe_o.gpr --mode=all --level=2 -j24
 ```
 

@@ -1509,7 +1509,7 @@ package body Nhe_O.RAG is
       Rel_Id    :    out Optional_Doc_Id)
      with Global => null,
           Always_Terminates,
-          Post   => True
+          Post   => (if not Entry_Rec.Active then not Visible)
    is
    begin
       Visible := False;

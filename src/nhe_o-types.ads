@@ -62,12 +62,16 @@ package Nhe_O.Types is
    function Make_Ident (S : String) return Bounded_Ident
      with Global => null,
           Pre    => S'Length <= Max_Ident_Len,
-          Post   => Make_Ident'Result.Length = S'Length;
+          Post   => Make_Ident'Result.Length = S'Length
+                    and then (for all I in 1 .. S'Length =>
+                                Make_Ident'Result.Data (I) = S (S'First + (I - 1)));
 
    function Make_Text (S : String) return Bounded_Text
      with Global => null,
           Pre    => S'Length <= Max_Text_Len,
-          Post   => Make_Text'Result.Length = S'Length;
+          Post   => Make_Text'Result.Length = S'Length
+                    and then (for all I in 1 .. S'Length =>
+                                Make_Text'Result.Data (I) = S (S'First + (I - 1)));
 
    function Equal_Ident (A, B : Bounded_Ident) return Boolean
      with Global => null,
@@ -87,9 +91,14 @@ package Nhe_O.Types is
      with Global => null;
 
    function Equal_Ident_Case_Insensitive (A, B : Bounded_Ident) return Boolean
-     with Global => null;
+     with Global => null,
+          Post   => Equal_Ident_Case_Insensitive'Result =
+                      (A.Length = B.Length
+                       and then (for all I in 1 .. A.Length =>
+                                   To_Lower_Char (A.Data (I)) = To_Lower_Char (B.Data (I))));
 
    function Type_Name (T : Pg_Data_Type) return Bounded_Ident
-     with Global => null;
+     with Global => null,
+          Post   => Type_Name'Result.Length > 0;
 
 end Nhe_O.Types;

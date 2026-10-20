@@ -997,7 +997,10 @@ package body Nhe_O.JSON is
       Is_Neg  :    out Boolean;
       Sig     :    out Bounded_Text;
       Exp_10  :    out Integer)
-     with Post   => Sig.Length <= Max_Text_Len,
+     with Post   => (if Is_Zero then
+                       Sig.Length = 0 and then not Is_Neg and then Exp_10 = 0
+                     else
+                       Sig.Length > 0),
           Global => null
    is
       Pos      : Positive := 1;
@@ -1024,10 +1027,10 @@ package body Nhe_O.JSON is
       end if;
 
       if Num.Data (Pos) = '-' then
-         Is_Neg := True;
          if Pos = Num.Length then
             return;
          end if;
+         Is_Neg := True;
          Pos := Pos + 1;
       end if;
 
@@ -1113,8 +1116,7 @@ package body Nhe_O.JSON is
    end Normalize_JSON_Number;
 
    function Equal_JSON_Numbers (A, B : Bounded_Text) return Boolean
-     with Post   => True,
-          Global => null
+     with Global => null
    is
       AZ, AN, BZ, BN : Boolean;
       ASig, BSig     : Bounded_Text;
@@ -1174,8 +1176,7 @@ package body Nhe_O.JSON is
      (L_Val  : Bounded_Text;
       R_Val  : Bounded_Text;
       Kind   : JSONB_Value_Kind) return Boolean
-     with Post   => True,
-          Global => null
+     with Global => null
    is
    begin
       case Kind is
@@ -1385,8 +1386,7 @@ package body Nhe_O.JSON is
    end Extract_Array_Elements;
 
    function Flat_Object_Contains (L_Obj_Raw, R_Obj_Raw : Bounded_Text) return Boolean
-     with Post   => True,
-          Global => null
+     with Global => null
    is
       L_Doc  : JSONB_Document;
       R_Doc  : JSONB_Document;
@@ -1394,10 +1394,6 @@ package body Nhe_O.JSON is
       R_Stat : Engine_Status;
       Found  : Boolean;
    begin
-      if Equal_Text (Strip_JSON_Whitespace (L_Obj_Raw), Strip_JSON_Whitespace (R_Obj_Raw)) then
-         return True;
-      end if;
-
       Parse_JSONB (L_Obj_Raw, L_Doc, L_Stat);
       Parse_JSONB (R_Obj_Raw, R_Doc, R_Stat);
       if L_Stat /= Status_Ok or else R_Stat /= Status_Ok then
@@ -1431,8 +1427,7 @@ package body Nhe_O.JSON is
    end Flat_Object_Contains;
 
    function Leaf_Array_Contains (L_Arr_Raw, R_Arr_Raw : Bounded_Text) return Boolean
-     with Post   => True,
-          Global => null
+     with Global => null
    is
       L_Elems    : JSONB_Document;
       R_Elems    : JSONB_Document;
@@ -1440,10 +1435,6 @@ package body Nhe_O.JSON is
       R_Complete : Boolean;
       Found      : Boolean;
    begin
-      if Equal_Text (Strip_JSON_Whitespace (L_Arr_Raw), Strip_JSON_Whitespace (R_Arr_Raw)) then
-         return True;
-      end if;
-
       Extract_Array_Elements (L_Arr_Raw, L_Elems, L_Complete);
       Extract_Array_Elements (R_Arr_Raw, R_Elems, R_Complete);
       if not L_Complete or else not R_Complete then
@@ -1477,8 +1468,7 @@ package body Nhe_O.JSON is
    end Leaf_Array_Contains;
 
    function Leaf_Object_Contains (L_Obj_Raw, R_Obj_Raw : Bounded_Text) return Boolean
-     with Post   => True,
-          Global => null
+     with Global => null
    is
       L_Doc  : JSONB_Document;
       R_Doc  : JSONB_Document;
@@ -1486,10 +1476,6 @@ package body Nhe_O.JSON is
       R_Stat : Engine_Status;
       Found  : Boolean;
    begin
-      if Equal_Text (Strip_JSON_Whitespace (L_Obj_Raw), Strip_JSON_Whitespace (R_Obj_Raw)) then
-         return True;
-      end if;
-
       Parse_JSONB (L_Obj_Raw, L_Doc, L_Stat);
       Parse_JSONB (R_Obj_Raw, R_Doc, R_Stat);
       if L_Stat /= Status_Ok or else R_Stat /= Status_Ok then
@@ -1530,8 +1516,7 @@ package body Nhe_O.JSON is
    end Leaf_Object_Contains;
 
    function Inner_Array_Contains (L_Arr_Raw, R_Arr_Raw : Bounded_Text) return Boolean
-     with Post   => True,
-          Global => null
+     with Global => null
    is
       L_Elems    : JSONB_Document;
       R_Elems    : JSONB_Document;
@@ -1539,10 +1524,6 @@ package body Nhe_O.JSON is
       R_Complete : Boolean;
       Found      : Boolean;
    begin
-      if Equal_Text (Strip_JSON_Whitespace (L_Arr_Raw), Strip_JSON_Whitespace (R_Arr_Raw)) then
-         return True;
-      end if;
-
       Extract_Array_Elements (L_Arr_Raw, L_Elems, L_Complete);
       Extract_Array_Elements (R_Arr_Raw, R_Elems, R_Complete);
       if not L_Complete or else not R_Complete then
@@ -1578,8 +1559,7 @@ package body Nhe_O.JSON is
    end Inner_Array_Contains;
 
    function Inner_Object_Contains (L_Obj_Raw, R_Obj_Raw : Bounded_Text) return Boolean
-     with Post   => True,
-          Global => null
+     with Global => null
    is
       L_Doc  : JSONB_Document;
       R_Doc  : JSONB_Document;
@@ -1587,10 +1567,6 @@ package body Nhe_O.JSON is
       R_Stat : Engine_Status;
       Found  : Boolean;
    begin
-      if Equal_Text (Strip_JSON_Whitespace (L_Obj_Raw), Strip_JSON_Whitespace (R_Obj_Raw)) then
-         return True;
-      end if;
-
       Parse_JSONB (L_Obj_Raw, L_Doc, L_Stat);
       Parse_JSONB (R_Obj_Raw, R_Doc, R_Stat);
       if L_Stat /= Status_Ok or else R_Stat /= Status_Ok then
@@ -1631,8 +1607,7 @@ package body Nhe_O.JSON is
    end Inner_Object_Contains;
 
    function Array_Contains (L_Arr_Raw, R_Arr_Raw : Bounded_Text) return Boolean
-     with Post   => True,
-          Global => null
+     with Global => null
    is
       L_Elems    : JSONB_Document;
       R_Elems    : JSONB_Document;
@@ -1640,10 +1615,6 @@ package body Nhe_O.JSON is
       R_Complete : Boolean;
       Found      : Boolean;
    begin
-      if Equal_Text (Strip_JSON_Whitespace (L_Arr_Raw), Strip_JSON_Whitespace (R_Arr_Raw)) then
-         return True;
-      end if;
-
       Extract_Array_Elements (L_Arr_Raw, L_Elems, L_Complete);
       Extract_Array_Elements (R_Arr_Raw, R_Elems, R_Complete);
       if not L_Complete or else not R_Complete then
@@ -1679,8 +1650,7 @@ package body Nhe_O.JSON is
    end Array_Contains;
 
    function Object_Contains (L_Obj_Raw, R_Obj_Raw : Bounded_Text) return Boolean
-     with Post   => True,
-          Global => null
+     with Global => null
    is
       L_Doc  : JSONB_Document;
       R_Doc  : JSONB_Document;
@@ -1688,10 +1658,6 @@ package body Nhe_O.JSON is
       R_Stat : Engine_Status;
       Found  : Boolean;
    begin
-      if Equal_Text (Strip_JSON_Whitespace (L_Obj_Raw), Strip_JSON_Whitespace (R_Obj_Raw)) then
-         return True;
-      end if;
-
       Parse_JSONB (L_Obj_Raw, L_Doc, L_Stat);
       Parse_JSONB (R_Obj_Raw, R_Doc, R_Stat);
       if L_Stat /= Status_Ok or else R_Stat /= Status_Ok then
@@ -1733,8 +1699,7 @@ package body Nhe_O.JSON is
 
    function Field_Values_Contain
      (L_Entry, R_Entry : JSONB_Entry) return Boolean
-     with Post   => True,
-          Global => null
+     with Global => null
    is
    begin
       if L_Entry.Kind /= R_Entry.Kind then

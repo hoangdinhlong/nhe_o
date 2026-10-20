@@ -18,6 +18,9 @@ package body Nhe_O.SQL is
      (Query : in     Bounded_Text;
       Clean :    out Bounded_Text;
       Valid :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Post   => Clean.Length = Query.Length
    is
       In_Single     : Boolean := False;
       In_Double     : Boolean := False;
@@ -444,6 +447,9 @@ package body Nhe_O.SQL is
      (Clean_Query : in     Bounded_Text;
       Limit_Val   :    out Natural;
       Valid       :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Post   => (if not Valid then Limit_Val = 0)
    is
       Kw_End    : constant Natural := Find_Keyword_End (Clean_Query, "LIMIT");
       Pos       : Natural          := Kw_End;
@@ -790,6 +796,10 @@ package body Nhe_O.SQL is
       Limit_Start : constant Natural := Find_Keyword_Start (Clean_Query, "LIMIT");
       Set_Start   : constant Natural := Find_Keyword_Start (Clean_Query, "SET");
       Set_End     : constant Natural := Find_Keyword_End (Clean_Query, "SET");
+      OC_Start    : constant Natural := Find_Keyword_Start (Clean_Query, "ON CONFLICT");
+      OC_End      : constant Natural := Find_Keyword_End (Clean_Query, "ON CONFLICT");
+      Ret_Start   : constant Natural := Find_Keyword_Start (Clean_Query, "RETURNING");
+      Ret_End     : constant Natural := Find_Keyword_End (Clean_Query, "RETURNING");
       Body_End    : Natural;
    begin
       if Count_Keyword_Occurrences (Clean_Query, "FROM") > 1
@@ -797,8 +807,40 @@ package body Nhe_O.SQL is
         or else Count_Keyword_Occurrences (Clean_Query, "ORDER BY") > 1
         or else Count_Keyword_Occurrences (Clean_Query, "LIMIT") > 1
         or else Count_Keyword_Occurrences (Clean_Query, "SET") > 1
+        or else Count_Keyword_Occurrences (Clean_Query, "ON CONFLICT") > 1
+        or else Count_Keyword_Occurrences (Clean_Query, "RETURNING") > 1
       then
          return False;
+      end if;
+
+      if OC_Start > 0 then
+         if Kind /= Stmt_Insert
+           or else OC_End = 0
+           or else OC_End >= Clean_Query.Length
+         then
+            return False;
+         end if;
+         Body_End := (if Ret_Start > OC_End then Ret_Start - 1 else Clean_Query.Length);
+         if OC_End >= Body_End
+           or else not Has_Non_WS_Range (Clean_Query, OC_End + 1, Body_End)
+         then
+            return False;
+         end if;
+      end if;
+
+      if Ret_Start > 0 then
+         if Kind not in Stmt_Insert | Stmt_Update | Stmt_Delete
+           or else Ret_End = 0
+           or else Ret_End >= Clean_Query.Length
+           or else not Has_Non_WS_Range (Clean_Query, Ret_End + 1, Clean_Query.Length)
+         then
+            return False;
+         end if;
+         if (Where_End > 0 and then Where_End >= Ret_Start)
+           or else (OC_End > 0 and then OC_End >= Ret_Start)
+         then
+            return False;
+         end if;
       end if;
 
       if Kind = Stmt_Select then
@@ -823,6 +865,7 @@ package body Nhe_O.SQL is
            (if Where_Start > 0 then Where_Start - 1
             elsif Order_Start > 0 then Order_Start - 1
             elsif Limit_Start > 0 then Limit_Start - 1
+            elsif Ret_Start > 0 then Ret_Start - 1
             else Clean_Query.Length);
          if From_End >= Body_End
            or else not Has_Non_WS_Range (Clean_Query, From_End + 1, Body_End)
@@ -838,7 +881,10 @@ package body Nhe_O.SQL is
          if Where_Start > 0 and then Set_End >= Where_Start then
             return False;
          end if;
-         Body_End := (if Where_Start > 0 then Where_Start - 1 else Clean_Query.Length);
+         Body_End :=
+           (if Where_Start > 0 then Where_Start - 1
+            elsif Ret_Start > 0 then Ret_Start - 1
+            else Clean_Query.Length);
          if Set_End >= Body_End
            or else not Has_Non_WS_Range (Clean_Query, Set_End + 1, Body_End)
          then
@@ -858,6 +904,7 @@ package body Nhe_O.SQL is
          Body_End :=
            (if Order_Start > 0 then Order_Start - 1
             elsif Limit_Start > 0 then Limit_Start - 1
+            elsif Ret_Start > 0 then Ret_Start - 1
             else Clean_Query.Length);
          if Where_End >= Body_End
            or else not Has_Non_WS_Range (Clean_Query, Where_End + 1, Body_End)
@@ -888,7 +935,10 @@ package body Nhe_O.SQL is
       return True;
    end Validate_Clause_Structure;
 
-   function Count_Select_Columns (Clean_Query : Bounded_Text) return Natural is
+   function Count_Select_Columns (Clean_Query : Bounded_Text) return Natural
+     with Global => null,
+          Post   => Count_Select_Columns'Result <= Clean_Query.Length + 1
+   is
       Sel_End       : constant Natural := Find_Keyword_End (Clean_Query, "SELECT");
       From_Start    : constant Natural := Find_Keyword_Start (Clean_Query, "FROM");
       Where_Start   : constant Natural := Find_Keyword_Start (Clean_Query, "WHERE");
@@ -946,30 +996,166 @@ package body Nhe_O.SQL is
       end if;
    end Count_Select_Columns;
 
-   function Count_Create_Table_Columns (Clean_Query : Bounded_Text) return Natural is
-      Depth              : Natural := 0;
-      Commas             : Natural := 0;
-      Close_Pos          : Natural := 0;
-      Found_Paren        : Boolean := False;
-      Closed_Paren       : Boolean := False;
-      Seg_Has_First_Tok  : Boolean := False;
-      Seg_In_First_Tok   : Boolean := False;
-      Seg_Has_Second_Tok : Boolean := False;
+   --  Validate `<col_ident> <pg_type> [...]` inside a single CREATE TABLE column slice
+   function Is_Valid_Column_Def_Slice
+     (Clean_Query : Bounded_Text;
+      First_Idx   : Positive;
+      Last_Idx    : Natural) return Boolean
+     with Pre => Last_Idx <= Clean_Query.Length
+   is
+      Pos        : Natural       := First_Idx;
+      Col_Tok    : Bounded_Ident := (Length => 0, Data => [others => ' ']);
+      Type_Tok   : Bounded_Ident := (Length => 0, Data => [others => ' ']);
+      Second_W   : Bounded_Ident := (Length => 0, Data => [others => ' ']);
+      Sub_Depth  : Natural       := 0;
+      Resolved_T : Pg_Data_Type;
+      pragma Warnings (Off, Resolved_T);
+      Type_Valid : Boolean;
+   begin
+      if First_Idx > Last_Idx then
+         return False;
+      end if;
+
+      while Pos <= Last_Idx and then Is_WS_Char (Clean_Query.Data (Pos)) loop
+         pragma Loop_Invariant (Pos in First_Idx .. Last_Idx);
+         pragma Loop_Variant (Increases => Pos);
+         Pos := Pos + 1;
+      end loop;
+
+      if Pos > Last_Idx or else not Is_Ident_Start_Char (Clean_Query.Data (Pos)) then
+         return False;
+      end if;
+
+      while Pos <= Last_Idx and then Is_Ident_Char (Clean_Query.Data (Pos)) loop
+         pragma Loop_Invariant (Pos in First_Idx .. Last_Idx);
+         pragma Loop_Invariant (Col_Tok.Length <= Max_Ident_Len);
+         pragma Loop_Variant (Increases => Pos);
+         if Col_Tok.Length = Max_Ident_Len then
+            return False;
+         end if;
+         Col_Tok.Length := Col_Tok.Length + 1;
+         Col_Tok.Data (Col_Tok.Length) := Clean_Query.Data (Pos);
+         Pos := Pos + 1;
+      end loop;
+
+      if Pos > Last_Idx
+        or else not Is_WS_Char (Clean_Query.Data (Pos))
+        or else Is_Reserved_Clause_Ident (Col_Tok)
+      then
+         return False;
+      end if;
+
+      while Pos <= Last_Idx and then Is_WS_Char (Clean_Query.Data (Pos)) loop
+         pragma Loop_Invariant (Pos in First_Idx .. Last_Idx);
+         pragma Loop_Variant (Increases => Pos);
+         Pos := Pos + 1;
+      end loop;
+
+      if Pos > Last_Idx or else not Is_Ident_Start_Char (Clean_Query.Data (Pos)) then
+         return False;
+      end if;
+
+      while Pos <= Last_Idx and then Is_Ident_Char (Clean_Query.Data (Pos)) loop
+         pragma Loop_Invariant (Pos in First_Idx .. Last_Idx);
+         pragma Loop_Invariant (Type_Tok.Length <= Max_Ident_Len);
+         pragma Loop_Variant (Increases => Pos);
+         if Type_Tok.Length = Max_Ident_Len then
+            return False;
+         end if;
+         Type_Tok.Length := Type_Tok.Length + 1;
+         Type_Tok.Data (Type_Tok.Length) := Clean_Query.Data (Pos);
+         Pos := Pos + 1;
+      end loop;
+
+      while Pos <= Last_Idx and then Is_WS_Char (Clean_Query.Data (Pos)) loop
+         pragma Loop_Invariant (Pos in First_Idx .. Last_Idx);
+         pragma Loop_Variant (Increases => Pos);
+         Pos := Pos + 1;
+      end loop;
+
+      if Equal_Ident_Case_Insensitive (Type_Tok, Make_Ident ("DOUBLE")) then
+         while Pos <= Last_Idx and then Is_Ident_Char (Clean_Query.Data (Pos)) loop
+            pragma Loop_Invariant (Pos in First_Idx .. Last_Idx);
+            pragma Loop_Invariant (Second_W.Length <= Max_Ident_Len);
+            pragma Loop_Variant (Increases => Pos);
+            if Second_W.Length = Max_Ident_Len then
+               return False;
+            end if;
+            Second_W.Length := Second_W.Length + 1;
+            Second_W.Data (Second_W.Length) := Clean_Query.Data (Pos);
+            Pos := Pos + 1;
+         end loop;
+         if not Equal_Ident_Case_Insensitive (Second_W, Make_Ident ("PRECISION")) then
+            return False;
+         end if;
+         while Pos <= Last_Idx and then Is_WS_Char (Clean_Query.Data (Pos)) loop
+            pragma Loop_Invariant (Pos in First_Idx .. Last_Idx);
+            pragma Loop_Variant (Increases => Pos);
+            Pos := Pos + 1;
+         end loop;
+         if Pos <= Last_Idx and then Clean_Query.Data (Pos) = '(' then
+            return False;
+         end if;
+         Type_Tok := Make_Ident ("DOUBLE PRECISION");
+      elsif Pos <= Last_Idx and then Clean_Query.Data (Pos) = '(' then
+         while Pos <= Last_Idx loop
+            pragma Loop_Invariant (Pos in First_Idx .. Last_Idx);
+            pragma Loop_Invariant (Type_Tok.Length <= Max_Ident_Len);
+            pragma Loop_Invariant (Sub_Depth <= Pos);
+            pragma Loop_Variant (Increases => Pos);
+            if Clean_Query.Data (Pos) = '(' then
+               Sub_Depth := Sub_Depth + 1;
+            elsif Clean_Query.Data (Pos) = ')' then
+               if Sub_Depth = 0 then
+                  return False;
+               end if;
+               Sub_Depth := Sub_Depth - 1;
+            end if;
+
+            if not Is_WS_Char (Clean_Query.Data (Pos)) then
+               if Type_Tok.Length = Max_Ident_Len then
+                  return False;
+               end if;
+               Type_Tok.Length := Type_Tok.Length + 1;
+               Type_Tok.Data (Type_Tok.Length) := Clean_Query.Data (Pos);
+            end if;
+            Pos := Pos + 1;
+            exit when Sub_Depth = 0;
+         end loop;
+
+         if Sub_Depth /= 0 then
+            return False;
+         end if;
+      end if;
+
+      pragma Warnings (GNATprove, Off, "is set by ""Resolve_Pg_Type"" but not used after the call");
+      Resolve_Pg_Type (Type_Tok, Resolved_T, Type_Valid);
+      pragma Warnings (GNATprove, On, "is set by ""Resolve_Pg_Type"" but not used after the call");
+      return Type_Valid;
+   end Is_Valid_Column_Def_Slice;
+
+   function Count_Create_Table_Columns (Clean_Query : Bounded_Text) return Natural
+     with Global => null,
+          Post   => Count_Create_Table_Columns'Result <= Clean_Query.Length + 1
+   is
+      Depth        : Natural := 0;
+      Commas       : Natural := 0;
+      Seg_Start    : Positive := 1;
+      Close_Pos    : Natural := 0;
+      Found_Paren  : Boolean := False;
+      Closed_Paren : Boolean := False;
    begin
       for I in 1 .. Clean_Query.Length loop
-         pragma Loop_Invariant (Depth <= I and then Commas <= I and then Close_Pos <= Clean_Query.Length);
+         pragma Loop_Invariant
+           (Depth <= I
+            and then Commas <= I
+            and then Seg_Start in 1 .. Clean_Query.Length + 1
+            and then Close_Pos <= Clean_Query.Length);
          if Clean_Query.Data (I) = '(' then
             Depth := Depth + 1;
             if Depth = 1 then
-               Found_Paren        := True;
-               Seg_Has_First_Tok  := False;
-               Seg_In_First_Tok   := False;
-               Seg_Has_Second_Tok := False;
-            else
-               if not Seg_Has_First_Tok or else Seg_In_First_Tok then
-                  return 0;
-               end if;
-               Seg_Has_Second_Tok := True;
+               Found_Paren := True;
+               Seg_Start   := I + 1;
             end if;
          elsif Clean_Query.Data (I) = ')' then
             if Depth = 1 then
@@ -977,50 +1163,23 @@ package body Nhe_O.SQL is
                Close_Pos    := I;
                exit;
             elsif Depth > 1 then
-               Depth              := Depth - 1;
-               Seg_Has_Second_Tok := True;
+               Depth := Depth - 1;
             end if;
-         elsif Depth = 1 then
-            if not Seg_Has_First_Tok then
-               if Is_WS_Char (Clean_Query.Data (I)) then
-                  null;
-               elsif Is_Ident_Start_Char (Clean_Query.Data (I)) then
-                  Seg_Has_First_Tok := True;
-                  Seg_In_First_Tok  := True;
-               else
-                  return 0;
-               end if;
-            elsif Seg_In_First_Tok then
-               if Is_Ident_Char (Clean_Query.Data (I)) then
-                  null;
-               elsif Is_WS_Char (Clean_Query.Data (I)) then
-                  Seg_In_First_Tok := False;
-               else
-                  return 0;
-               end if;
-            else
-               if Clean_Query.Data (I) = ',' then
-                  if not Seg_Has_Second_Tok then
-                     return 0;
-                  end if;
-                  Commas             := Commas + 1;
-                  Seg_Has_First_Tok  := False;
-                  Seg_In_First_Tok   := False;
-                  Seg_Has_Second_Tok := False;
-               elsif not Is_WS_Char (Clean_Query.Data (I)) then
-                  Seg_Has_Second_Tok := True;
-               end if;
+         elsif Depth = 1 and then Clean_Query.Data (I) = ',' then
+            if I <= Seg_Start
+              or else not Is_Valid_Column_Def_Slice (Clean_Query, Seg_Start, I - 1)
+            then
+               return 0;
             end if;
-         elsif Depth > 1 and then not Is_WS_Char (Clean_Query.Data (I)) then
-            Seg_Has_Second_Tok := True;
+            Commas    := Commas + 1;
+            Seg_Start := I + 1;
          end if;
       end loop;
 
       if not Found_Paren
         or else not Closed_Paren
-        or else not Seg_Has_First_Tok
-        or else Seg_In_First_Tok
-        or else not Seg_Has_Second_Tok
+        or else Close_Pos <= Seg_Start
+        or else not Is_Valid_Column_Def_Slice (Clean_Query, Seg_Start, Close_Pos - 1)
       then
          return 0;
       end if;
@@ -1165,7 +1324,7 @@ package body Nhe_O.SQL is
             Pos        : Natural;
             P_Depth    : Natural;
             Col_Token  : Boolean := False;
-            Val_Token  : Boolean := False;
+            Val_Token  : Boolean;
             Has_Body   : Boolean := False;
          begin
             if Ins_End = 0
@@ -1242,23 +1401,96 @@ package body Nhe_O.SQL is
                end loop;
 
                if Pos <= Clean.Length and then Clean.Data (Pos) = '(' then
-                  P_Depth := 1;
-                  Pos     := Pos + 1;
-                  while Pos <= Clean.Length and then P_Depth > 0 loop
-                     pragma Loop_Invariant (Pos in 1 .. Clean.Length and then P_Depth <= Pos);
-                     pragma Loop_Variant (Increases => Pos);
-                     if Clean.Data (Pos) = '(' then
-                        P_Depth := P_Depth + 1;
-                     elsif Clean.Data (Pos) = ')' then
-                        P_Depth := P_Depth - 1;
-                     elsif not Is_WS_Char (Clean.Data (Pos))
-                       and then Clean.Data (Pos) /= ','
-                     then
-                        Val_Token := True;
+                  Has_Body := True;
+                  for Tuple_Step in 1 .. Max_Text_Len loop
+                     exit when Pos > Clean.Length or else Clean.Data (Pos) /= '(';
+                     pragma Loop_Invariant (Pos in 1 .. Clean.Length);
+                     P_Depth   := 1;
+                     Val_Token := False;
+                     Pos       := Pos + 1;
+                     while Pos <= Clean.Length and then P_Depth > 0 loop
+                        pragma Loop_Invariant (Pos in 1 .. Clean.Length and then P_Depth <= Pos);
+                        pragma Loop_Variant (Increases => Pos);
+                        if Clean.Data (Pos) = '(' then
+                           P_Depth := P_Depth + 1;
+                        elsif Clean.Data (Pos) = ')' then
+                           P_Depth := P_Depth - 1;
+                        elsif not Is_WS_Char (Clean.Data (Pos))
+                          and then Clean.Data (Pos) /= ','
+                        then
+                           Val_Token := True;
+                        end if;
+                        Pos := Pos + 1;
+                     end loop;
+
+                     if P_Depth /= 0 or else not Val_Token then
+                        Has_Body := False;
+                        exit;
                      end if;
-                     Pos := Pos + 1;
+
+                     while Pos <= Clean.Length and then Is_WS_Char (Clean.Data (Pos)) loop
+                        pragma Loop_Invariant (Pos in 1 .. Clean.Length);
+                        pragma Loop_Variant (Increases => Pos);
+                        Pos := Pos + 1;
+                     end loop;
+
+                     if Pos <= Clean.Length and then Clean.Data (Pos) = ',' then
+                        Pos := Pos + 1;
+                        while Pos <= Clean.Length and then Is_WS_Char (Clean.Data (Pos)) loop
+                           pragma Loop_Invariant (Pos in 1 .. Clean.Length);
+                           pragma Loop_Variant (Increases => Pos);
+                           Pos := Pos + 1;
+                        end loop;
+                        if Pos > Clean.Length or else Clean.Data (Pos) /= '(' then
+                           Has_Body := False;
+                           exit;
+                        end if;
+                     else
+                        exit;
+                     end if;
                   end loop;
-                  Has_Body := (P_Depth = 0) and then Val_Token;
+
+                  if Has_Body and then Pos <= Clean.Length and then Clean.Data (Pos) = '(' then
+                     Has_Body := False;
+                  end if;
+
+                  if Has_Body then
+                     while Pos <= Clean.Length
+                       and then (Is_WS_Char (Clean.Data (Pos)) or else Clean.Data (Pos) = ';')
+                     loop
+                        pragma Loop_Invariant (Pos in 1 .. Clean.Length);
+                        pragma Loop_Variant (Increases => Pos);
+                        Pos := Pos + 1;
+                     end loop;
+
+                     if Pos <= Clean.Length then
+                        declare
+                           OC_Start  : constant Natural := Find_Keyword_Start (Clean, "ON CONFLICT");
+                           OC_End    : constant Natural := Find_Keyword_End (Clean, "ON CONFLICT");
+                           Ret_Start : constant Natural := Find_Keyword_Start (Clean, "RETURNING");
+                           Ret_End   : constant Natural := Find_Keyword_End (Clean, "RETURNING");
+                        begin
+                           if OC_Start > 0
+                             and then Pos = OC_Start
+                             and then OC_End > 0
+                             and then OC_End < Clean.Length
+                             and then Has_Non_WS_Range (Clean, OC_End + 1, Clean.Length)
+                           then
+                              null;
+                           elsif OC_Start = 0
+                             and then Ret_Start > 0
+                             and then Pos = Ret_Start
+                             and then Ret_End > 0
+                             and then Ret_End < Clean.Length
+                             and then Has_Non_WS_Range (Clean, Ret_End + 1, Clean.Length)
+                           then
+                              null;
+                           else
+                              Has_Body := False;
+                           end if;
+                        end;
+                     end if;
+                  end if;
                end if;
             elsif Pos = Sel_Start and then Sel_End > 0 and then Sel_End < Clean.Length then
                Has_Body := Has_Non_WS_Range (Clean, Sel_End + 1, Clean.Length);
@@ -1620,7 +1852,11 @@ package body Nhe_O.SQL is
    is
    begin
       Resolved := Pg_Text;
-      Valid    := True;
+      if Type_Keyword.Length = 0 then
+         Valid := False;
+         return;
+      end if;
+      Valid := True;
 
       if Equal_Ident_Case_Insensitive (Type_Keyword, Make_Ident ("SMALLINT"))
         or else Equal_Ident_Case_Insensitive (Type_Keyword, Make_Ident ("INT2"))

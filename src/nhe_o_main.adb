@@ -799,6 +799,14 @@ begin
    Check (SQL_Status = Status_Invalid_Syntax);
    Analyze_SQL (Make_Text ("CREATE TABLE docs (a, b);"), SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("CREATE TABLE docs (id FOOBAR_TYPE);"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("CREATE TABLE docs (emb VECTOR(0));"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("CREATE TABLE docs (emb VECTOR(9999));"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("CREATE TABLE docs (price NUMERIC(10, 2), score DOUBLE PRECISION);"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Kind = Stmt_Create_Table and then SQL_Desc.Column_Count = 2);
    Analyze_SQL (Make_Text ("CREATE TABLE docs (id INT) DROP TABLE users;"), SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Invalid_Syntax);
    Analyze_SQL (Make_Text ("INSERT BOGUS INTO docs VALUES (1);"), SQL_Desc, SQL_Status);
@@ -810,6 +818,22 @@ begin
    Analyze_SQL (Make_Text ("INSERT INTO docs VALUES 123;"), SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Invalid_Syntax);
    Analyze_SQL (Make_Text ("INSERT INTO docs BOGUS VALUES (1);"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("INSERT INTO docs VALUES (1) BOGUS;"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("INSERT INTO docs VALUES (1), ();"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("INSERT INTO docs VALUES (1), (2) ON CONFLICT DO NOTHING;"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Kind = Stmt_Insert and then SQL_Desc.Has_Upsert_Conflict);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs RETURNING id;"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs ON CONFLICT DO NOTHING;"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("UPDATE docs SET a = 1 RETURNING ;"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("DELETE FROM docs WHERE id = 1 RETURNING ;"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("CREATE TABLE docs (score DOUBLE PRECISION(10));"), SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Invalid_Syntax);
    Analyze_SQL (Make_Text ("UPDATE BOGUS docs SET a = 1;"), SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Invalid_Syntax);
@@ -917,7 +941,9 @@ begin
    Parse_JSONB (Make_Text ("{""arr"":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]}"), Doc_Parsed, JSON_Stat);
    Check (JSON_Stat = Status_Ok);
    Parse_JSONB (Make_Text ("{""arr"":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,999]}"), Doc_Filter, JSON_Stat);
-   Check (JSON_Stat = Status_Ok and then not Contains (Doc_Parsed, Doc_Filter));
+   Check (JSON_Stat = Status_Ok
+          and then not Contains (Doc_Parsed, Doc_Filter)
+          and then not Contains (Doc_Filter, Doc_Filter));
 
    --  Verify RFC 8259 escape decoding (including \uXXXX) and depth-4 nested @> containment
    Parse_JSONB (Make_Text ("{""msg"":""a\nb\u0041"", ""num"":1.0, ""sub"":{""nested"":{""leaf"":{""y"":2,""x"":1.0}}}, ""arr"":[{""k"":1.0,""m"":2}]}"), Doc_Parsed, JSON_Stat);
