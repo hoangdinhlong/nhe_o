@@ -1,4 +1,4 @@
---  Formally verified PostgreSQL JSON and JSONB Engine (BR-003, HIGH-04, LOW-01, MED-03)
+--  Formally verified PostgreSQL JSON and JSONB Engine (BR-003)
 pragma SPARK_Mode (On);
 
 with Nhe_O.Types; use Nhe_O.Types;
@@ -33,11 +33,11 @@ package Nhe_O.JSON is
    end record;
 
    --  Validate RFC 8259 syntax for PostgreSQL JSON / JSONB literal (objects,
-   --  arrays, and scalar roots: strings, numbers, booleans, null; HIGH-04)
+   --  arrays, and scalar roots: strings, numbers, booleans, null)
    function Is_Valid_JSON (Raw : Bounded_Text) return Boolean
      with Global => null;
 
-   --  Validate that a field value is well-formed for its declared JSONB_Value_Kind (HIGH-04)
+   --  Validate that a field value is well-formed for its declared JSONB_Value_Kind
    function Is_Valid_Field_Value
      (Val  : Bounded_Text;
       Kind : JSONB_Value_Kind) return Boolean
@@ -54,7 +54,7 @@ package Nhe_O.JSON is
                          and then Equal_Ident (Doc.Fields (I).Key, Key));
 
    --  Put or update a field in a decomposed JSONB document (`jsonb_set`),
-   --  validating Val against Kind (HIGH-04)
+   --  validating Val against Kind
    procedure Put_Field
      (Doc    : in out JSONB_Document;
       Key    : in     Bounded_Ident;
@@ -70,7 +70,7 @@ package Nhe_O.JSON is
                      else
                        Doc.Count = Doc.Count'Old);
 
-   --  Parse a JSON object string (`{"k":"v", "n":42, ...}`) into a JSONB_Document (LOW-01)
+   --  Parse a JSON object string (`{"k":"v", "n":42, ...}`) into a JSONB_Document
    procedure Parse_JSONB
      (Raw    : in     Bounded_Text;
       Doc    :    out JSONB_Document;
@@ -79,7 +79,7 @@ package Nhe_O.JSON is
           Always_Terminates;
 
    --  PostgreSQL `->` operator: Extract JSON object field as a valid JSON value
-   --  (e.g., string values are returned quoted as `"val"`, HIGH-04)
+   --  (e.g., string values are returned quoted as `"val"`)
    procedure Get_Field
      (Doc   : in     JSONB_Document;
       Key   : in     Bounded_Ident;
@@ -90,7 +90,7 @@ package Nhe_O.JSON is
           Always_Terminates,
           Post   => (if Found then Has_Key (Doc, Key));
 
-   --  PostgreSQL `->>` operator: Extract JSON object field as unquoted TEXT (HIGH-04)
+   --  PostgreSQL `->>` operator: Extract JSON object field as unquoted TEXT
    procedure Get_Field_Text
      (Doc   : in     JSONB_Document;
       Key   : in     Bounded_Ident;

@@ -1,4 +1,5 @@
---  Formally verified PostgreSQL pgvector-compatible Vector Engine (BR-003 / ADR-003 / Q-003)
+--  Formally verified PostgreSQL pgvector-compatible Vector Engine
+--  (ADR-003, ADR-006, BR-003, BR-006, Q-003)
 pragma SPARK_Mode (On);
 
 with Interfaces;
@@ -106,7 +107,7 @@ package Nhe_O.Vector is
                     and then Quantize_To_Int8'Result.Scale > 0.0;
 
    --  Reconstruct approximate Float32 vector from Int8 (SQ8) quantized vector
-   --  with per-component saturation to [-Max_Component .. Max_Component] (CRIT-07)
+   --  with per-component saturation to [-Max_Component .. Max_Component]
    function Dequantize_From_Int8 (Q : Quantized_Int8_Vector) return Vector_Value
      with Global => null,
           Post   => Dequantize_From_Int8'Result.Dim = Q.Dim;
@@ -117,7 +118,7 @@ package Nhe_O.Vector is
      with Global => null,
           Pre    => A.Dim = B.Dim;
 
-   --  Scale-aware Euclidean (L2) distance between two Int8 (SQ8) vectors (CRIT-07)
+   --  Scale-aware Euclidean (L2) distance between two Int8 (SQ8) vectors
    function Int8_L2_Distance
      (A, B : Quantized_Int8_Vector) return Non_Negative_Float
      with Global => null,
@@ -142,7 +143,7 @@ package Nhe_O.Vector is
           Pre    => A.Dim = B.Dim,
           Post   => Hamming_Distance'Result <= A.Dim;
 
-   --  8-byte TOAST Vector header: 4B magic ("VTST") + 4B big-endian dimension (R2-HIGH-02)
+   --  8-byte TOAST Vector header: 4B magic ("VTST") + 4B big-endian dimension
    Vector_TOAST_Header_Size : constant := 8;
 
    function Vector_TOAST_Byte_Length
@@ -151,7 +152,7 @@ package Nhe_O.Vector is
      with Global => null;
 
    --  Serialize a Float32 Vector_Value (up to 4096-D = 16,392 bytes including
-   --  8B "VTST" header) into a TOAST_Payload_Buffer for TOAST overflow storage (Q-003, R2-HIGH-02)
+   --  8B "VTST" header) into a TOAST_Payload_Buffer for TOAST overflow storage (Q-003)
    procedure Encode_Vector_TOAST
      (V       : in     Vector_Value;
       Payload :    out TOAST_Payload_Buffer;
@@ -160,7 +161,7 @@ package Nhe_O.Vector is
           Always_Terminates,
           Post   => Length = Vector_TOAST_Byte_Length (V.Dim);
 
-   --  Deserialize a Float32 Vector_Value of dimension Dim from a TOAST_Payload_Buffer (Q-003, R2-HIGH-02)
+   --  Deserialize a Float32 Vector_Value of dimension Dim from a TOAST_Payload_Buffer (Q-003)
    procedure Decode_Vector_TOAST
      (Payload : in     TOAST_Payload_Buffer;
       Length  : in     Valid_TOAST_Length;

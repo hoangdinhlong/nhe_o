@@ -1,6 +1,6 @@
 --  Formally verified Hierarchical Navigable Small World (HNSW) Vector Graph Index
 --  Supports Float32, Int8 (SQ8), and 4096-D Binary (1-bit Hamming) ANN Search
---  (ADR-003, CRIT-06, CRIT-07, MED-03)
+--  (ADR-003, ADR-006, BR-003)
 pragma SPARK_Mode (On);
 
 with Nhe_O.Types;  use Nhe_O.Types;
@@ -58,7 +58,7 @@ package Nhe_O.HNSW is
       Nodes      : HNSW_Node_Pool  := [others => (others => <>)];
    end record;
 
-   --  Structural invariant check for an HNSW_Index (MED-03)
+   --  Structural invariant check for an HNSW_Index
    function Is_Valid_HNSW (Index : HNSW_Index) return Boolean is
      (if Index.Node_Count > 0 then Index.Entry_Node <= Index.Node_Count else True);
 
@@ -93,7 +93,7 @@ package Nhe_O.HNSW is
                     and then Is_Valid_HNSW (Index);
 
    --  True iff Insert_Vector for Doc_Id can succeed without exceeding Max_HNSW_Nodes
-   --  (either via in-place update, inactive slot reuse, or growing Node_Count, R3-MED-04)
+   --  (either via in-place update, inactive slot reuse, or growing Node_Count)
    function Has_HNSW_Capacity
      (Index  : HNSW_Index;
       Doc_Id : Positive) return Boolean
@@ -105,7 +105,7 @@ package Nhe_O.HNSW is
      with Pre => Index.Node_Count <= Max_HNSW_Nodes;
 
    --  Deactivate a document's vector node, scrub incoming neighbor edges, trim
-   --  trailing inactive nodes, and recompute Entry_Node / Top_Layer (R3-HIGH-02, R3-MED-04)
+   --  trailing inactive nodes, and recompute Entry_Node / Top_Layer
    procedure Remove_Vector
      (Index  : in out HNSW_Index;
       Doc_Id : in     Positive)
@@ -116,7 +116,7 @@ package Nhe_O.HNSW is
                     and then Index.Node_Count <= Index.Node_Count'Old
                     and then Is_Valid_HNSW (Index);
 
-   --  Restore a previously saved HNSW_Node snapshot into Index on MVCC rollback (R3-HIGH-02)
+   --  Restore a saved HNSW_Node snapshot into Index on MVCC rollback (BR-002)
    procedure Restore_Vector_Node
      (Index     : in out HNSW_Index;
       Doc_Id    : in     Positive;
@@ -131,7 +131,7 @@ package Nhe_O.HNSW is
 
    --  Insert or update a vector in the HNSW graph, computing Binary (1-bit),
    --  scale-preserving Int8 (SQ8), and Matryoshka Float32 representations and
-   --  linking distance-pruned small-world edges (CRIT-06, CRIT-07)
+   --  linking distance-pruned small-world edges
    procedure Insert_Vector
      (Index      : in out HNSW_Index;
       Doc_Id     : in     Positive;
@@ -167,7 +167,7 @@ package Nhe_O.HNSW is
                     and then Q_Int8.Dim = Q_Binary.Dim;
 
    --  Hierarchical ANN search: greedy upper-layer descent (Top_Layer .. 2) followed by
-   --  layer-1 greedy descent + multi-wave small-world beam expansion (CRIT-06)
+   --  layer-1 greedy descent + multi-wave small-world beam expansion
    procedure Search_KNN
      (Index    : in     HNSW_Index;
       Query    : in     Vector_Value;

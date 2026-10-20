@@ -32,7 +32,7 @@ extern "C" {
 #define NHE_O_MAX_TX_ID        8192
 #define NHE_O_MAX_CLOG_ENTRIES 8192
 #define NHE_O_MAX_WAL_FRAMES   4096
-#define NHE_O_MAX_KV_KEYS      16
+#define NHE_O_MAX_KV_KEYS      64
 
 /* Status codes returned in *out_status */
 typedef enum {
@@ -64,7 +64,7 @@ int nhe_o_version_minor(void);
 void nhe_o_init(int *out_status);
 
 /* Initialize embedded Nhe_O runtime state with custom DB/WAL paths & dimension (1..4096),
- * recovering existing WAL/DB state when present on disk (R2-CRIT-02) */
+ * recovering existing WAL/DB state when present on disk */
 void nhe_o_init_with_paths(
     const char *db_path_buf,
     int         db_path_len,

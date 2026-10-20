@@ -1,5 +1,5 @@
 --  Formally verified C ABI / FFI SDK Implementation Body for Nhe_O
---  (Epic 03 / ADR-005 / HIGH-01 / HIGH-02 / HIGH-08)
+--  (ADR-005 / BR-007)
 pragma SPARK_Mode (On);
 
 with Nhe_O.IO;     use Nhe_O.IO;
@@ -131,16 +131,23 @@ package body Nhe_O.C_API is
       Probe_Page    : Page_Buffer;
       Probe_DB_Ok   : Boolean;
       Probe_DB_EOF  : Boolean;
+      Probe_P0_Ok   : Boolean;
+      Probe_P0_EOF  : Boolean;
       Frame_Tx      : Valid_Tx_Id;
       Frame_Pg      : Valid_Page_Id;
       KV_Replayed   : Natural;
       KV_Stat       : Engine_Status;
-      WAL_Replayed  : Natural;
-      Max_Rec_Tx    : Tx_Id;
-      WAL_Stat      : Engine_Status;
-      RAG_Stat      : Engine_Status;
+      WAL_Replayed   : Natural;
+      Max_Rec_Tx     : Tx_Id;
+      Max_Seen_Tx    : Tx_Id := 0;
+      Max_Seen_KV_Tx : Tx_Id := 0;
+      Probe_Slot_Pg  : Slotted_Page;
+      Probe_Slot_Ok  : Boolean;
+      WAL_Stat       : Engine_Status;
+      RAG_Stat       : Engine_Status;
       pragma Warnings (Off, Probe_Frame);
       pragma Warnings (Off, Probe_Page);
+      pragma Warnings (Off, Probe_P0_Ok);
       pragma Warnings (Off, Frame_Pg);
       pragma Warnings (Off, KV_Replayed);
       pragma Warnings (Off, WAL_Replayed);
@@ -165,7 +172,10 @@ package body Nhe_O.C_API is
       DB_P  := To_Bounded_Text (DB_Path_Buf, Text_Length (DB_Path_Len));
       WAL_P := To_Bounded_Text (WAL_Path_Buf, Text_Length (WAL_Path_Len));
 
-      if Has_Embedded_NUL (DB_P) or else Has_Embedded_NUL (WAL_P) then
+      if Has_Embedded_NUL (DB_P)
+        or else Has_Embedded_NUL (WAL_P)
+        or else Equal_Text (DB_P, WAL_P)
+      then
          Out_Status := C_Status_Invalid_Arg;
          return;
       end if;
@@ -175,7 +185,7 @@ package body Nhe_O.C_API is
       Init_RAG_Engine (G_RAG_Engine, Vector_Dim (Dim));
 
       --  Recover existing WAL / DB state when files already exist on disk
-      --  and propagate any torn frame/page or CRC32 failure (R2-CRIT-02, R3-HIGH-01)
+      --  and propagate any torn frame/page or CRC32 failure
       Check_File_Exists (G_WAL_Path, WAL_Exists);
       if WAL_Exists then
          Read_WAL_Frame (G_WAL_Path, 0, Probe_Frame, Probe_WAL_Ok, Probe_EOF);
@@ -209,11 +219,11 @@ package body Nhe_O.C_API is
                return;
             end if;
 
-            if Max_Rec_Tx in 1 .. Max_Tx_Id - 1 then
-               G_Next_Tx := Max_Rec_Tx + 1;
+            if Max_Rec_Tx > Max_Seen_Tx then
+               Max_Seen_Tx := Max_Rec_Tx;
             end if;
 
-            --  Advance G_Next_Tx and G_Next_KV_Seq past all valid WAL frames (R3-CRIT-01, R3-CRIT-02)
+            --  Scan all valid WAL frames for max transaction and KV sequence IDs
             for Idx in 0 .. Max_WAL_Scan_Frames - 1 loop
                pragma Loop_Invariant (G_WAL_Path.Length > 0);
                Read_WAL_Frame (G_WAL_Path, Idx, Probe_Frame, Probe_WAL_Ok);
@@ -221,12 +231,12 @@ package body Nhe_O.C_API is
                if Verify_WAL_Frame (Probe_Frame) then
                   Decode_WAL_Frame (Probe_Frame, Frame_Tx, Frame_Pg, Probe_Page);
                   if Get_WAL_Frame_Kind (Probe_Frame) = WAL_Frame_KV then
-                     if Frame_Tx >= G_Next_KV_Seq and then Frame_Tx < Max_Tx_Id then
-                        G_Next_KV_Seq := Frame_Tx + 1;
+                     if Frame_Tx > Max_Seen_KV_Tx then
+                        Max_Seen_KV_Tx := Frame_Tx;
                      end if;
                   else
-                     if Frame_Tx >= G_Next_Tx and then Frame_Tx < Max_Tx_Id then
-                        G_Next_Tx := Frame_Tx + 1;
+                     if Frame_Tx > Max_Seen_Tx then
+                        Max_Seen_Tx := Frame_Tx;
                      end if;
                   end if;
                end if;
@@ -241,7 +251,20 @@ package body Nhe_O.C_API is
             G_KV_Store := (others => <>);
             Out_Status := C_Status_IO_Error;
             return;
+         elsif not Probe_DB_Ok and then Probe_DB_EOF then
+            --  Allow a 0-byte empty placeholder .db file, but reject a truncated 1-page (4096 B) .db file
+            Read_Page (G_DB_Path, 0, Probe_Page, Probe_P0_Ok, Probe_P0_EOF);
+            if not Probe_P0_EOF then
+               G_KV_Store := (others => <>);
+               Out_Status := C_Status_IO_Error;
+               return;
+            end if;
          elsif Probe_DB_Ok then
+            Decode_Slotted_Page (Probe_Page, Probe_Slot_Pg, Probe_Slot_Ok);
+            if Probe_Slot_Ok and then Probe_Slot_Pg.Page_LSN_Tx > Max_Seen_Tx then
+               Max_Seen_Tx := Probe_Slot_Pg.Page_LSN_Tx;
+            end if;
+
             Recover_RAG_Engine
               (Engine   => G_RAG_Engine,
                Dim      => Vector_Dim (Dim),
@@ -256,22 +279,29 @@ package body Nhe_O.C_API is
             end if;
 
             for Slot in RAG_Doc_Slot loop
+               pragma Loop_Invariant (Max_Seen_Tx <= Max_Tx_Id);
                if G_RAG_Engine.Docs (Slot).Active then
-                  if G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmin >= G_Next_Tx
-                    and then G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmin < Max_Tx_Id
-                  then
-                     G_Next_Tx := G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmin + 1;
+                  if G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmin > Max_Seen_Tx then
+                     Max_Seen_Tx := G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmin;
                   end if;
-                  if G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmax >= G_Next_Tx
-                    and then G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmax < Max_Tx_Id
-                  then
-                     G_Next_Tx := G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmax + 1;
+                  if G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmax > Max_Seen_Tx then
+                     Max_Seen_Tx := G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmax;
                   end if;
                end if;
             end loop;
          end if;
       end if;
 
+      if Max_Seen_Tx = Max_Tx_Id or else Max_Seen_KV_Tx = Max_Tx_Id then
+         G_KV_Store := (others => <>);
+         Init_RAG_Engine (G_RAG_Engine, 3);
+         Out_Status := C_Status_Capacity_Exceeded;
+         return;
+      end if;
+
+      pragma Assert (Max_Seen_Tx < Max_Tx_Id and then Max_Seen_KV_Tx < Max_Tx_Id);
+      G_Next_Tx     := Valid_Tx_Id (Max_Seen_Tx + 1);
+      G_Next_KV_Seq := Valid_Tx_Id (Max_Seen_KV_Tx + 1);
       G_Initialized := True;
       Out_Status    := C_Status_Ok;
    end C_Init_With_Paths;

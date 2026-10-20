@@ -1,6 +1,6 @@
 # 4KB TOAST Overflow Pages & Vector Quantization for Universal Local LLM RAG
 
-> **Takeaway:** Pairing 4KB primary slotted pages with PostgreSQL-style TOAST overflow chains (`Overflow_Page_Id`) and vector quantization (`Float32`, `Int8`, `Binary`) allows an embedded database to support arbitrary embedding dimensions up to 4096-D and multi-kilobyte RAG parent chunks while keeping metadata filtering fast and reducing HNSW memory footprints by 4x–32x alongside local LLMs.
+> **Takeaway:** Pairing 4KB primary slotted pages with PostgreSQL-style TOAST overflow chains (`TOAST_Pointer` / `Root_Overflow_Page`) and vector quantization (`Float32`, `Int8`, `Binary`) allows an embedded database to support arbitrary embedding dimensions up to 4096-D and multi-kilobyte RAG parent chunks while keeping metadata filtering fast and reducing HNSW memory footprints by 4x–32x alongside local LLMs.
 
 **Tags:** ai, swe
 **Related ADRs:** [ADR-003](../../DECISIONS.md)
@@ -30,7 +30,7 @@ Database engines and vector search systems solve these three problems using two 
 Inspired by PostgreSQL's **TOAST** (*The Oversized-Attribute Storage Technique*):
 - **Primary Slotted Page (`4096 bytes`)**: Stores compact relational columns, `JSONB` filter metadata, MVCC transaction headers (`Xmin`, `Xmax`), and small inline attributes (`<= 512 bytes`).
 - **16-Byte Inline TOAST Pointer**: When an attribute (such as a `4096-D` `Float32` vector or an `8 KB` parent document chunk) exceeds the inline threshold, the primary tuple stores only a **16-byte descriptor** (`Root_Overflow_Page`, `Total_Byte_Length`, `Chunk_Count`, `Payload_CRC32`) instead of the multi-kilobyte payload.
-- **Linked 4KB TOAST Overflow Pages**: The oversized payload is split into fixed `4096-byte` overflow pages linked via `Next_Overflow_Page : Page_Id` and protected by per-page CRC32 checksums.
+- **Linked 4KB TOAST Overflow Pages**: The oversized payload is split into fixed `4096-byte` overflow pages linked via `Next_Page_Id : Valid_Page_Id` and protected by per-page CRC32 checksums.
 
 **Why does this make Hybrid RAG so fast?**
 When a RAG query filters documents by metadata (`SELECT chunk FROM docs WHERE meta @> '{"project": "nhe_o"}' ORDER BY embedding <-> $1 LIMIT 5`), the engine scans primary 4KB pages that pack dozens of rows per page. Cold 16KB vectors sitting in TOAST overflow pages are **never read from disk** for rows that fail the `JSONB` filter!
@@ -93,10 +93,10 @@ During a **Two-Stage Matryoshka / Quantized RAG Query**:
 
 ## 5. Where it lives in the project
 
-- **ADR**: [`ADR-003`](../../DECISIONS.md#L30-L34) — *4KB Slotted Pages with TOAST Overflow Chains, 4096-D Vectors & Quantization for Universal RAG*.
+- **ADR**: [`ADR-003`](../../DECISIONS.md) — *4KB Slotted Pages with TOAST Overflow Chains, 4096-D Vectors & Quantization for Universal RAG*.
 - **Domain Invariants**:
-  - [`BR-003`](../../domain/business-rules.md#L11) — *PostgreSQL Vector, Quantization & JSONB Integrity*.
-  - [`BR-006`](../../domain/business-rules.md#L14) — *4KB Slotted-Page & TOAST Overflow Chain Invariant*.
+  - [`BR-003`](../../domain/business-rules.md) — *PostgreSQL Vector, Scale-Aware Quantization & RFC 8259 JSONB Integrity*.
+  - [`BR-006`](../../domain/business-rules.md) — *4KB `"SLOT"` Primary Pages, `"TOAS"` Overflow Chains, `"RMET"` Metadata & `"VTST"` Stage-2 Vector Re-Ranking*.
 - **Active Epic**: [`docs/epics/02-storage-indexing-and-rag-executor/PROGRESS.md`](../../epics/02-storage-indexing-and-rag-executor/PROGRESS.md) — Tasks 1, 2, 4, and 6.
 - **Code Modules**: [`src/nhe_o-vector.ads`](../../../src/nhe_o-vector.ads) and [`src/nhe_o-transaction.ads`](../../../src/nhe_o-transaction.ads).
 

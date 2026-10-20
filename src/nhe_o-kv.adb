@@ -113,6 +113,9 @@ package body Nhe_O.KV is
      (Text   : in     Bounded_Text;
       Parsed :    out Integer_64;
       Is_Int :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Post   => True
    is
       Start_Idx : Positive := 1;
       Neg       : Boolean  := False;
@@ -486,7 +489,9 @@ package body Nhe_O.KV is
         or else Raw_TTL > 1
         or else Raw_Key_Len = 0
         or else Raw_Key_Len > Max_Ident_Len
+        or else Page (8) /= 0
         or else Raw_Val_Len > Unsigned_32 (Max_Text_Len)
+        or else (for some B in 609 .. Nhe_O.Page_Size => Page (B) /= 0)
       then
          return;
       end if;
@@ -500,6 +505,12 @@ package body Nhe_O.KV is
 
       if Exp_U64 > Unsigned_64 (Epoch_Seconds'Last)
         or else Acc_U64 > Unsigned_64 (Epoch_Seconds'Last)
+        or else (Raw_TTL = 0 and then Exp_U64 /= 0)
+        or else (Raw_Op = 2
+                 and then (Raw_TTL /= 0
+                           or else Raw_Val_Len /= 0
+                           or else Exp_U64 /= 0
+                           or else Acc_U64 /= 0))
       then
          return;
       end if;
@@ -708,6 +719,7 @@ package body Nhe_O.KV is
       Replayed_Ops :    out Natural;
       Status       :    out Engine_Status)
    is
+      Saved_Store   : constant KV_Store := Store;
       Frame         : WAL_Frame_Buffer;
       Page          : Page_Buffer;
       Frame_Tx      : Valid_Tx_Id;
@@ -735,13 +747,17 @@ package body Nhe_O.KV is
             if Is_EOF then
                return;
             else
-               Status := Status_IO_Error;
+               Store        := Saved_Store;
+               Replayed_Ops := 0;
+               Status       := Status_IO_Error;
                return;
             end if;
          end if;
 
          if not Verify_WAL_Frame (Frame) then
-            Status := Status_IO_Error;
+            Store        := Saved_Store;
+            Replayed_Ops := 0;
+            Status       := Status_IO_Error;
             return;
          end if;
 
@@ -749,7 +765,9 @@ package body Nhe_O.KV is
             Decode_WAL_Frame (Frame, Frame_Tx, Page_Id, Page);
             Decode_KV_Wal_Page (Page, Op, Slot, Valid);
             if not Valid then
-               Status := Status_Invalid_Syntax;
+               Store        := Saved_Store;
+               Replayed_Ops := 0;
+               Status       := Status_Invalid_Syntax;
                return;
             end if;
 
@@ -761,7 +779,7 @@ package body Nhe_O.KV is
                   Effective_Now := Slot.Last_Access;
                end if;
 
-               --  Reclaim any previously replayed slots that expired by Effective_Now (R3-HIGH-01)
+               --  Reclaim any earlier replayed slots that have expired by Effective_Now
                for I in KV_Slot_Index loop
                   if Is_Slot_Expired (Store.Slots (I), Effective_Now) then
                      Store.Slots (I).Occupied := False;
@@ -786,16 +804,20 @@ package body Nhe_O.KV is
          end if;
       end loop;
 
-      --  Detect WAL truncation or torn/corrupted frame at Max_Frames (R2-HIGH-05, R3-HIGH-01)
+      --  Detect WAL truncation or torn/corrupted frame at Max_Frames
       if Max_Frames < Max_Page_Id then
          Read_WAL_Frame (WAL_Path, Valid_Page_Id (Max_Frames), Frame, Read_Ok, Is_EOF);
          if Read_Ok then
-            Status := (if Verify_WAL_Frame (Frame)
-                       then Status_Capacity_Exceeded
-                       else Status_IO_Error);
+            Store        := Saved_Store;
+            Replayed_Ops := 0;
+            Status       := (if Verify_WAL_Frame (Frame)
+                             then Status_Capacity_Exceeded
+                             else Status_IO_Error);
             return;
          elsif not Is_EOF then
-            Status := Status_IO_Error;
+            Store        := Saved_Store;
+            Replayed_Ops := 0;
+            Status       := Status_IO_Error;
             return;
          end if;
       end if;

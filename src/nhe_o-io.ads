@@ -21,6 +21,7 @@ package Nhe_O.IO is
    --  WAL Frame: 24-byte header (Magic + Tx_Id + Page_Id + CRC32) + 4096-byte payload
    WAL_Header_Size : constant := 24;
    WAL_Frame_Size  : constant := WAL_Header_Size + Nhe_O.Page_Size;
+   Max_WAL_Frames  : constant := 4096;
    subtype WAL_Frame_Offset is Positive range 1 .. WAL_Frame_Size;
    type WAL_Frame_Buffer is array (WAL_Frame_Offset) of Byte
      with Convention => C;
@@ -44,7 +45,7 @@ package Nhe_O.IO is
                     and then (for all I in 1 .. Path.Length =>
                                 C_Path (I) = Path.Data (I));
 
-   --  Check whether a path exists on disk via POSIX access(F_OK) (R3-HIGH-01)
+   --  Check whether a path exists on disk via POSIX access(F_OK)
    procedure Check_File_Exists
      (File_Path : in     Bounded_Text;
       Exists    :    out Boolean)
@@ -73,7 +74,7 @@ package Nhe_O.IO is
           Pre    => File_Path.Length > 0;
 
    --  Read a 4096-byte slotted page at Page_Id, distinguishing clean EOF (0 bytes at
-   --  page boundary) from torn pages or I/O errors (R3-HIGH-01)
+   --  page boundary) from torn pages or I/O errors
    procedure Read_Page
      (File_Path : in     Bounded_Text;
       Page_Id   : in     Valid_Page_Id;
@@ -115,7 +116,7 @@ package Nhe_O.IO is
           Pre    => WAL_Path.Length > 0;
 
    --  Read a WAL frame at 0-based index Frame_Idx, distinguishing clean EOF (0 bytes at
-   --  exact frame boundary) from torn frames or I/O errors (HIGH-06)
+   --  exact frame boundary) from torn frames or I/O errors
    procedure Read_WAL_Frame
      (WAL_Path  : in     Bounded_Text;
       Frame_Idx : in     Valid_Page_Id;
@@ -155,7 +156,7 @@ package Nhe_O.IO is
           Always_Terminates;
 
    --  Read command-line argument at 1-based position Index, reporting whether an
-   --  argument was present but exceeded Max_Text_Len (512 bytes) (HIGH-06)
+   --  argument was present but exceeded Max_Text_Len (512 bytes)
    procedure Read_CLI_Arg
      (Index    : in     Positive;
       Arg      :    out Bounded_Text;

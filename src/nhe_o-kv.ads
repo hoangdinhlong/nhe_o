@@ -1,5 +1,5 @@
 --  Formally verified Redis-compatible Key-Value Cache Engine with TTL, LRU Eviction,
---  and Optional WAL Persistence & Crash Recovery (BR-004, HIGH-08, Q-004, MED-03)
+--  and Optional WAL Persistence & Crash Recovery (ADR-007, BR-004, Q-004)
 pragma SPARK_Mode (On);
 
 with Interfaces;        use Interfaces;
@@ -63,7 +63,7 @@ package Nhe_O.KV is
                     and then (if Has_TTL then TTL_Sec > 0 and then Now <= Epoch_Seconds'Last - TTL_Sec),
           Post   => Exists (Store, Key, Now);
 
-   --  Redis `GET`: Retrieve value if present and not expired; updates LRU timestamp (HIGH-08)
+   --  Redis `GET`: Retrieve value if present and not expired; updates LRU timestamp
    procedure Get
      (Store  : in out KV_Store;
       Key    : in     Bounded_Ident;
@@ -84,7 +84,7 @@ package Nhe_O.KV is
           Always_Terminates,
           Post   => not Exists (Store, Key, 0);
 
-   --  Redis `EXPIRE`: Attach a TTL in seconds to an existing live key (HIGH-08)
+   --  Redis `EXPIRE`: Attach a TTL in seconds to an existing live key
    procedure Expire
      (Store   : in out KV_Store;
       Key     : in     Bounded_Ident;
@@ -96,7 +96,7 @@ package Nhe_O.KV is
           Pre    => TTL_Sec > 0 and then Now <= Epoch_Seconds'Last - TTL_Sec,
           Post   => (if Updated then Exists (Store, Key, Now));
 
-   --  Redis `TTL`: Return remaining seconds (-2 if missing/expired, -1 if no TTL) (HIGH-08)
+   --  Redis `TTL`: Return remaining seconds (-2 if missing/expired, -1 if no TTL)
    function Remaining_TTL
      (Store : KV_Store;
       Key   : Bounded_Ident;
@@ -105,7 +105,7 @@ package Nhe_O.KV is
           Post   => Remaining_TTL'Result >= -2
                     and then (if Remaining_TTL'Result > 0 then Exists (Store, Key, Now));
 
-   --  Redis `INCRBY`: Atomically increment numeric value of Key by Delta_Val (HIGH-08)
+   --  Redis `INCRBY`: Atomically increment numeric value of Key by Delta_Val
    procedure Incr_By
      (Store     : in out KV_Store;
       Key       : in     Bounded_Ident;

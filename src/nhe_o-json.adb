@@ -6,7 +6,7 @@ package body Nhe_O.JSON is
      (C = ' ' or else C = ASCII.HT or else C = ASCII.LF or else C = ASCII.CR);
 
    -------------------------------------------------------------------------
-   --  Is_Valid_JSON (RFC 8259 Objects, Arrays, and Scalar Roots, HIGH-04)
+   --  Is_Valid_JSON (RFC 8259 Objects, Arrays, and Scalar Roots)
    -------------------------------------------------------------------------
 
    function Is_Valid_JSON (Raw : Bounded_Text) return Boolean is
@@ -44,6 +44,7 @@ package body Nhe_O.JSON is
       Lex           : Lex_Mode     := Lex_None;
       Escaped       : Boolean      := False;
       Hex_Needed    : Natural range 0 .. 4 := 0;
+      Hex_Non_Zero  : Boolean      := False;
       String_Is_Key : Boolean      := False;
       Num_Has_Dot   : Boolean      := False;
       Num_Has_Exp   : Boolean      := False;
@@ -68,14 +69,21 @@ package body Nhe_O.JSON is
                   return False;
                elsif Hex_Needed > 0 then
                   if C in '0' .. '9' | 'a' .. 'f' | 'A' .. 'F' then
+                     if C /= '0' then
+                        Hex_Non_Zero := True;
+                     end if;
+                     if Hex_Needed = 1 and then not Hex_Non_Zero then
+                        return False;
+                     end if;
                      Hex_Needed := Hex_Needed - 1;
                   else
                      return False;
                   end if;
                elsif Escaped then
                   if C = 'u' then
-                     Escaped    := False;
-                     Hex_Needed := 4;
+                     Escaped      := False;
+                     Hex_Needed   := 4;
+                     Hex_Non_Zero := False;
                   elsif C in '"' | '\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' then
                      Escaped := False;
                   else
@@ -289,7 +297,7 @@ package body Nhe_O.JSON is
    end Is_Valid_JSON;
 
    -------------------------------------------------------------------------
-   --  Is_Valid_Field_Value (HIGH-04)
+   --  Is_Valid_Field_Value
    -------------------------------------------------------------------------
 
    function First_Non_WS_Char (Val : Bounded_Text) return Character is
@@ -525,7 +533,7 @@ package body Nhe_O.JSON is
    end Put_Field;
 
    -------------------------------------------------------------------------
-   --  Parse_JSONB (Decompose JSON object string into JSONB_Document, LOW-01)
+   --  Parse_JSONB (Decompose JSON object string into JSONB_Document)
    -------------------------------------------------------------------------
 
    procedure Parse_JSONB
@@ -538,9 +546,10 @@ package body Nhe_O.JSON is
       Val_Text : Bounded_Text;
       Val_Kind : JSONB_Value_Kind;
       Sub_Stat : Engine_Status;
-      Brace_D  : Natural;
-      In_Str   : Boolean;
-      Esc      : Boolean;
+      Brace_D     : Natural;
+      In_Str      : Boolean;
+      Esc         : Boolean;
+      First_Field : Boolean := True;
    begin
       Doc := (others => <>);
 
@@ -562,9 +571,10 @@ package body Nhe_O.JSON is
       end if;
       Pos := Pos + 1;
 
-      --  Parse up to Max_JSON_Fields top-level key/value entries
-      for Field_Step in 1 .. Max_JSON_Fields + 1 loop
-         pragma Loop_Invariant (Pos in 1 .. Raw.Length + 1);
+      --  Parse top-level key/value entries (up to Max_JSON_Fields unique keys)
+      for Step in 1 .. Max_Text_Len loop
+         exit when Pos > Raw.Length;
+         pragma Loop_Invariant (Pos in 1 .. Raw.Length);
 
          while Pos <= Raw.Length and then Is_Whitespace (Raw.Data (Pos)) loop
             pragma Loop_Invariant (Pos in 1 .. Raw.Length);
@@ -583,7 +593,7 @@ package body Nhe_O.JSON is
             return;
          end if;
 
-         if Field_Step > 1 then
+         if not First_Field then
             if Raw.Data (Pos) /= ',' or else Pos = Raw.Length then
                Doc    := (others => <>);
                Status := Status_Invalid_Syntax;
@@ -603,6 +613,7 @@ package body Nhe_O.JSON is
                return;
             end if;
          end if;
+         First_Field := False;
 
          if Raw.Data (Pos) /= '"' or else Pos = Raw.Length then
             Doc    := (others => <>);
@@ -611,7 +622,7 @@ package body Nhe_O.JSON is
          end if;
          Pos := Pos + 1;
 
-         --  Extract key string (unescaping standard RFC 8259 sequences including \uXXXX, R3-MED-01)
+         --  Extract key string (unescaping standard RFC 8259 sequences including \uXXXX)
          Key_Id := (Length => 0, Data => [others => ' ']);
          Esc    := False;
          while Pos <= Raw.Length loop
@@ -668,7 +679,7 @@ package body Nhe_O.JSON is
             return;
          end if;
 
-         --  Skip whitespace, require exactly one ':', then skip whitespace (R2-MED-02)
+         --  Skip whitespace, require exactly one ':', then skip whitespace
          while Pos <= Raw.Length and then Is_Whitespace (Raw.Data (Pos)) loop
             pragma Loop_Invariant (Pos in 1 .. Raw.Length);
             pragma Loop_Variant (Increases => Pos);
@@ -838,11 +849,11 @@ package body Nhe_O.JSON is
       end loop;
 
       Doc    := (others => <>);
-      Status := Status_Capacity_Exceeded;
+      Status := Status_Invalid_Syntax;
    end Parse_JSONB;
 
    -------------------------------------------------------------------------
-   --  Get_Field (`->`) & Get_Field_Text (`->>`) (HIGH-04, R3-MED-01)
+   --  Get_Field (`->`) & Get_Field_Text (`->>`)
    -------------------------------------------------------------------------
 
    procedure Format_Quoted_JSON_String
@@ -977,7 +988,7 @@ package body Nhe_O.JSON is
    end Get_Field_Text;
 
    -------------------------------------------------------------------------
-   --  Contains (`@>`) with Canonical Numeric, Nested Object, and Array Matching (R3-MED-01)
+   --  Contains (`@>`) with Canonical Numeric, Nested Object, and Array Matching
    -------------------------------------------------------------------------
 
    procedure Normalize_JSON_Number
@@ -1179,8 +1190,9 @@ package body Nhe_O.JSON is
 
    --  Extract top-level elements of a JSON array `[e1, e2, ...]` (up to Max_JSON_Fields)
    procedure Extract_Array_Elements
-     (Arr_Raw : in     Bounded_Text;
-      Elems   :    out JSONB_Document)
+     (Arr_Raw  : in     Bounded_Text;
+      Elems    :    out JSONB_Document;
+      Complete :    out Boolean)
      with Post   => Elems.Count <= Max_JSON_Fields,
           Global => null
    is
@@ -1188,12 +1200,12 @@ package body Nhe_O.JSON is
       Elem_Txt : Bounded_Text;
       Elem_Knd : JSONB_Value_Kind;
       Sub_Stat : Engine_Status;
-      pragma Warnings (Off, Sub_Stat);
       Brace_D  : Natural;
       In_Str   : Boolean;
       Esc      : Boolean;
    begin
-      Elems := (others => <>);
+      Elems    := (others => <>);
+      Complete := False;
       while Pos <= Arr_Raw.Length and then Arr_Raw.Data (Pos) /= '[' loop
          pragma Loop_Invariant (Pos in 1 .. Arr_Raw.Length);
          pragma Loop_Variant (Increases => Pos);
@@ -1215,7 +1227,10 @@ package body Nhe_O.JSON is
             Pos := Pos + 1;
          end loop;
 
-         if Pos > Arr_Raw.Length or else Arr_Raw.Data (Pos) = ']' then
+         if Pos > Arr_Raw.Length then
+            return;
+         elsif Arr_Raw.Data (Pos) = ']' then
+            Complete := True;
             return;
          end if;
 
@@ -1247,15 +1262,24 @@ package body Nhe_O.JSON is
                pragma Loop_Variant (Increases => Pos);
                if Esc then
                   Esc := False;
-                  if Arr_Raw.Data (Pos) = 'u' and then Pos <= Arr_Raw.Length - 4 then
-                     Append_Unicode_Text
-                       (Arr_Raw.Data (Pos + 1), Arr_Raw.Data (Pos + 2),
-                        Arr_Raw.Data (Pos + 3), Arr_Raw.Data (Pos + 4),
-                        Elem_Txt, Sub_Stat);
-                     Pos := Pos + 4;
+                  if Arr_Raw.Data (Pos) = 'u' then
+                     if Pos <= Arr_Raw.Length - 4 then
+                        Append_Unicode_Text
+                          (Arr_Raw.Data (Pos + 1), Arr_Raw.Data (Pos + 2),
+                           Arr_Raw.Data (Pos + 3), Arr_Raw.Data (Pos + 4),
+                           Elem_Txt, Sub_Stat);
+                        if Sub_Stat /= Status_Ok then
+                           return;
+                        end if;
+                        Pos := Pos + 4;
+                     else
+                        return;
+                     end if;
                   elsif Elem_Txt.Length < Max_Text_Len then
                      Elem_Txt.Length := Elem_Txt.Length + 1;
                      Elem_Txt.Data (Elem_Txt.Length) := Decode_Escape_Char (Arr_Raw.Data (Pos));
+                  else
+                     return;
                   end if;
                elsif Arr_Raw.Data (Pos) = '\' then
                   Esc := True;
@@ -1266,6 +1290,8 @@ package body Nhe_O.JSON is
                   if Elem_Txt.Length < Max_Text_Len then
                      Elem_Txt.Length := Elem_Txt.Length + 1;
                      Elem_Txt.Data (Elem_Txt.Length) := Arr_Raw.Data (Pos);
+                  else
+                     return;
                   end if;
                end if;
                Pos := Pos + 1;
@@ -1283,6 +1309,8 @@ package body Nhe_O.JSON is
                if Elem_Txt.Length < Max_Text_Len then
                   Elem_Txt.Length := Elem_Txt.Length + 1;
                   Elem_Txt.Data (Elem_Txt.Length) := Arr_Raw.Data (Pos);
+               else
+                  return;
                end if;
                if In_Str then
                   if Esc then
@@ -1330,6 +1358,8 @@ package body Nhe_O.JSON is
                if Elem_Txt.Length < Max_Text_Len then
                   Elem_Txt.Length := Elem_Txt.Length + 1;
                   Elem_Txt.Data (Elem_Txt.Length) := Arr_Raw.Data (Pos);
+               else
+                  return;
                end if;
                Pos := Pos + 1;
             end loop;
@@ -1343,36 +1373,100 @@ package body Nhe_O.JSON is
             Active => True
          );
       end loop;
+
+      while Pos <= Arr_Raw.Length and then Is_Whitespace (Arr_Raw.Data (Pos)) loop
+         pragma Loop_Invariant (Pos in 1 .. Arr_Raw.Length);
+         pragma Loop_Variant (Increases => Pos);
+         Pos := Pos + 1;
+      end loop;
+      if Pos <= Arr_Raw.Length and then Arr_Raw.Data (Pos) = ']' then
+         Complete := True;
+      end if;
    end Extract_Array_Elements;
+
+   function Flat_Object_Contains (L_Obj_Raw, R_Obj_Raw : Bounded_Text) return Boolean
+     with Post   => True,
+          Global => null
+   is
+      L_Doc  : JSONB_Document;
+      R_Doc  : JSONB_Document;
+      L_Stat : Engine_Status;
+      R_Stat : Engine_Status;
+      Found  : Boolean;
+   begin
+      if Equal_Text (Strip_JSON_Whitespace (L_Obj_Raw), Strip_JSON_Whitespace (R_Obj_Raw)) then
+         return True;
+      end if;
+
+      Parse_JSONB (L_Obj_Raw, L_Doc, L_Stat);
+      Parse_JSONB (R_Obj_Raw, R_Doc, R_Stat);
+      if L_Stat /= Status_Ok or else R_Stat /= Status_Ok then
+         return False;
+      end if;
+
+      for R in 1 .. R_Doc.Count loop
+         pragma Loop_Invariant (R in 1 .. R_Doc.Count);
+         if R_Doc.Fields (R).Active then
+            Found := False;
+            for L in 1 .. L_Doc.Count loop
+               pragma Loop_Invariant (L in 1 .. L_Doc.Count);
+               if L_Doc.Fields (L).Active
+                 and then Equal_Ident (L_Doc.Fields (L).Key, R_Doc.Fields (R).Key)
+                 and then L_Doc.Fields (L).Kind = R_Doc.Fields (R).Kind
+                 and then Values_Match_Scalar
+                   (L_Doc.Fields (L).Val,
+                    R_Doc.Fields (R).Val,
+                    L_Doc.Fields (L).Kind)
+               then
+                  Found := True;
+                  exit;
+               end if;
+            end loop;
+            if not Found then
+               return False;
+            end if;
+         end if;
+      end loop;
+      return True;
+   end Flat_Object_Contains;
 
    function Leaf_Array_Contains (L_Arr_Raw, R_Arr_Raw : Bounded_Text) return Boolean
      with Post   => True,
           Global => null
    is
-      L_Elems : JSONB_Document;
-      R_Elems : JSONB_Document;
-      Found   : Boolean;
+      L_Elems    : JSONB_Document;
+      R_Elems    : JSONB_Document;
+      L_Complete : Boolean;
+      R_Complete : Boolean;
+      Found      : Boolean;
    begin
       if Equal_Text (Strip_JSON_Whitespace (L_Arr_Raw), Strip_JSON_Whitespace (R_Arr_Raw)) then
          return True;
       end if;
 
-      Extract_Array_Elements (L_Arr_Raw, L_Elems);
-      Extract_Array_Elements (R_Arr_Raw, R_Elems);
+      Extract_Array_Elements (L_Arr_Raw, L_Elems, L_Complete);
+      Extract_Array_Elements (R_Arr_Raw, R_Elems, R_Complete);
+      if not L_Complete or else not R_Complete then
+         return False;
+      end if;
 
       for R in 1 .. R_Elems.Count loop
          pragma Loop_Invariant (R in 1 .. R_Elems.Count);
          Found := False;
          for L in 1 .. L_Elems.Count loop
             pragma Loop_Invariant (L in 1 .. L_Elems.Count);
-            if L_Elems.Fields (L).Kind = R_Elems.Fields (R).Kind
-              and then Values_Match_Scalar
-                (L_Elems.Fields (L).Val,
-                 R_Elems.Fields (R).Val,
-                 L_Elems.Fields (L).Kind)
-            then
-               Found := True;
-               exit;
+            if L_Elems.Fields (L).Kind = R_Elems.Fields (R).Kind then
+               case L_Elems.Fields (L).Kind is
+                  when JSONB_Object =>
+                     Found := Flat_Object_Contains (L_Elems.Fields (L).Val, R_Elems.Fields (R).Val);
+                  when others =>
+                     Found :=
+                       Values_Match_Scalar
+                         (L_Elems.Fields (L).Val,
+                          R_Elems.Fields (R).Val,
+                          L_Elems.Fields (L).Kind);
+               end case;
+               exit when Found;
             end if;
          end loop;
          if not Found then
@@ -1413,6 +1507,8 @@ package body Nhe_O.JSON is
                  and then L_Doc.Fields (L).Kind = R_Doc.Fields (R).Kind
                then
                   case L_Doc.Fields (L).Kind is
+                     when JSONB_Object =>
+                        Found := Flat_Object_Contains (L_Doc.Fields (L).Val, R_Doc.Fields (R).Val);
                      when JSONB_Array =>
                         Found := Leaf_Array_Contains (L_Doc.Fields (L).Val, R_Doc.Fields (R).Val);
                      when others =>
@@ -1437,16 +1533,21 @@ package body Nhe_O.JSON is
      with Post   => True,
           Global => null
    is
-      L_Elems : JSONB_Document;
-      R_Elems : JSONB_Document;
-      Found   : Boolean;
+      L_Elems    : JSONB_Document;
+      R_Elems    : JSONB_Document;
+      L_Complete : Boolean;
+      R_Complete : Boolean;
+      Found      : Boolean;
    begin
       if Equal_Text (Strip_JSON_Whitespace (L_Arr_Raw), Strip_JSON_Whitespace (R_Arr_Raw)) then
          return True;
       end if;
 
-      Extract_Array_Elements (L_Arr_Raw, L_Elems);
-      Extract_Array_Elements (R_Arr_Raw, R_Elems);
+      Extract_Array_Elements (L_Arr_Raw, L_Elems, L_Complete);
+      Extract_Array_Elements (R_Arr_Raw, R_Elems, R_Complete);
+      if not L_Complete or else not R_Complete then
+         return False;
+      end if;
 
       for R in 1 .. R_Elems.Count loop
          pragma Loop_Invariant (R in 1 .. R_Elems.Count);
@@ -1533,16 +1634,21 @@ package body Nhe_O.JSON is
      with Post   => True,
           Global => null
    is
-      L_Elems : JSONB_Document;
-      R_Elems : JSONB_Document;
-      Found   : Boolean;
+      L_Elems    : JSONB_Document;
+      R_Elems    : JSONB_Document;
+      L_Complete : Boolean;
+      R_Complete : Boolean;
+      Found      : Boolean;
    begin
       if Equal_Text (Strip_JSON_Whitespace (L_Arr_Raw), Strip_JSON_Whitespace (R_Arr_Raw)) then
          return True;
       end if;
 
-      Extract_Array_Elements (L_Arr_Raw, L_Elems);
-      Extract_Array_Elements (R_Arr_Raw, R_Elems);
+      Extract_Array_Elements (L_Arr_Raw, L_Elems, L_Complete);
+      Extract_Array_Elements (R_Arr_Raw, R_Elems, R_Complete);
+      if not L_Complete or else not R_Complete then
+         return False;
+      end if;
 
       for R in 1 .. R_Elems.Count loop
          pragma Loop_Invariant (R in 1 .. R_Elems.Count);

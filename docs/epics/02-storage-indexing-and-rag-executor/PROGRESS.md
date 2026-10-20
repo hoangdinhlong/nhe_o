@@ -8,7 +8,7 @@ Status legend: ☐ todo · ◐ in progress · ☑ done
 
 | # | Task | Status | Tests |
 |---|------|--------|-------|
-| 1 | Implement 4KB TOAST overflow page chains (`Overflow_Page_Id`, 16-byte inline TOAST pointer, and multi-page WAL redo pass) in `Nhe_O.Transaction` (`ADR-003`, `BR-006`) | ☑ | Suite `[5/11]` (`Write_TOAST_Chain`, `Read_TOAST_Chain`, `Redo_WAL_Recovery` verified) |
+| 1 | Implement 4KB TOAST overflow page chains (`TOAST_Pointer`, `Root_Overflow_Page`, 16-byte inline TOAST pointer, and multi-page WAL redo pass) in `Nhe_O.Transaction` (`ADR-003`, `BR-006`) | ☑ | Suite `[5/11]` (`Write_TOAST_Chain`, `Read_TOAST_Chain`, `Redo_WAL_Recovery` verified) |
 | 2 | Expand `Nhe_O.Vector` to `Max_Vector_Dim = 4096` and implement Scalar (`Int8`) & Binary (`1-bit` Hamming) quantization alongside `Float32` (`ADR-003`, `BR-003`) | ☑ | Suite `[2/11]` (4096-D `Float32`, `Int8` SQ8, and `Binary` Hamming verified) |
 | 3 | Implement multi-page B+Tree relational/primary-key index with deterministic node splitting in `SPARK_Mode (On)` | ☑ | Suite `[6/11]` (`Nhe_O.BTree` leaf/root splits, `Search_Key`, `Range_Scan`, page encode/decode verified) |
 | 4 | Implement bounded HNSW navigable small-world graph index for sub-linear ANN search over `Float32`, `Int8`, and `Binary` vectors | ☑ | Suite `[7/11]` (`Nhe_O.HNSW` multi-layer ANN search across all 3 encodings verified) |

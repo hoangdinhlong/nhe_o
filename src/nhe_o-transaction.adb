@@ -267,7 +267,15 @@ package body Nhe_O.Transaction is
       Scan_EOF     : Boolean;
       Hit_EOF      : Boolean := False;
       Total_Frames : Natural := 0;
+      Seen_Commits : Commit_Log := [others => Tx_Idle];
+      Scan_Kind    : WAL_Frame_Kind;
    begin
+      if Equal_Text (DB_Path, WAL_Path) then
+         Ctx.State := Tx_Aborted;
+         Status    := Status_IO_Error;
+         return;
+      end if;
+
       if Has_Embedded_NUL (DB_Path) or else Has_Embedded_NUL (WAL_Path) then
          Ctx.State := Tx_Aborted;
          Status    := Status_IO_Error;
@@ -282,7 +290,7 @@ package body Nhe_O.Transaction is
       end if;
 
       --  0. Pre-commit WAL scan: verify all existing frames & ensure EOF is reached
-      --     within Max_WAL_Scan_Frames before writing the commit barrier (R3-CRIT-02)
+      --     within Max_WAL_Scan_Frames before writing the commit barrier
       Check_File_Exists (WAL_Path, WAL_Exists);
       if WAL_Exists then
          for Step in 1 .. Max_WAL_Scan_Frames - 1 loop
@@ -304,6 +312,30 @@ package body Nhe_O.Transaction is
                Ctx.State := Tx_Aborted;
                Status    := Status_IO_Error;
                return;
+            end if;
+
+            Scan_Kind := Get_WAL_Frame_Kind (Scan_Frame);
+            if Scan_Kind in WAL_Frame_Data | WAL_Frame_Commit then
+               pragma Warnings (GNATprove, Off, "is set by");
+               Decode_WAL_Frame (Scan_Frame, Scan_Tx, Scan_Pg, Scan_Page);
+               pragma Warnings (GNATprove, On, "is set by");
+               if Scan_Kind = WAL_Frame_Commit then
+                  if Scan_Tx = Ctx.Id then
+                     Ctx.State := Tx_Aborted;
+                     Status    := Status_Tx_Aborted;
+                     return;
+                  elsif Is_Tx_Committed (Seen_Commits, Scan_Tx) then
+                     Ctx.State := Tx_Aborted;
+                     Status    := Status_IO_Error;
+                     return;
+                  end if;
+                  Set_CLOG_State (Seen_Commits, Scan_Tx, Tx_Committed);
+               elsif Is_Tx_Committed (Seen_Commits, Scan_Tx) then
+                  --  Data frame appearing after its transaction's commit barrier is corrupt
+                  Ctx.State := Tx_Aborted;
+                  Status    := Status_IO_Error;
+                  return;
+               end if;
             end if;
 
             Total_Frames := Step;
@@ -338,7 +370,7 @@ package body Nhe_O.Transaction is
       end if;
 
       --  2. NO-STEAL materialization: flush all WAL_Frame_Data pages staged by Ctx.Id
-      --     to DB_Path only after the commit barrier frame is durable on disk (R2-CRIT-01, R3-CRIT-02)
+      --     to DB_Path only after the commit barrier frame is durable on disk
       for Step in 1 .. Total_Frames loop
          pragma Loop_Invariant (Total_Frames < Max_WAL_Scan_Frames);
          Read_WAL_Frame
@@ -542,6 +574,12 @@ package body Nhe_O.Transaction is
       Chunk_Bytes   : Positive;
       WAL_Ok        : Boolean;
    begin
+      if Equal_Text (DB_Path, WAL_Path) then
+         Ptr    := (others => <>);
+         Status := Status_IO_Error;
+         return;
+      end if;
+
       if Nhe_O.IO.Has_Embedded_NUL (DB_Path)
         or else Nhe_O.IO.Has_Embedded_NUL (WAL_Path)
       then
@@ -681,8 +719,20 @@ package body Nhe_O.Transaction is
          end loop;
          Dst_Pos := Dst_Pos + Chunk_Bytes;
 
+         if (for some B in TOAST_Header_Size + Chunk_Bytes + 1 .. Nhe_O.Page_Size =>
+               Page (B) /= 0)
+         then
+            Payload := [others => 0];
+            Length  := 0;
+            Status  := Status_Invalid_Syntax;
+            return;
+         end if;
+
          if Chunk_Idx < Ptr.Chunk_Count then
-            if Next_U32 = 0 or else Next_U32 > Unsigned_32 (Max_Page_Id) then
+            if Chunk_Bytes /= TOAST_Chunk_Max_Bytes
+              or else Next_U32 /= Unsigned_32 (Cur_Page_Id + 1)
+              or else Next_U32 > Unsigned_32 (Max_Page_Id)
+            then
                Payload := [others => 0];
                Length  := 0;
                Status  := Status_Invalid_Syntax;
@@ -718,7 +768,7 @@ package body Nhe_O.Transaction is
    end Read_TOAST_Chain;
 
    -------------------------------------------------------------------------
-   --  Primary 4096-Byte Slotted Page Layout (`"SLOT"`, CRIT-01 / BR-006)
+   --  Primary 4096-Byte Slotted Page Layout (`"SLOT"` / BR-006)
    -------------------------------------------------------------------------
 
    procedure Encode_Slotted_Page
@@ -788,6 +838,8 @@ package body Nhe_O.Transaction is
       Stored_CRC  : Unsigned_32;
       Raw_Page_Id : Unsigned_32;
       Raw_Slots   : Unsigned_32;
+      Raw_Free    : Unsigned_32;
+      Exp_Free    : Unsigned_32;
       Raw_LSN     : Unsigned_32;
       Dir_Base    : Page_Offset;
       Tup_Base    : Page_Offset;
@@ -799,6 +851,7 @@ package body Nhe_O.Transaction is
       Toast_B     : TOAST_Pointer_Bytes;
       Toast_P     : TOAST_Pointer;
       Toast_Valid : Boolean;
+      Active_Cnt  : Natural := 0;
    begin
       Page_Rec := (others => <>);
       Valid    := False;
@@ -822,12 +875,22 @@ package body Nhe_O.Transaction is
 
       Raw_Page_Id := Get_Page_U32_BE (Raw_Page, 5);
       Raw_Slots   := Get_Page_U32_BE (Raw_Page, 9);
+      Raw_Free    := Get_Page_U32_BE (Raw_Page, 13);
       Raw_LSN     := Get_Page_U32_BE (Raw_Page, 17);
 
       if Raw_Page_Id > Unsigned_32 (Max_Page_Id)
         or else Raw_Slots > Unsigned_32 (Max_Page_Slots)
         or else Raw_LSN = 0
         or else Raw_LSN > Unsigned_32 (Max_Tx_Id)
+      then
+         return;
+      end if;
+
+      Exp_Free :=
+        Shift_Left (24 + Unsigned_32 (Max_Page_Slots * 8), 16)
+        or (153 + Raw_Slots * 240);
+      if Raw_Free /= Exp_Free
+        or else (for some B in 3993 .. Nhe_O.Page_Size => Raw_Page (B) /= 0)
       then
          return;
       end if;
@@ -840,7 +903,8 @@ package body Nhe_O.Transaction is
          pragma Loop_Invariant
            (Page_Rec.Page_Id = Valid_Page_Id (Raw_Page_Id)
             and then Page_Rec.Slot_Count = Page_Slot_Count (Raw_Slots)
-            and then Page_Rec.Page_LSN_Tx = Valid_Tx_Id (Raw_LSN));
+            and then Page_Rec.Page_LSN_Tx = Valid_Tx_Id (Raw_LSN)
+            and then Active_Cnt < Slot);
          Dir_Base    := 25 + (Slot - 1) * 8;
          Tup_Base    := 153 + (Slot - 1) * 240;
          Raw_Tup_Off := Get_Page_U32_BE (Raw_Page, Dir_Base);
@@ -848,6 +912,8 @@ package body Nhe_O.Transaction is
          if Raw_Tup_Off /= Unsigned_32 (Tup_Base)
            or else Raw_Page (Dir_Base + 4) > 1
            or else Natural (Raw_Page (Dir_Base + 5)) > Max_Inline_Tuple_Bytes
+           or else Raw_Page (Dir_Base + 6) /= 0
+           or else Raw_Page (Dir_Base + 7) /= 0
          then
             Page_Rec := (others => <>);
             return;
@@ -873,16 +939,29 @@ package body Nhe_O.Transaction is
             Toast_B (B) := Raw_Page (Tup_Base + 15 + B);
          end loop;
 
-         if Raw_Page (Dir_Base + 4) = 1
-           and then (Toast_B (5) /= 0 or else Toast_B (6) /= 0
-                     or else Toast_B (7) /= 0 or else Toast_B (8) /= 0)
-         then
-            Decode_TOAST_Pointer (Toast_B, Toast_P, Toast_Valid);
-            if not Toast_Valid then
+         if Raw_Page (Dir_Base + 4) = 1 then
+            Active_Cnt := Active_Cnt + 1;
+            if (for some B in TOAST_Pointer_Index => Toast_B (B) /= 0) then
+               Decode_TOAST_Pointer (Toast_B, Toast_P, Toast_Valid);
+               if not Toast_Valid then
+                  Page_Rec := (others => <>);
+                  return;
+               end if;
+            else
+               Toast_P := (others => <>);
+            end if;
+         else
+            if Raw_Page (Dir_Base + 5) /= 0
+              or else Raw_Row_Id /= 1
+              or else Raw_Xmin /= 1
+              or else Raw_Xmax /= 0
+              or else Raw_Rel_Id /= 0
+              or else (for some B in TOAST_Pointer_Index => Toast_B (B) /= 0)
+              or else (for some B in Inline_Tuple_Index => Raw_Page (Tup_Base + 31 + B) /= 0)
+            then
                Page_Rec := (others => <>);
                return;
             end if;
-         else
             Toast_P := (others => <>);
          end if;
 
@@ -898,6 +977,11 @@ package body Nhe_O.Transaction is
             Page_Rec.Tuples (Slot).Inline_Data (B) := Raw_Page (Tup_Base + 31 + B);
          end loop;
       end loop;
+
+      if Active_Cnt /= Page_Rec.Slot_Count then
+         Page_Rec := (others => <>);
+         return;
+      end if;
 
       Valid := True;
    end Decode_Slotted_Page;
@@ -931,6 +1015,11 @@ package body Nhe_O.Transaction is
       Max_Recovered_Tx := 0;
       Status           := Status_Ok;
 
+      if Equal_Text (DB_Path, WAL_Path) then
+         Status := Status_IO_Error;
+         return;
+      end if;
+
       --  Pass 1: Analysis & Commit-Marker Discovery (identify all WAL_Frame_Commit transactions)
       for Step in 1 .. Max_Frames loop
          pragma Loop_Invariant (Total_Frames = Step - 1);
@@ -954,7 +1043,15 @@ package body Nhe_O.Transaction is
          Decode_WAL_Frame (Frame, Frame_Tx, Frame_Pg, Page);
          Kind := Get_WAL_Frame_Kind (Frame);
          if Kind = WAL_Frame_Commit then
+            if Is_Tx_Committed (CLOG, Frame_Tx) then
+               Status := Status_IO_Error;
+               return;
+            end if;
             Set_CLOG_State (CLOG, Frame_Tx, Tx_Committed);
+         elsif Kind = WAL_Frame_Data and then Is_Tx_Committed (CLOG, Frame_Tx) then
+            --  Data frame appearing after its transaction's commit barrier is invalid
+            Status := Status_IO_Error;
+            return;
          end if;
          Total_Frames := Step;
       end loop;

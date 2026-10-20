@@ -1,4 +1,4 @@
---  Formally verified PostgreSQL SQL Dialect Classifier and Feature Analyzer (HIGH-03)
+--  Formally verified PostgreSQL SQL Dialect Classifier and Feature Analyzer
 pragma SPARK_Mode (On);
 
 with Nhe_O.Types; use Nhe_O.Types;

@@ -11,7 +11,7 @@ package body Nhe_O.SQL is
    -------------------------------------------------------------------------
    --  Sanitize_SQL: Strip quoted literals, line comments (--), and block
    --  comments (/* ... */), while rejecting unclosed quotes/comments and
-   --  unbalanced parentheses (HIGH-03).
+   --  unbalanced parentheses.
    -------------------------------------------------------------------------
 
    procedure Sanitize_SQL
@@ -309,7 +309,7 @@ package body Nhe_O.SQL is
    end Has_Non_WS_Range;
 
    --  Extract the next valid SQL identifier token following Keyword (e.g. FROM <table>)
-   --  Rejects identifiers starting with digits/'$'/'.', consecutive dots, or trailing dots (R3-HIGH-05).
+   --  Rejects identifiers starting with digits/'$'/'.', consecutive dots, or trailing dots.
    function Extract_Ident_After_Keyword
      (Clean_Query : Bounded_Text;
       Orig_Query  : Bounded_Text;
@@ -376,7 +376,7 @@ package body Nhe_O.SQL is
       return Res;
    end Extract_Ident_After_Keyword;
 
-   --  Extract table name from CREATE TABLE [IF NOT EXISTS] <name> (...) (R3-HIGH-05)
+   --  Extract table name from CREATE TABLE [IF NOT EXISTS] <name> (...)
    function Extract_Create_Table_Name
      (Clean_Query : Bounded_Text;
       Orig_Query  : Bounded_Text) return Bounded_Ident
@@ -536,16 +536,19 @@ package body Nhe_O.SQL is
    end Starts_With_Keyword;
 
    --  Verify `CREATE [TEMP|TEMPORARY|UNLOGGED] TABLE [IF NOT EXISTS] <name> (...)`
-   --  without falsely rejecting column names containing `view`, `index`, `schema` (HIGH-03).
+   --  without falsely rejecting column names containing `view`, `index`, `schema`.
    function Is_Create_Table_Stmt (Clean_Query : Bounded_Text) return Boolean is
-      Create_End : constant Natural := Find_Keyword_End (Clean_Query, "CREATE");
-      Table_End  : constant Natural := Find_Keyword_End (Clean_Query, "TABLE");
-      Paren_Pos  : Natural := 0;
+      Create_End  : constant Natural := Find_Keyword_End (Clean_Query, "CREATE");
+      Table_Start : constant Natural := Find_Keyword_Start (Clean_Query, "TABLE");
+      Table_End   : constant Natural := Find_Keyword_End (Clean_Query, "TABLE");
+      Paren_Pos   : Natural := 0;
+      Pos         : Natural;
+      Mod_Tok     : Bounded_Ident := (Length => 0, Data => [others => ' ']);
    begin
       if not Starts_With_Keyword (Clean_Query, "CREATE") then
          return False;
       end if;
-      if Create_End = 0 or else Table_End <= Create_End then
+      if Create_End = 0 or else Table_Start <= Create_End or else Table_End <= Create_End then
          return False;
       end if;
 
@@ -563,19 +566,42 @@ package body Nhe_O.SQL is
          return False;
       end if;
 
-      --  Ensure no non-table DDL keyword appears before TABLE
-      declare
-         Prefix : Bounded_Text := Clean_Query;
-      begin
-         Prefix.Length := Table_End;
-         if Contains_Keyword_CI (Prefix, "INDEX")
-           or else Contains_Keyword_CI (Prefix, "VIEW")
-           or else Contains_Keyword_CI (Prefix, "SCHEMA")
-           or else Contains_Keyword_CI (Prefix, "SEQUENCE")
+      --  Between CREATE and TABLE, allow only whitespace or a single
+      --  TEMP / TEMPORARY / UNLOGGED modifier keyword.
+      Pos := Create_End + 1;
+      while Pos < Table_Start and then Is_WS_Char (Clean_Query.Data (Pos)) loop
+         pragma Loop_Invariant (Pos in 1 .. Table_Start);
+         pragma Loop_Variant (Increases => Pos);
+         Pos := Pos + 1;
+      end loop;
+
+      if Pos < Table_Start then
+         while Pos < Table_Start and then Is_Ident_Char (Clean_Query.Data (Pos)) loop
+            pragma Loop_Invariant (Pos in 1 .. Table_Start);
+            pragma Loop_Invariant (Mod_Tok.Length <= Max_Ident_Len);
+            pragma Loop_Variant (Increases => Pos);
+            if Mod_Tok.Length = Max_Ident_Len then
+               return False;
+            end if;
+            Mod_Tok.Length := Mod_Tok.Length + 1;
+            Mod_Tok.Data (Mod_Tok.Length) := Clean_Query.Data (Pos);
+            Pos := Pos + 1;
+         end loop;
+
+         while Pos < Table_Start and then Is_WS_Char (Clean_Query.Data (Pos)) loop
+            pragma Loop_Invariant (Pos in 1 .. Table_Start);
+            pragma Loop_Variant (Increases => Pos);
+            Pos := Pos + 1;
+         end loop;
+
+         if Pos /= Table_Start
+           or else (not Equal_Ident_Case_Insensitive (Mod_Tok, Make_Ident ("TEMP"))
+                    and then not Equal_Ident_Case_Insensitive (Mod_Tok, Make_Ident ("TEMPORARY"))
+                    and then not Equal_Ident_Case_Insensitive (Mod_Tok, Make_Ident ("UNLOGGED")))
          then
             return False;
          end if;
-      end;
+      end if;
 
       return True;
    end Is_Create_Table_Stmt;
@@ -600,7 +626,7 @@ package body Nhe_O.SQL is
       return False;
    end Has_Token_After_Keyword;
 
-   --  Validate BEGIN / COMMIT / ROLLBACK [TRANSACTION | WORK] [;] (R3-HIGH-05)
+   --  Validate BEGIN / COMMIT / ROLLBACK [TRANSACTION | WORK] [;]
    function Is_Valid_Tx_Control_Stmt
      (Clean_Query : Bounded_Text;
       Keyword     : String) return Boolean
@@ -693,7 +719,64 @@ package body Nhe_O.SQL is
       return True;
    end Has_Only_Single_Ident_After_Keyword;
 
-   --  Validate SELECT / UPDATE / DELETE clause ordering, non-duplicate clauses, and non-empty clause bodies (R3-HIGH-05)
+   --  Validate NOTIFY <channel> [ , '<payload>' ] [;]
+   function Is_Valid_Notify_Stmt (Clean_Query : Bounded_Text) return Boolean is
+      Kw_End : constant Natural := Find_Keyword_End (Clean_Query, "NOTIFY");
+      Pos    : Natural;
+   begin
+      if Kw_End = 0 or else Kw_End >= Clean_Query.Length then
+         return False;
+      end if;
+
+      Pos := Kw_End + 1;
+      while Pos <= Clean_Query.Length and then Is_WS_Char (Clean_Query.Data (Pos)) loop
+         pragma Loop_Invariant (Pos in 1 .. Clean_Query.Length);
+         pragma Loop_Variant (Increases => Pos);
+         Pos := Pos + 1;
+      end loop;
+
+      while Pos <= Clean_Query.Length
+        and then (Is_Ident_Char (Clean_Query.Data (Pos)) or else Clean_Query.Data (Pos) = '.')
+      loop
+         pragma Loop_Invariant (Pos in 1 .. Clean_Query.Length);
+         pragma Loop_Variant (Increases => Pos);
+         Pos := Pos + 1;
+      end loop;
+
+      while Pos <= Clean_Query.Length and then Is_WS_Char (Clean_Query.Data (Pos)) loop
+         pragma Loop_Invariant (Pos in 1 .. Clean_Query.Length);
+         pragma Loop_Variant (Increases => Pos);
+         Pos := Pos + 1;
+      end loop;
+
+      if Pos <= Clean_Query.Length and then Clean_Query.Data (Pos) = ',' then
+         Pos := Pos + 1;
+         while Pos <= Clean_Query.Length and then Is_WS_Char (Clean_Query.Data (Pos)) loop
+            pragma Loop_Invariant (Pos in 1 .. Clean_Query.Length);
+            pragma Loop_Variant (Increases => Pos);
+            Pos := Pos + 1;
+         end loop;
+         if Pos > Clean_Query.Length or else Clean_Query.Data (Pos) /= ''' then
+            return False;
+         end if;
+         Pos := Pos + 1;
+      end if;
+
+      while Pos <= Clean_Query.Length loop
+         pragma Loop_Invariant (Pos in 1 .. Clean_Query.Length);
+         pragma Loop_Variant (Increases => Pos);
+         if not Is_WS_Char (Clean_Query.Data (Pos))
+           and then Clean_Query.Data (Pos) /= ';'
+         then
+            return False;
+         end if;
+         Pos := Pos + 1;
+      end loop;
+
+      return True;
+   end Is_Valid_Notify_Stmt;
+
+   --  Validate SELECT / UPDATE / DELETE clause ordering, non-duplicate clauses, and non-empty clause bodies
    function Validate_Clause_Structure
      (Clean_Query : Bounded_Text;
       Kind        : SQL_Statement_Kind) return Boolean
@@ -864,50 +947,96 @@ package body Nhe_O.SQL is
    end Count_Select_Columns;
 
    function Count_Create_Table_Columns (Clean_Query : Bounded_Text) return Natural is
-      Depth         : Natural := 0;
-      Commas        : Natural := 0;
-      Found_Paren   : Boolean := False;
-      Closed_Paren  : Boolean := False;
-      Seg_Has_Token : Boolean := False;
+      Depth              : Natural := 0;
+      Commas             : Natural := 0;
+      Close_Pos          : Natural := 0;
+      Found_Paren        : Boolean := False;
+      Closed_Paren       : Boolean := False;
+      Seg_Has_First_Tok  : Boolean := False;
+      Seg_In_First_Tok   : Boolean := False;
+      Seg_Has_Second_Tok : Boolean := False;
    begin
       for I in 1 .. Clean_Query.Length loop
-         pragma Loop_Invariant (Depth <= I and then Commas <= I);
+         pragma Loop_Invariant (Depth <= I and then Commas <= I and then Close_Pos <= Clean_Query.Length);
          if Clean_Query.Data (I) = '(' then
             Depth := Depth + 1;
             if Depth = 1 then
-               Found_Paren   := True;
-               Seg_Has_Token := False;
+               Found_Paren        := True;
+               Seg_Has_First_Tok  := False;
+               Seg_In_First_Tok   := False;
+               Seg_Has_Second_Tok := False;
             else
-               Seg_Has_Token := True;
+               if not Seg_Has_First_Tok or else Seg_In_First_Tok then
+                  return 0;
+               end if;
+               Seg_Has_Second_Tok := True;
             end if;
          elsif Clean_Query.Data (I) = ')' then
             if Depth = 1 then
                Closed_Paren := True;
+               Close_Pos    := I;
                exit;
             elsif Depth > 1 then
-               Depth         := Depth - 1;
-               Seg_Has_Token := True;
+               Depth              := Depth - 1;
+               Seg_Has_Second_Tok := True;
             end if;
-         elsif Depth = 1 and then not Is_WS_Char (Clean_Query.Data (I)) then
-            if Clean_Query.Data (I) = ',' then
-               if not Seg_Has_Token then
+         elsif Depth = 1 then
+            if not Seg_Has_First_Tok then
+               if Is_WS_Char (Clean_Query.Data (I)) then
+                  null;
+               elsif Is_Ident_Start_Char (Clean_Query.Data (I)) then
+                  Seg_Has_First_Tok := True;
+                  Seg_In_First_Tok  := True;
+               else
                   return 0;
                end if;
-               Commas        := Commas + 1;
-               Seg_Has_Token := False;
+            elsif Seg_In_First_Tok then
+               if Is_Ident_Char (Clean_Query.Data (I)) then
+                  null;
+               elsif Is_WS_Char (Clean_Query.Data (I)) then
+                  Seg_In_First_Tok := False;
+               else
+                  return 0;
+               end if;
             else
-               Seg_Has_Token := True;
+               if Clean_Query.Data (I) = ',' then
+                  if not Seg_Has_Second_Tok then
+                     return 0;
+                  end if;
+                  Commas             := Commas + 1;
+                  Seg_Has_First_Tok  := False;
+                  Seg_In_First_Tok   := False;
+                  Seg_Has_Second_Tok := False;
+               elsif not Is_WS_Char (Clean_Query.Data (I)) then
+                  Seg_Has_Second_Tok := True;
+               end if;
             end if;
          elsif Depth > 1 and then not Is_WS_Char (Clean_Query.Data (I)) then
-            Seg_Has_Token := True;
+            Seg_Has_Second_Tok := True;
          end if;
       end loop;
 
-      if not Found_Paren or else not Closed_Paren or else not Seg_Has_Token then
+      if not Found_Paren
+        or else not Closed_Paren
+        or else not Seg_Has_First_Tok
+        or else Seg_In_First_Tok
+        or else not Seg_Has_Second_Tok
+      then
          return 0;
-      else
-         return Commas + 1;
       end if;
+
+      --  Reject trailing non-whitespace/non-semicolon tokens after the closing ')'
+      if Close_Pos < Clean_Query.Length then
+         for J in Close_Pos + 1 .. Clean_Query.Length loop
+            if not Is_WS_Char (Clean_Query.Data (J))
+              and then Clean_Query.Data (J) /= ';'
+            then
+               return 0;
+            end if;
+         end loop;
+      end if;
+
+      return Commas + 1;
    end Count_Create_Table_Columns;
 
    function Has_Positional_Parameter (Clean_Query : Bounded_Text) return Boolean is
@@ -921,7 +1050,22 @@ package body Nhe_O.SQL is
            and then Clean_Query.Data (I + 1) in '1' .. '9'
            and then (I = 1 or else not Is_Ident_Char (Clean_Query.Data (I - 1)))
          then
-            return True;
+            declare
+               End_Dig : Positive := I + 1;
+            begin
+               while End_Dig < Clean_Query.Length
+                 and then Clean_Query.Data (End_Dig + 1) in '0' .. '9'
+               loop
+                  pragma Loop_Invariant (End_Dig in I + 1 .. Clean_Query.Length - 1);
+                  pragma Loop_Variant (Increases => End_Dig);
+                  End_Dig := End_Dig + 1;
+               end loop;
+               if End_Dig = Clean_Query.Length
+                 or else not Is_Ident_Char (Clean_Query.Data (End_Dig + 1))
+               then
+                  return True;
+               end if;
+            end;
          end if;
       end loop;
       return False;
@@ -946,7 +1090,7 @@ package body Nhe_O.SQL is
       return False;
    end Has_JSONB_Arrow;
 
-   --  Match JSONB `?`, `?|`, or `?&` outside quotes/comments even without surrounding spaces (HIGH-03)
+   --  Match JSONB `?`, `?|`, or `?&` outside quotes/comments even without surrounding spaces
    function Has_JSONB_Question_Op (Clean_Query : Bounded_Text) return Boolean is
    begin
       for I in 1 .. Clean_Query.Length loop
@@ -957,7 +1101,7 @@ package body Nhe_O.SQL is
       return False;
    end Has_JSONB_Question_Op;
 
-   --  Reject empty semicolon statements or multi-statement tails after ';' (R2-MED-01)
+   --  Reject empty semicolon statements or multi-statement tails after ';'
    function Has_Multi_Statement_Tail (Clean_Query : Bounded_Text) return Boolean is
       Seen_Token     : Boolean := False;
       Seen_Semicolon : Boolean := False;
@@ -1010,14 +1154,122 @@ package body Nhe_O.SQL is
          end if;
          Result.Kind := Stmt_Create_Table;
       elsif Starts_With_Keyword (Clean, "INSERT") then
-         if not Contains_Keyword_CI (Clean, "INTO")
-           or else (not Contains_Keyword_CI (Clean, "VALUES")
-                    and then not Contains_Keyword_CI (Clean, "SELECT"))
-         then
-            Result := (others => <>);
-            Status := Status_Invalid_Syntax;
-            return;
-         end if;
+         declare
+            Ins_End    : constant Natural := Find_Keyword_End (Clean, "INSERT");
+            Into_Start : constant Natural := Find_Keyword_Start (Clean, "INTO");
+            Into_End   : constant Natural := Find_Keyword_End (Clean, "INTO");
+            Val_Start  : constant Natural := Find_Keyword_Start (Clean, "VALUES");
+            Val_End    : constant Natural := Find_Keyword_End (Clean, "VALUES");
+            Sel_Start  : constant Natural := Find_Keyword_Start (Clean, "SELECT");
+            Sel_End    : constant Natural := Find_Keyword_End (Clean, "SELECT");
+            Pos        : Natural;
+            P_Depth    : Natural;
+            Col_Token  : Boolean := False;
+            Val_Token  : Boolean := False;
+            Has_Body   : Boolean := False;
+         begin
+            if Ins_End = 0
+              or else Into_Start <= Ins_End
+              or else Into_End = 0
+              or else Into_End >= Clean.Length
+              or else Has_Non_WS_Range (Clean, Ins_End + 1, Into_Start - 1)
+            then
+               Result := (others => <>);
+               Status := Status_Invalid_Syntax;
+               return;
+            end if;
+
+            --  Skip whitespace and target identifier after INTO
+            Pos := Into_End + 1;
+            while Pos <= Clean.Length and then Is_WS_Char (Clean.Data (Pos)) loop
+               pragma Loop_Invariant (Pos in 1 .. Clean.Length);
+               pragma Loop_Variant (Increases => Pos);
+               Pos := Pos + 1;
+            end loop;
+
+            while Pos <= Clean.Length
+              and then (Is_Ident_Char (Query.Data (Pos)) or else Query.Data (Pos) = '.')
+            loop
+               pragma Loop_Invariant (Pos in 1 .. Clean.Length);
+               pragma Loop_Variant (Increases => Pos);
+               Pos := Pos + 1;
+            end loop;
+
+            while Pos <= Clean.Length and then Is_WS_Char (Clean.Data (Pos)) loop
+               pragma Loop_Invariant (Pos in 1 .. Clean.Length);
+               pragma Loop_Variant (Increases => Pos);
+               Pos := Pos + 1;
+            end loop;
+
+            --  Optional parenthesized column list (<cols>) before VALUES / SELECT
+            if Pos <= Clean.Length and then Clean.Data (Pos) = '(' then
+               P_Depth := 1;
+               Pos     := Pos + 1;
+               while Pos <= Clean.Length and then P_Depth > 0 loop
+                  pragma Loop_Invariant (Pos in 1 .. Clean.Length and then P_Depth <= Pos);
+                  pragma Loop_Variant (Increases => Pos);
+                  if Clean.Data (Pos) = '(' then
+                     P_Depth := P_Depth + 1;
+                  elsif Clean.Data (Pos) = ')' then
+                     P_Depth := P_Depth - 1;
+                  elsif not Is_WS_Char (Clean.Data (Pos))
+                    and then Clean.Data (Pos) /= ','
+                  then
+                     Col_Token := True;
+                  end if;
+                  Pos := Pos + 1;
+               end loop;
+
+               if P_Depth /= 0 or else not Col_Token then
+                  Result := (others => <>);
+                  Status := Status_Invalid_Syntax;
+                  return;
+               end if;
+
+               while Pos <= Clean.Length and then Is_WS_Char (Clean.Data (Pos)) loop
+                  pragma Loop_Invariant (Pos in 1 .. Clean.Length);
+                  pragma Loop_Variant (Increases => Pos);
+                  Pos := Pos + 1;
+               end loop;
+            end if;
+
+            if Pos = Val_Start and then Val_End > 0 and then Val_End < Clean.Length then
+               Pos := Val_End + 1;
+               while Pos <= Clean.Length and then Is_WS_Char (Clean.Data (Pos)) loop
+                  pragma Loop_Invariant (Pos in 1 .. Clean.Length);
+                  pragma Loop_Variant (Increases => Pos);
+                  Pos := Pos + 1;
+               end loop;
+
+               if Pos <= Clean.Length and then Clean.Data (Pos) = '(' then
+                  P_Depth := 1;
+                  Pos     := Pos + 1;
+                  while Pos <= Clean.Length and then P_Depth > 0 loop
+                     pragma Loop_Invariant (Pos in 1 .. Clean.Length and then P_Depth <= Pos);
+                     pragma Loop_Variant (Increases => Pos);
+                     if Clean.Data (Pos) = '(' then
+                        P_Depth := P_Depth + 1;
+                     elsif Clean.Data (Pos) = ')' then
+                        P_Depth := P_Depth - 1;
+                     elsif not Is_WS_Char (Clean.Data (Pos))
+                       and then Clean.Data (Pos) /= ','
+                     then
+                        Val_Token := True;
+                     end if;
+                     Pos := Pos + 1;
+                  end loop;
+                  Has_Body := (P_Depth = 0) and then Val_Token;
+               end if;
+            elsif Pos = Sel_Start and then Sel_End > 0 and then Sel_End < Clean.Length then
+               Has_Body := Has_Non_WS_Range (Clean, Sel_End + 1, Clean.Length);
+            end if;
+
+            if not Has_Body then
+               Result := (others => <>);
+               Status := Status_Invalid_Syntax;
+               return;
+            end if;
+         end;
          Result.Table_Or_Target :=
            Extract_Ident_After_Keyword (Clean, Query, "INTO");
          if Result.Table_Or_Target.Length = 0 then
@@ -1049,6 +1301,79 @@ package body Nhe_O.SQL is
             Status := Status_Invalid_Syntax;
             return;
          end if;
+         declare
+            Upd_End     : constant Natural := Find_Keyword_End (Clean, "UPDATE");
+            Set_Start   : constant Natural := Find_Keyword_Start (Clean, "SET");
+            Set_End     : constant Natural := Find_Keyword_End (Clean, "SET");
+            Where_Start : constant Natural := Find_Keyword_Start (Clean, "WHERE");
+            Ret_Start   : constant Natural := Find_Keyword_Start (Clean, "RETURNING");
+            Body_End    : Natural;
+            Pos         : Natural;
+            Has_Lhs     : Boolean := False;
+            Saw_Eq      : Boolean := False;
+            Has_Rhs     : Boolean := False;
+         begin
+            if Upd_End = 0 or else Set_Start <= Upd_End or else Set_End = 0 then
+               Result := (others => <>);
+               Status := Status_Invalid_Syntax;
+               return;
+            end if;
+
+            Pos := Upd_End + 1;
+            while Pos <= Clean.Length and then Is_WS_Char (Clean.Data (Pos)) loop
+               pragma Loop_Invariant (Pos in 1 .. Clean.Length);
+               pragma Loop_Variant (Increases => Pos);
+               Pos := Pos + 1;
+            end loop;
+
+            while Pos <= Clean.Length
+              and then (Is_Ident_Char (Query.Data (Pos)) or else Query.Data (Pos) = '.')
+            loop
+               pragma Loop_Invariant (Pos in 1 .. Clean.Length);
+               pragma Loop_Variant (Increases => Pos);
+               Pos := Pos + 1;
+            end loop;
+
+            while Pos <= Clean.Length and then Is_WS_Char (Clean.Data (Pos)) loop
+               pragma Loop_Invariant (Pos in 1 .. Clean.Length);
+               pragma Loop_Variant (Increases => Pos);
+               Pos := Pos + 1;
+            end loop;
+
+            if Pos /= Set_Start then
+               Result := (others => <>);
+               Status := Status_Invalid_Syntax;
+               return;
+            end if;
+
+            Body_End :=
+              (if Where_Start > Set_End then Where_Start - 1
+               elsif Ret_Start > Set_End then Ret_Start - 1
+               else Clean.Length);
+            if Set_End < Body_End then
+               for I in Set_End + 1 .. Body_End loop
+                  if Clean.Data (I) = '=' then
+                     if Has_Lhs then
+                        Saw_Eq := True;
+                     end if;
+                  elsif not Is_WS_Char (Clean.Data (I))
+                    and then Clean.Data (I) /= ';'
+                  then
+                     if not Saw_Eq then
+                        Has_Lhs := True;
+                     else
+                        Has_Rhs := True;
+                     end if;
+                  end if;
+               end loop;
+            end if;
+
+            if not (Has_Lhs and then Saw_Eq and then Has_Rhs) then
+               Result := (others => <>);
+               Status := Status_Invalid_Syntax;
+               return;
+            end if;
+         end;
          Result.Table_Or_Target :=
            Extract_Ident_After_Keyword (Clean, Query, "UPDATE");
          if Result.Table_Or_Target.Length = 0 then
@@ -1058,11 +1383,68 @@ package body Nhe_O.SQL is
          end if;
          Result.Kind := Stmt_Update;
       elsif Starts_With_Keyword (Clean, "DELETE") then
-         if not Contains_Keyword_CI (Clean, "FROM") then
-            Result := (others => <>);
-            Status := Status_Invalid_Syntax;
-            return;
-         end if;
+         declare
+            Del_End     : constant Natural := Find_Keyword_End (Clean, "DELETE");
+            From_Start  : constant Natural := Find_Keyword_Start (Clean, "FROM");
+            From_End    : constant Natural := Find_Keyword_End (Clean, "FROM");
+            Where_Start : constant Natural := Find_Keyword_Start (Clean, "WHERE");
+            Ret_Start   : constant Natural := Find_Keyword_Start (Clean, "RETURNING");
+            Pos         : Natural;
+         begin
+            if Del_End = 0
+              or else From_Start <= Del_End
+              or else From_End = 0
+              or else From_End >= Clean.Length
+              or else Has_Non_WS_Range (Clean, Del_End + 1, From_Start - 1)
+            then
+               Result := (others => <>);
+               Status := Status_Invalid_Syntax;
+               return;
+            end if;
+
+            Pos := From_End + 1;
+            while Pos <= Clean.Length and then Is_WS_Char (Clean.Data (Pos)) loop
+               pragma Loop_Invariant (Pos in 1 .. Clean.Length);
+               pragma Loop_Variant (Increases => Pos);
+               Pos := Pos + 1;
+            end loop;
+
+            while Pos <= Clean.Length
+              and then (Is_Ident_Char (Query.Data (Pos)) or else Query.Data (Pos) = '.')
+            loop
+               pragma Loop_Invariant (Pos in 1 .. Clean.Length);
+               pragma Loop_Variant (Increases => Pos);
+               Pos := Pos + 1;
+            end loop;
+
+            while Pos <= Clean.Length
+              and then (Is_WS_Char (Clean.Data (Pos)) or else Clean.Data (Pos) = ';')
+            loop
+               pragma Loop_Invariant (Pos in 1 .. Clean.Length);
+               pragma Loop_Variant (Increases => Pos);
+               Pos := Pos + 1;
+            end loop;
+
+            if Where_Start > 0 then
+               if Pos /= Where_Start then
+                  Result := (others => <>);
+                  Status := Status_Invalid_Syntax;
+                  return;
+               end if;
+            elsif Ret_Start > 0 then
+               if Pos /= Ret_Start then
+                  Result := (others => <>);
+                  Status := Status_Invalid_Syntax;
+                  return;
+               end if;
+            else
+               if Pos <= Clean.Length then
+                  Result := (others => <>);
+                  Status := Status_Invalid_Syntax;
+                  return;
+               end if;
+            end if;
+         end;
          Result.Table_Or_Target :=
            Extract_Ident_After_Keyword (Clean, Query, "FROM");
          if Result.Table_Or_Target.Length = 0 then
@@ -1106,7 +1488,9 @@ package body Nhe_O.SQL is
       elsif Starts_With_Keyword (Clean, "NOTIFY") then
          Result.Table_Or_Target :=
            Extract_Ident_After_Keyword (Clean, Query, "NOTIFY");
-         if Result.Table_Or_Target.Length = 0 then
+         if Result.Table_Or_Target.Length = 0
+           or else not Is_Valid_Notify_Stmt (Clean)
+         then
             Result := (others => <>);
             Status := Status_Invalid_Syntax;
             return;
@@ -1171,6 +1555,7 @@ package body Nhe_O.SQL is
       Has_Digit : Boolean          := False;
       Saw_Comma : Boolean          := False;
       Arg1_Val  : Natural          := 0;
+      Arg2_Val  : Natural          := 0;
       Digit     : Natural;
    begin
       if Type_Keyword.Length < P_Len + 3 then
@@ -1198,10 +1583,16 @@ package body Nhe_O.SQL is
          begin
             if C in '0' .. '9' then
                Has_Digit := True;
+               Digit     := Character'Pos (C) - Character'Pos ('0');
                if not Saw_Comma then
-                  Digit := Character'Pos (C) - Character'Pos ('0');
                   if Arg1_Val <= (Natural'Last - Digit) / 10 then
                      Arg1_Val := Arg1_Val * 10 + Digit;
+                  else
+                     return False;
+                  end if;
+               else
+                  if Arg2_Val <= (Natural'Last - Digit) / 10 then
+                     Arg2_Val := Arg2_Val * 10 + Digit;
                   else
                      return False;
                   end if;
@@ -1215,7 +1606,11 @@ package body Nhe_O.SQL is
          end;
       end loop;
 
-      return Has_Digit and then Arg1_Val >= 1 and then Arg1_Val <= Max_Val;
+      return
+        Has_Digit
+        and then Arg1_Val >= 1
+        and then Arg1_Val <= Max_Val
+        and then (not Saw_Comma or else Arg2_Val <= Arg1_Val);
    end Has_Parameterized_Modifier;
 
    procedure Resolve_Pg_Type
@@ -1250,8 +1645,8 @@ package body Nhe_O.SQL is
          Resolved := Pg_Double_Precision;
       elsif Equal_Ident_Case_Insensitive (Type_Keyword, Make_Ident ("NUMERIC"))
         or else Equal_Ident_Case_Insensitive (Type_Keyword, Make_Ident ("DECIMAL"))
-        or else Has_Parameterized_Modifier (Type_Keyword, "NUMERIC", True, 1000)
-        or else Has_Parameterized_Modifier (Type_Keyword, "DECIMAL", True, 1000)
+        or else Has_Parameterized_Modifier (Type_Keyword, "NUMERIC", True, 38)
+        or else Has_Parameterized_Modifier (Type_Keyword, "DECIMAL", True, 38)
       then
          Resolved := Pg_Numeric;
       elsif Equal_Ident_Case_Insensitive (Type_Keyword, Make_Ident ("BOOLEAN"))

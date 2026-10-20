@@ -1,7 +1,7 @@
 --  Formally Verified Physical I/O Implementation Body (BR-001 / ADR-002)
 --  Operates under pragma SPARK_Mode (On) by binding directly to exception-free
---  POSIX kernel syscalls (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`,
---  `unlink`) with explicit return-code verification and bounded offset arithmetic.
+--  POSIX kernel syscalls (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `close`,
+--  `unlink`, `access`) with explicit return-code verification and bounded offset arithmetic.
 pragma SPARK_Mode (On);
 
 with Ada.Command_Line;
@@ -182,10 +182,12 @@ package body Nhe_O.IO is
    is
       C_Path  : C_Path_String;
       Fd      : int;
+      End_Pos : Off_T;
       Offset  : constant Off_T := Off_T (Page_Id) * Off_T (Nhe_O.Page_Size);
       Written : Ssize_T;
       Sync_Rc : int;
       Close_R : int;
+      pragma Warnings (Off, Close_R);
    begin
       if Has_Embedded_NUL (File_Path) then
          Success := False;
@@ -195,6 +197,16 @@ package body Nhe_O.IO is
       To_C_Path (File_Path, C_Path);
       Fd := Posix_Open (C_Path, O_RDWR + O_CREAT + O_CLOEXEC, Mode_0600);
       if Fd < 0 then
+         Success := False;
+         return;
+      end if;
+
+      --  Reject database files with torn/unaligned page tails
+      End_Pos := Posix_Lseek (Fd, 0, SEEK_END);
+      if End_Pos < 0 or else End_Pos mod Off_T (Nhe_O.Page_Size) /= 0 then
+         pragma Warnings (GNATprove, Off, "statement has no effect");
+         Close_R := Posix_Close (Fd);
+         pragma Warnings (GNATprove, On, "statement has no effect");
          Success := False;
          return;
       end if;
@@ -221,9 +233,11 @@ package body Nhe_O.IO is
    is
       C_Path  : C_Path_String;
       Fd      : int;
+      End_Pos : Off_T;
       Offset  : constant Off_T := Off_T (Page_Id) * Off_T (Nhe_O.Page_Size);
       N_Read  : Ssize_T;
       Close_R : int;
+      pragma Warnings (Off, Close_R);
    begin
       Buffer  := [others => 0];
       Success := False;
@@ -236,6 +250,15 @@ package body Nhe_O.IO is
       To_C_Path (File_Path, C_Path);
       Fd := Posix_Open (C_Path, O_RDONLY + O_CLOEXEC, 0);
       if Fd < 0 then
+         return;
+      end if;
+
+      --  Reject database files with torn/unaligned page tails
+      End_Pos := Posix_Lseek (Fd, 0, SEEK_END);
+      if End_Pos < 0 or else End_Pos mod Off_T (Nhe_O.Page_Size) /= 0 then
+         pragma Warnings (GNATprove, Off, "statement has no effect");
+         Close_R := Posix_Close (Fd);
+         pragma Warnings (GNATprove, On, "statement has no effect");
          return;
       end if;
 
@@ -280,12 +303,14 @@ package body Nhe_O.IO is
    is
       C_Path  : C_Path_String;
       Fd      : int;
+      End_Pos : Off_T;
       Offset  : constant Off_T := Off_T (Frame_Idx) * Off_T (WAL_Frame_Size);
       Written : Ssize_T;
       Sync_Rc : int;
       Close_R : int;
+      pragma Warnings (Off, Close_R);
    begin
-      if Has_Embedded_NUL (WAL_Path) then
+      if Has_Embedded_NUL (WAL_Path) or else Frame_Idx >= Max_WAL_Frames then
          Success := False;
          return;
       end if;
@@ -293,6 +318,20 @@ package body Nhe_O.IO is
       To_C_Path (WAL_Path, C_Path);
       Fd := Posix_Open (C_Path, O_RDWR + O_CREAT + O_CLOEXEC, Mode_0600);
       if Fd < 0 then
+         Success := False;
+         return;
+      end if;
+
+      --  Reject WAL files with torn/unaligned frame tails, > Max_WAL_Frames, or sparse gaps
+      End_Pos := Posix_Lseek (Fd, 0, SEEK_END);
+      if End_Pos < 0
+        or else End_Pos mod Off_T (WAL_Frame_Size) /= 0
+        or else End_Pos / Off_T (WAL_Frame_Size) > Off_T (Max_WAL_Frames)
+        or else Off_T (Frame_Idx) > End_Pos / Off_T (WAL_Frame_Size)
+      then
+         pragma Warnings (GNATprove, Off, "statement has no effect");
+         Close_R := Posix_Close (Fd);
+         pragma Warnings (GNATprove, On, "statement has no effect");
          Success := False;
          return;
       end if;
@@ -337,8 +376,9 @@ package body Nhe_O.IO is
          return;
       end if;
 
+      --  Reject torn/unaligned WAL tails instead of overwriting them
       End_Pos := Posix_Lseek (Fd, 0, SEEK_END);
-      if End_Pos < 0 then
+      if End_Pos < 0 or else End_Pos mod Off_T (WAL_Frame_Size) /= 0 then
          pragma Warnings (GNATprove, Off, "statement has no effect");
          Close_R := Posix_Close (Fd);
          pragma Warnings (GNATprove, On, "statement has no effect");
@@ -346,9 +386,8 @@ package body Nhe_O.IO is
          return;
       end if;
 
-      --  Ensure positional pwrite always lands on an exact WAL_Frame_Size boundary
       Frame_Count := End_Pos / Off_T (WAL_Frame_Size);
-      if Frame_Count > Off_T (Max_Page_Id) then
+      if Frame_Count >= Off_T (Max_WAL_Frames) then
          pragma Warnings (GNATprove, Off, "statement has no effect");
          Close_R := Posix_Close (Fd);
          pragma Warnings (GNATprove, On, "statement has no effect");
@@ -379,9 +418,11 @@ package body Nhe_O.IO is
    is
       C_Path  : C_Path_String;
       Fd      : int;
+      End_Pos : Off_T;
       Offset  : constant Off_T := Off_T (Frame_Idx) * Off_T (WAL_Frame_Size);
       N_Read  : Ssize_T;
       Close_R : int;
+      pragma Warnings (Off, Close_R);
    begin
       Frame   := [others => 0];
       Success := False;
@@ -394,6 +435,21 @@ package body Nhe_O.IO is
       To_C_Path (WAL_Path, C_Path);
       Fd := Posix_Open (C_Path, O_RDONLY + O_CLOEXEC, 0);
       if Fd < 0 then
+         return;
+      end if;
+
+      --  Reject WAL files with torn/unaligned frame tails
+      End_Pos := Posix_Lseek (Fd, 0, SEEK_END);
+      if End_Pos < 0 or else End_Pos mod Off_T (WAL_Frame_Size) /= 0 then
+         pragma Warnings (GNATprove, Off, "statement has no effect");
+         Close_R := Posix_Close (Fd);
+         pragma Warnings (GNATprove, On, "statement has no effect");
+         return;
+      end if;
+
+      if Frame_Idx >= Max_WAL_Frames then
+         Close_R := Posix_Close (Fd);
+         Is_EOF  := (Close_R = 0);
          return;
       end if;
 

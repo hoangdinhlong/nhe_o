@@ -28,7 +28,7 @@ MAX_RAG_DOCS = 16
 MAX_TX_ID = 8192
 MAX_CLOG_ENTRIES = 8192
 MAX_WAL_FRAMES = 4096
-MAX_KV_KEYS = 16
+MAX_KV_KEYS = 64
 MAX_SUBSCRIBERS = 16
 MIN_TOP_K = 1
 MAX_TOP_K = 8
@@ -114,6 +114,8 @@ class NheOEngine:
         if db_path is not None and wal_path is not None:
             if not db_path.strip() or not wal_path.strip():
                 raise ValueError("db_path and wal_path must not be empty or whitespace")
+            if db_path == wal_path:
+                raise ValueError("db_path and wal_path must be distinct")
 
         if lib_path is None:
             repo_root = Path(__file__).resolve().parents[2]
@@ -403,6 +405,8 @@ class NheOEngine:
             raise ValueError("Paths must not be empty or whitespace")
         if "\x00" in db_path or "\x00" in wal_path:
             raise ValueError("Paths must not contain embedded NUL bytes")
+        if db_path == wal_path:
+            raise ValueError("db_path and wal_path must be distinct")
         db_buf, db_len = _make_text_buf(db_path)
         wal_buf, wal_len = _make_text_buf(wal_path)
         status = c_int(0)
@@ -635,8 +639,12 @@ class NheOEngine:
             byref(found),
             byref(status),
         )
-        if not found.value:
+        if status.value == STATUS_NOT_FOUND or not found.value:
+            if status.value not in (STATUS_OK, STATUS_NOT_FOUND):
+                raise RuntimeError(f"nhe_o_pubsub_poll failed: {status.value}")
             return None
+        if status.value != STATUS_OK:
+            raise RuntimeError(f"nhe_o_pubsub_poll failed: {status.value}")
         chan = bytes(c_buf[: c_len.value]).decode("utf-8")
         payload = bytes(p_buf[: p_len.value]).decode("utf-8")
         return chan, payload
@@ -798,9 +806,9 @@ def run_self_test() -> None:
     # Verify exported capacity constants match SPARK specs
     assert MIN_DOC_ID == 1 and MAX_DOC_ID == 16
     assert MAX_RAG_DOCS == 16
-    assert MAX_CLOG_ENTRIES == 8192 and MAX_KV_KEYS == 16 and MAX_SUBSCRIBERS == 16
+    assert MAX_CLOG_ENTRIES == 8192 and MAX_KV_KEYS == 64 and MAX_SUBSCRIBERS == 16
 
-    # Verify single-path argument rejection (R2-LOW-02)
+    # Verify single-path argument rejection
     try:
         NheOEngine(db_path="/tmp/only_one.db")
         assert False, "Expected ValueError when only db_path is provided"
@@ -817,7 +825,7 @@ def run_self_test() -> None:
     assert sql_info["has_vector_op"] is True
     assert sql_info["has_jsonb_op"] is True
 
-    # Verify multi-statement SQL injection, duplicate clauses, and empty FROM rejection (R2-MED-01 / R3-HIGH-05)
+    # Verify multi-statement SQL injection, duplicate clauses, and empty FROM rejection
     for invalid_sql in (
         "SELECT 1; DROP TABLE docs;",
         "SELECT id FROM docs WHERE x = 1 WHERE y = 2;",
@@ -881,9 +889,9 @@ def run_self_test() -> None:
     assert rag_res["top_parent_text"] == large_parent
     assert rag_res["graph_neighbor_hit"] is True
 
-    # Verify N-D (4096-D) RAG with custom paths, persistence across restart (R2-CRIT-02),
-    # lossless "RMET" summary (>63B) + JSONB metadata recovery (R3-HIGH-04),
-    # durable KV incr_by/expire recovery, and durable deletion (R2-HIGH-01 / R3-HIGH-02)
+    # Verify N-D (4096-D) RAG with custom paths, persistence across restart,
+    # lossless "RMET" summary (>63B) + JSONB metadata recovery,
+    # durable KV incr_by/expire recovery, and durable deletion
     db_4096 = Path("/tmp/nhe_o_py_4096.db")
     wal_4096 = Path("/tmp/nhe_o_py_4096.wal")
     db_4096.unlink(missing_ok=True)
@@ -901,7 +909,7 @@ def run_self_test() -> None:
         1,
         long_summary_a,
         vec_4096_a,
-        related_doc_id=1,  # Self-loop must not count as 1-hop GraphRAG neighbor (R3-MED-06)
+        related_doc_id=1,  # Self-loop must not count as 1-hop GraphRAG neighbor
         metadata_json='{"model":"qwen3-35b-a3b-long-metadata","tier":"prod","num":1.0}',
     )
     engine.rag_ingest_full_nd(
@@ -912,7 +920,7 @@ def run_self_test() -> None:
         metadata_json='{"model":"qwen3-35b-a3b-long-metadata","tier":"prod","num":1}',
     )
 
-    # Re-open existing DB & WAL without deleting files (R2-CRIT-02 / R3-HIGH-04)
+    # Re-open existing DB & WAL without deleting files
     engine.init_with_paths(str(db_4096), str(wal_4096), dim=4096)
     assert engine.kv_get("persist:key", now_sec=105) == "survived_restart"
     assert engine.kv_ttl("persist:key", now_sec=105) == 495
@@ -929,7 +937,7 @@ def run_self_test() -> None:
     assert rag_4096["top_parent_text"] == "Qwen3 4096-D embedding chunk B"
     assert rag_4096["graph_neighbor_hit"] is True
 
-    # Verify R3-HIGH-04 & R3-MED-06: tail keyword >63B matches after recovery, and self-loop is rejected
+    # Verify tail keyword >63B matches after recovery, and self-loop is rejected
     rag_rmet = engine.rag_query_full_nd(
         vec_4096_a,
         encoding_mode=ENCODING_FLOAT32,
@@ -941,7 +949,7 @@ def run_self_test() -> None:
     assert rag_rmet["top_doc_id"] == 1
     assert rag_rmet["graph_neighbor_hit"] is False
 
-    # Also verify Stage-2 TOAST re-ranking in INT8_SQ8 mode on 4096-D (R2-HIGH-02)
+    # Also verify Stage-2 TOAST re-ranking in INT8_SQ8 mode on 4096-D
     rag_4096_sq8 = engine.rag_query_full_nd(
         vec_4096_b,
         encoding_mode=ENCODING_INT8_SQ8,
@@ -951,7 +959,7 @@ def run_self_test() -> None:
     assert rag_4096_sq8["hit_count"] == 2
     assert rag_4096_sq8["top_doc_id"] == 2
 
-    # Durable delete of doc 2 and verify survival across restart (R2-HIGH-01 / R3-HIGH-02)
+    # Durable delete of doc 2 and verify survival across restart
     engine.rag_delete(2)
     engine.init_with_paths(str(db_4096), str(wal_4096), dim=4096)
     rag_after_del = engine.rag_query_full_nd(
@@ -960,7 +968,7 @@ def run_self_test() -> None:
     assert rag_after_del["hit_count"] == 1
     assert rag_after_del["top_doc_id"] == 1
 
-    # Verify R3-HIGH-04: corrupted VTST/RMET TOAST page in DB file is rejected on recovery
+    # Verify corrupted VTST/RMET TOAST page in DB file is rejected on recovery
     wal_4096.unlink(missing_ok=True)
     db_bytes = bytearray(db_4096.read_bytes())
     # Corrupt Doc 1's VTST vector TOAST Page 11 (offset 11 * 4096 + 32; Next_TOAST_Pg starts at 10)
@@ -972,13 +980,105 @@ def run_self_test() -> None:
     except RuntimeError:
         pass
 
-    # Verify R3-HIGH-01: torn WAL file is rejected by init_with_paths
+    # Verify torn WAL file is rejected by init_with_paths
     wal_4096.write_bytes(b"TORN_WAL_FRAME")
     try:
         engine.init_with_paths(str(db_4096), str(wal_4096), dim=4096)
         assert False, "Expected RuntimeError on torn WAL file"
     except RuntimeError:
         pass
+
+    # Verify identical db_path and wal_path is rejected
+    assert MAX_KV_KEYS == 64
+    try:
+        engine.init_with_paths(str(db_4096), str(db_4096), dim=3)
+        assert False, "Expected ValueError when db_path == wal_path"
+    except ValueError:
+        pass
+
+    # Verify truncated 1-page (4096 B) .db file is rejected by init_with_paths
+    wal_4096.unlink(missing_ok=True)
+    db_4096.write_bytes(b"\x00" * 4096)
+    try:
+        engine.init_with_paths(str(db_4096), str(wal_4096), dim=3)
+        assert False, "Expected RuntimeError on truncated 1-page .db file"
+    except RuntimeError:
+        pass
+
+    # Verify trailing garbage bytes after a valid WAL frame or corrupted
+    # parent chunk TOAST page (Page 10) on disk are rejected
+    db_4096.unlink(missing_ok=True)
+    wal_4096.unlink(missing_ok=True)
+    engine.init_with_paths(str(db_4096), str(wal_4096), dim=3)
+    engine.rag_ingest_3d(1, "Parent chunk integrity test", (1.0, 2.0, 3.0))
+    # Append 7 trailing garbage bytes to the valid WAL file
+    wal_4096.write_bytes(wal_4096.read_bytes() + b"GARBAGE")
+    try:
+        engine.init_with_paths(str(db_4096), str(wal_4096), dim=3)
+        assert False, "Expected RuntimeError on WAL file with trailing torn bytes"
+    except RuntimeError:
+        pass
+
+    # Remove WAL and corrupt parent chunk TOAST Page 10 in DB file
+    wal_4096.unlink(missing_ok=True)
+    db_bytes = bytearray(db_4096.read_bytes())
+    db_bytes[10 * 4096 + 24] ^= 0xFF
+    db_4096.write_bytes(bytes(db_bytes))
+    try:
+        engine.init_with_paths(str(db_4096), str(wal_4096), dim=3)
+        assert False, "Expected RuntimeError on corrupted parent chunk TOAST page during recovery"
+    except RuntimeError:
+        pass
+
+    # Verify SQL grammar hardening rejects malformed DDL/DML/NOTIFY/parameter tokens
+    engine.init()
+    for bad_sql in [
+        "CREATE BOGUS TABLE docs (id INT)",
+        "CREATE TABLE docs (a, b)",
+        "CREATE TABLE docs (id INT) DROP TABLE users",
+        "INSERT BOGUS INTO docs VALUES (1)",
+        "INSERT INTO docs VALUES ;",
+        "INSERT INTO docs VALUES ()",
+        "INSERT INTO docs VALUES 123",
+        "INSERT INTO docs BOGUS VALUES (1)",
+        "UPDATE BOGUS docs SET a = 1",
+        "UPDATE docs SET a",
+        "DELETE BOGUS FROM docs",
+        "DELETE FROM docs BOGUS",
+        "NOTIFY ch, 123",
+        "NOTIFY ch, 'a' 'b'",
+    ]:
+        res_bad = engine.analyze_sql(bad_sql)
+        assert res_bad["status"] == STATUS_INVALID_SYNTAX, f"Expected syntax error for: {bad_sql}"
+    res_param = engine.analyze_sql("SELECT col$1abc FROM docs")
+    assert res_param["status"] == STATUS_OK
+    assert res_param["has_vector_op"] is False
+
+    # Verify pubsub_poll raises RuntimeError on out-of-range sub_id
+    try:
+        engine.pubsub_poll(999)
+        assert False, "Expected RuntimeError on invalid sub_id in pubsub_poll"
+    except RuntimeError:
+        pass
+
+    # Verify init_with_paths rejects WAL/DB where Max_Seen_Tx == Max_Tx_Id (8192)
+    import zlib
+
+    db_4096.unlink(missing_ok=True)
+    wal_4096.unlink(missing_ok=True)
+    engine.init_with_paths(str(db_4096), str(wal_4096), dim=3)
+    engine.kv_set("sat_key", "sat_val", now_sec=1000, ttl_sec=0)
+    # Rewrite the KV WAL frame's Tx_Id (bytes 4..8 big-endian) to 8192 (Max_Tx_Id) and update CRC32
+    wal_raw = bytearray(wal_4096.read_bytes())
+    wal_raw[4:8] = (8192).to_bytes(4, "big")
+    new_crc = zlib.crc32(bytes(wal_raw[4:12]) + bytes(wal_raw[16:17]) + bytes(wal_raw[24:4120])) & 0xFFFFFFFF
+    wal_raw[12:16] = new_crc.to_bytes(4, "big")
+    wal_4096.write_bytes(bytes(wal_raw))
+    try:
+        engine.init_with_paths(str(db_4096), str(wal_4096), dim=3)
+        assert False, "Expected RuntimeError (Capacity Exceeded) when WAL Tx_Id == Max_Tx_Id (8192)"
+    except RuntimeError as exc:
+        assert str(STATUS_CAPACITY_EXCEEDED) in str(exc)
 
     db_4096.unlink(missing_ok=True)
     wal_4096.unlink(missing_ok=True)
@@ -988,4 +1088,5 @@ def run_self_test() -> None:
 
 if __name__ == "__main__":
     run_self_test()
+
 

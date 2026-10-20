@@ -1,4 +1,5 @@
---  Formally verified ACID Transaction, MVCC Visibility, and WAL/Page Framing (BR-002)
+--  Formally verified ACID Transaction, MVCC Visibility, and WAL/Page Framing
+--  (ADR-001, ADR-003, ADR-006, BR-002, BR-006)
 pragma SPARK_Mode (On);
 
 with Interfaces; use Interfaces;
@@ -7,7 +8,7 @@ with Nhe_O.IO;    use Nhe_O.IO;
 
 package Nhe_O.Transaction is
 
-   --  Bounded Commit Log (CLOG) & Transaction ID domain (R3-CRIT-01 / BR-002):
+   --  Bounded Commit Log (CLOG) & Transaction ID domain (BR-002):
    --  Max_Tx_Id equals Max_CLOG_Entries so every Valid_Tx_Id has a direct CLOG slot
    --  with zero horizon cliff above 1024.
    Max_CLOG_Entries : constant := 8192;
@@ -15,7 +16,7 @@ package Nhe_O.Transaction is
    type Tx_Id is range 0 .. Max_Tx_Id;
    subtype Valid_Tx_Id is Tx_Id range 1 .. Max_Tx_Id;
 
-   --  Default WAL scan bound for Commit_Tx, Recover_RAG_Engine & C_Init_With_Paths (R3-CRIT-02)
+   --  Default WAL scan bound for Commit_Tx, Recover_RAG_Engine & C_Init_With_Paths
    Max_WAL_Scan_Frames : constant Positive := 4096;
 
    type Tx_State is (Tx_Idle, Tx_Active, Tx_Committed, Tx_Aborted);
@@ -47,7 +48,7 @@ package Nhe_O.Transaction is
                     and then (for all K in CLOG_Tx_Index =>
                                 (if K /= Id then CLOG (K) = CLOG'Old (K)));
 
-   --  True iff transaction Id has committed according to CLOG (R2-CRIT-01, R3-CRIT-01)
+   --  True iff transaction Id has committed according to CLOG
    function Is_Tx_Committed
      (CLOG : Commit_Log;
       Id   : Tx_Id) return Boolean
@@ -64,7 +65,7 @@ package Nhe_O.Transaction is
    is
      (Tuple.Xmin <= Snapshot and then (Tuple.Xmax = 0 or else Tuple.Xmax > Snapshot));
 
-   --  CLOG-Verified MVCC Snapshot Visibility Rule (CRIT-04 / BR-002):
+   --  CLOG-Verified MVCC Snapshot Visibility Rule (BR-002):
    --  Visible iff inserting tx (Xmin) is committed and <= Snapshot, and either Xmax = 0,
    --  Xmax aborted/uncommitted in CLOG, or Xmax > Snapshot.
    function Is_Tuple_Visible
@@ -78,7 +79,7 @@ package Nhe_O.Transaction is
                 or else not Is_Tx_Committed (CLOG, Tuple.Xmax)
                 or else Tuple.Xmax > Snapshot));
 
-   --  WAL Frame Classification (CRIT-05 / Q-004):
+   --  WAL Frame Classification (Q-004):
    --  WAL_Frame_Data   = intermediate transaction page write (TOAST / data page)
    --  WAL_Frame_Commit = transaction commit barrier frame written by Commit_Tx
    --  WAL_Frame_KV     = durable Key-Value mutation frame (Q-004)
@@ -159,7 +160,7 @@ package Nhe_O.Transaction is
 
    TOAST_Header_Size       : constant := 16;
    TOAST_Chunk_Max_Bytes   : constant := Nhe_O.Page_Size - TOAST_Header_Size; --  4080 bytes
-   Max_TOAST_Payload_Bytes : constant := 16_392; --  8B "VTST" header + 4096 * 4B Float32 (R2-HIGH-02)
+   Max_TOAST_Payload_Bytes : constant := 16_392; --  8B "VTST" header + 4096 * 4B Float32
    Max_TOAST_Chunks        : constant := 5;      --  5 * 4080 = 20,400 >= 16,392 bytes
 
    subtype TOAST_Payload_Index is Positive range 1 .. Max_TOAST_Payload_Bytes;
@@ -187,7 +188,7 @@ package Nhe_O.Transaction is
      with Global => null,
           Always_Terminates;
 
-   --  Deserialize and validate a 16-byte inline TOAST pointer from raw bytes (LOW-01)
+   --  Deserialize and validate a 16-byte inline TOAST pointer from raw bytes
    procedure Decode_TOAST_Pointer
      (Bytes : in     TOAST_Pointer_Bytes;
       Ptr   :    out TOAST_Pointer;
@@ -245,7 +246,7 @@ package Nhe_O.Transaction is
                      else Length = 0);
 
    -------------------------------------------------------------------------
-   --  Primary 4096-Byte Slotted Page Layout (`"SLOT"`, CRIT-01 / BR-006)
+   --  Primary 4096-Byte Slotted Page Layout (`"SLOT"` / BR-006)
    -------------------------------------------------------------------------
 
    Max_Page_Slots         : constant := 16;
@@ -292,7 +293,7 @@ package Nhe_O.Transaction is
           Always_Terminates;
 
    --  Crash-recovery WAL Redo Pass: scan WAL frames, verify CRC32, identify committed
-   --  transactions (WAL_Frame_Commit), and replay only committed frames to DB (CRIT-05)
+   --  transactions (WAL_Frame_Commit), and replay only committed frames to DB
    procedure Redo_WAL_Recovery
      (DB_Path          : in     Bounded_Text;
       WAL_Path         : in     Bounded_Text;

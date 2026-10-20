@@ -152,7 +152,7 @@ Notice why `Post => To_Bounded_Ident'Result.Length = Len` on `To_Bounded_Ident` 
 
 ## 5. Where it lives in the project
 
-- **ADR**: [`ADR-005`](../../DECISIONS.md#L42-L46) — *Formally Verified C ABI / FFI Boundary via Precondition-Free Defensive Subprograms in 100% SPARK*.
+- **ADR**: [`ADR-005`](../../DECISIONS.md) — *Formally Verified C ABI / FFI Boundary via Precondition-Free Defensive Subprograms in 100% SPARK*.
 - **Ada/SPARK Specification & Body**: [`src/nhe_o-c_api.ads`](../../../src/nhe_o-c_api.ads) and [`src/nhe_o-c_api.adb`](../../../src/nhe_o-c_api.adb).
 - **C99/C++17 Header**: [`include/nhe_o.h`](../../../include/nhe_o.h).
 - **Shared Library GPR Project**: [`nhe_o_lib.gpr`](../../../nhe_o_lib.gpr) (`lib/libnhe_o.so`).

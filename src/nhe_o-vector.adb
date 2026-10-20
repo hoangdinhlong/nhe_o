@@ -369,7 +369,7 @@ package body Nhe_O.Vector is
    end Hamming_Distance;
 
    -------------------------------------------------------------------------
-   --  4096-D Vector TOAST Serialization / Deserialization (Q-003, R2-HIGH-02)
+   --  4096-D Vector TOAST Serialization / Deserialization (Q-003)
    -------------------------------------------------------------------------
 
    VTST_Magic_0 : constant Byte := 16#56#; --  'V'

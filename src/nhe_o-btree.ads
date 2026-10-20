@@ -1,5 +1,5 @@
 --  Formally verified Multi-Page B+Tree Index with Multi-Level Node Splitting
---  (CRIT-02, CRIT-03, MED-03)
+--  (ADR-001, ADR-003, ADR-006, BR-001)
 pragma SPARK_Mode (On);
 
 with Interfaces; use Interfaces;
@@ -53,9 +53,11 @@ package Nhe_O.BTree is
       Nodes       : BTree_Node_Pool  := [others => (others => <>)];
    end record;
 
-   --  Structural invariant functions for B+Tree nodes and index (MED-03)
+   --  Structural invariant functions for B+Tree nodes and index
    function Is_Valid_Node (Node : BTree_Node) return Boolean is
-     (if Node.Kind = Node_Internal then Node.Next_Leaf = 0 else True);
+     (if Node.Kind = Node_Internal
+      then Node.Num_Keys >= 1 and then Node.Next_Leaf = 0
+      else (Node.Page_Id <= 1 or else Node.Num_Keys >= 2));
 
    function Is_Valid_Tree (Tree : BTree_Index) return Boolean is
      (Tree.Node_Count >= 1 and then Tree.Root_Node <= Tree.Node_Count);
@@ -87,7 +89,7 @@ package Nhe_O.BTree is
                     and then Is_Valid_Tree (Tree);
 
    --  Insert or update a key -> record pointer in the B+Tree, splitting leaf
-   --  and internal nodes bottom-up and promoting a new root when full (CRIT-02)
+   --  and internal nodes bottom-up and promoting a new root when full
    procedure Insert_Key
      (Tree   : in out BTree_Index;
       Key    : in     Integer_64;
@@ -111,7 +113,7 @@ package Nhe_O.BTree is
           Pre    => Tree.Node_Count in 1 .. Max_BTree_Nodes
                     and then Tree.Root_Node in 1 .. Tree.Node_Count;
 
-   --  Delete a key from its target leaf node and decrement Total_Keys (R2-MED-04)
+   --  Delete a key from its target leaf node and decrement Total_Keys
    procedure Delete_Key
      (Tree    : in out BTree_Index;
       Key     : in     Integer_64;
@@ -140,7 +142,7 @@ package Nhe_O.BTree is
           Post   => Results.Count <= Max_Scan_Results;
 
    --  Serialize a B+Tree node into a 4096-byte Slotted Page buffer with Magic "BTRE",
-   --  full 64-bit keys, internal child pointers, and IEEE 802.3 CRC32 (CRIT-03)
+   --  full 64-bit keys, internal child pointers, and IEEE 802.3 CRC32
    procedure Encode_Node_Page
      (Node : in     BTree_Node;
       Page :    out Page_Buffer)

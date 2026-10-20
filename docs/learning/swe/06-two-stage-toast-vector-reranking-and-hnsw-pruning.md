@@ -9,16 +9,16 @@
 
 ## 1. Context — the problem
 
-During the post-Epic-03 adversarial review (`CRIT-06`, `CRIT-07`, `Q-003` in [`ADVERSARIAL-REVIEW.md`](../../epics/04-post-epic-03-grooming-and-hardening/ADVERSARIAL-REVIEW.md)), three subtle vector-search and RAG issues surfaced:
+During the post-Epic-03 adversarial review ([`ADVERSARIAL-REVIEW.md`](../../epics/04-post-epic-03-grooming-and-hardening/ADVERSARIAL-REVIEW.md), `Q-003`), three subtle vector-search and RAG issues surfaced:
 
-1. **RAM vs. Precision Trade-off for 4096-D Embeddings (`Q-003` / `CRIT-07`)**:
+1. **RAM vs. Precision Trade-off for 4096-D Embeddings (`Q-003`)**:
    - A single 4096-D `Float32` vector requires `16,384 bytes` (`16 KB`), which is $4\times$ larger than a 4096-byte database page!
    - To keep the in-memory `HNSW_Node` compact (`~1.1 KB`), each node stores a 64-D `Float32` Matryoshka prefix (`Float_Pref`), a 64-D `Int8` SQ8 prefix (`Int8_Pref`), and a full 4096-bit `Binary` signature (`Bin_Vec`).
    - However, if two documents share an identical 64-D prefix and differ only in dimensions `65..4096`, Stage-1 HNSW alone cannot distinguish them in `Float32` or `Int8` mode!
-2. **Unscaled `Int8` SQ8 Distance Distortion (`CRIT-07`)**:
+2. **Unscaled `Int8` SQ8 Distance Distortion**:
    - Scalar quantization (`Quantize_To_Int8`) normalizes each vector $V$ by its own dynamic range $\text{Scale}_V = \max_i |V_i| / 127$.
    - Comparing raw `Int8` integers `(A_i - B_i)^2` without multiplying by each vector's `Scale` factor computes distance in incompatible coordinate spaces whenever $\text{Scale}_A \neq \text{Scale}_B$.
-3. **Chronological Neighbor Cap & Duplicate `Doc_Id` Nodes in HNSW (`CRIT-06`)**:
+3. **Chronological Neighbor Cap & Duplicate `Doc_Id` Nodes in HNSW**:
    - Simply connecting a new HNSW node to the first `Max_Neighbors = 4` nodes in insertion order and ignoring subsequent edges once `Degree = 4` freezes early nodes into a clique and starves later nodes.
    - Re-ingesting an existing `Doc_Id` must update its HNSW node in-place rather than allocating a duplicate graph node that pollutes top-$k$ results.
 
@@ -90,7 +90,7 @@ During `Decode_Vector_TOAST`, `Magic = "VTST"` and `Raw_Dim = Expected_Dim` are 
 
 ## 5. Where it lives in the project
 
-- **ADR**: [`ADR-006`](../../DECISIONS.md) — *Two-Stage 4096-D Hybrid RAG (HNSW RAM Stage-1 + TOAST Full-Vector Stage-2 Exact Re-Ranking) & Primary 4KB `"SLOT"` Pages*.
+- **ADR**: [`ADR-006`](../../DECISIONS.md) — *NO-STEAL WAL Staging, 2-Pass Committed-Only WAL Recovery, Unified 8192-Entry CLOG, Primary `"SLOT"` Pages & `"VTST"` / `"RMET"` TOAST Chains*.
 - **Domain Specification**: [`docs/domain/storage-and-wal-format.md`](../../domain/storage-and-wal-format.md) (Section 3.3 `"VTST"` Vector TOAST Payload).
 - **Code Modules**:
   - [`src/nhe_o-vector.ads`](../../../src/nhe_o-vector.ads) & [`src/nhe_o-vector.adb`](../../../src/nhe_o-vector.adb) (`Int8_L2_Distance`, `Encode_Vector_TOAST`, `Decode_Vector_TOAST`).

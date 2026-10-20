@@ -17,7 +17,7 @@ package body Nhe_O.HNSW is
    end Init_HNSW;
 
    -------------------------------------------------------------------------
-   --  Dequantize_Int8_Scalar (Safe per-component SQ8 reconstruction, CRIT-07)
+   --  Dequantize_Int8_Scalar (Safe per-component SQ8 reconstruction)
    -------------------------------------------------------------------------
 
    function Dequantize_Int8_Scalar
@@ -52,7 +52,7 @@ package body Nhe_O.HNSW is
    end Dequantize_Int8_Scalar;
 
    -------------------------------------------------------------------------
-   --  Node_Distance (Metric L2 / SQ8-Scaled L2 / Binary Hamming, CRIT-07)
+   --  Node_Distance (Metric L2 / SQ8-Scaled L2 / Binary Hamming)
    -------------------------------------------------------------------------
 
    function Node_Distance
@@ -116,7 +116,7 @@ package body Nhe_O.HNSW is
    end Node_Distance;
 
    -------------------------------------------------------------------------
-   --  Node_Pair_Distance & Distance-Pruned Edge Insertion (CRIT-06)
+   --  Node_Pair_Distance & Distance-Pruned Edge Insertion
    -------------------------------------------------------------------------
 
    function Node_Pair_Distance
@@ -150,7 +150,7 @@ package body Nhe_O.HNSW is
    end Node_Pair_Distance;
 
    --  Add a directed edge Src_Id -> Target on layer L, pruning only the farthest
-   --  neighbor if Degree = Max_Neighbors and Target is closer (CRIT-06).
+   --  neighbor if Degree = Max_Neighbors and Target is closer.
    procedure Add_Edge_Pruned
      (Index  : in out HNSW_Index;
       L      : in     HNSW_Layer;
@@ -416,24 +416,35 @@ package body Nhe_O.HNSW is
       Q_Int8          : constant Quantized_Int8_Vector   := Quantize_To_Int8 (Vec);
       Q_Bin           : constant Quantized_Binary_Vector := Quantize_To_Binary (Vec);
       Pref_Len        : Matryoshka_Index;
+      New_Neighbors   : Neighbor_List;
+      New_Deg         : Neighbor_Count;
+      Nbr_Id          : HNSW_Node_Id;
       Best_Id         : HNSW_Node_Id;
       Best_Dst        : Non_Negative_Float;
       Cand_Dst        : Non_Negative_Float;
       Has_Peer        : Boolean;
       Existing_Lim    : HNSW_Node_Count;
-      Prev_Layers     : Node_Layer_Array := [others => (others => <>)];
+      Best_Entry      : HNSW_Node_Id;
+      Best_Layer      : HNSW_Layer;
    begin
-      --  Check if Doc_Id already exists in the HNSW index (update in place, CRIT-06)
+      --  1. Check if Doc_Id already exists in Index; reuse its first active slot in-place
+      --     and deactivate any duplicate slots without shrinking Node_Count
       for I in 1 .. Index.Node_Count loop
+         pragma Loop_Invariant (Index.Dim = Index.Dim'Loop_Entry);
+         pragma Loop_Invariant (Index.Node_Count = Index.Node_Count'Loop_Entry);
+         pragma Loop_Invariant (if Found_Existing then Target_Id in 1 .. Index.Node_Count);
          if Index.Nodes (I).Active and then Index.Nodes (I).Doc_Id = Doc_Id then
-            Target_Id      := I;
-            Found_Existing := True;
-            Prev_Layers    := Index.Nodes (I).Layers;
-            exit;
+            if not Found_Existing then
+               Target_Id      := I;
+               Found_Existing := True;
+            else
+               Index.Nodes (I).Active := False;
+               Index.Nodes (I).Layers := [others => (others => <>)];
+            end if;
          end if;
       end loop;
 
-      --  Otherwise, reuse any deactivated node slot before growing Node_Count
+      --  2. Otherwise reuse any deactivated node slot before growing Node_Count
       if not Found_Existing then
          for I in 1 .. Index.Node_Count loop
             if not Index.Nodes (I).Active then
@@ -453,6 +464,36 @@ package body Nhe_O.HNSW is
          Index.Node_Count := Target_Id;
       end if;
 
+      --  3. Scrub stale incoming edges to Target_Id (or deactivated slots) across all layers
+      if Found_Existing or else Reused_Inactive then
+         for Src in 1 .. Index.Node_Count loop
+            pragma Loop_Invariant (Index.Dim = Index.Dim'Loop_Entry);
+            pragma Loop_Invariant (Index.Node_Count = Index.Node_Count'Loop_Entry);
+            if Src /= Target_Id and then Index.Nodes (Src).Active then
+               for L in HNSW_Layer loop
+                  pragma Loop_Invariant (Index.Dim = Index.Dim'Loop_Entry);
+                  pragma Loop_Invariant (Index.Node_Count = Index.Node_Count'Loop_Entry);
+                  New_Neighbors := [others => 1];
+                  New_Deg       := 0;
+                  for E in 1 .. Index.Nodes (Src).Layers (L).Degree loop
+                     pragma Loop_Invariant (New_Deg < E);
+                     Nbr_Id := Index.Nodes (Src).Layers (L).Neighbors (E);
+                     if Nbr_Id <= Index.Node_Count
+                       and then Nbr_Id /= Src
+                       and then Nbr_Id /= Target_Id
+                       and then Index.Nodes (Nbr_Id).Active
+                     then
+                        New_Deg                 := New_Deg + 1;
+                        New_Neighbors (New_Deg) := Nbr_Id;
+                     end if;
+                  end loop;
+                  Index.Nodes (Src).Layers (L).Degree    := New_Deg;
+                  Index.Nodes (Src).Layers (L).Neighbors := New_Neighbors;
+               end loop;
+            end if;
+         end loop;
+      end if;
+
       if Vec.Dim <= Matryoshka_Dim then
          Pref_Len := Matryoshka_Index (Vec.Dim);
       else
@@ -463,15 +504,13 @@ package body Nhe_O.HNSW is
          Active     => True,
          Doc_Id     => Doc_Id,
          TOAST_Root => TOAST_Root,
-         Top_Level  => (if Found_Existing and then Index.Nodes (Target_Id).Top_Level > Layer_Hint
-                        then Index.Nodes (Target_Id).Top_Level
-                        else Layer_Hint),
+         Top_Level  => Layer_Hint,
          Prefix_Len => Pref_Len,
          Int8_Scale => Q_Int8.Scale,
          Float_Pref => [others => 0.0],
          Int8_Pref  => [others => 0],
          Bin_Vec    => Q_Bin,
-         Layers     => Prev_Layers
+         Layers     => [others => (others => <>)]
       );
 
       for I in 1 .. Pref_Len loop
@@ -483,7 +522,7 @@ package body Nhe_O.HNSW is
 
       Existing_Lim := Index.Node_Count;
 
-      --  Connect distance-pruned bidirectional edges on layers 1 .. Layer_Hint
+      --  4. Connect distance-pruned bidirectional edges on layers 1 .. Layer_Hint
       if Existing_Lim > 1 then
          for L in 1 .. Index.Nodes (Target_Id).Top_Level loop
             pragma Loop_Invariant (Index.Dim = Index.Dim'Loop_Entry);
@@ -498,9 +537,9 @@ package body Nhe_O.HNSW is
                pragma Loop_Invariant (Index.Node_Count = Index.Node_Count'Loop_Entry);
 
                if Existing_Id /= Target_Id
-                 and then Index.Nodes (Existing_Id).Active
-                 and then Index.Nodes (Existing_Id).Top_Level >= L
-                 and then Index.Nodes (Existing_Id).Bin_Vec.Dim = Vec.Dim
+                  and then Index.Nodes (Existing_Id).Active
+                  and then Index.Nodes (Existing_Id).Top_Level >= L
+                  and then Index.Nodes (Existing_Id).Bin_Vec.Dim = Vec.Dim
                then
                   Cand_Dst := Node_Pair_Distance (Index, Target_Id, Existing_Id);
                   if not Has_Peer or else Cand_Dst < Best_Dst then
@@ -525,16 +564,20 @@ package body Nhe_O.HNSW is
          end loop;
       end if;
 
-      if Index.Node_Count = 1
-        or else Index.Entry_Node > Index.Node_Count
-        or else not Index.Nodes (Index.Entry_Node).Active
-        or else Index.Nodes (Target_Id).Top_Level > Index.Top_Layer
-      then
-         Index.Entry_Node := Target_Id;
-         Index.Top_Layer  := Index.Nodes (Target_Id).Top_Level;
-      end if;
+      --  5. Recompute Entry_Node and Top_Layer across all active nodes
+      Best_Entry := Target_Id;
+      Best_Layer := Index.Nodes (Target_Id).Top_Level;
+      for I in 1 .. Index.Node_Count loop
+         pragma Loop_Invariant (Best_Entry in 1 .. Index.Node_Count);
+         if Index.Nodes (I).Active and then Index.Nodes (I).Top_Level > Best_Layer then
+            Best_Entry := I;
+            Best_Layer := Index.Nodes (I).Top_Level;
+         end if;
+      end loop;
 
-      Status := Status_Ok;
+      Index.Entry_Node := Best_Entry;
+      Index.Top_Layer  := Best_Layer;
+      Status           := Status_Ok;
    end Insert_Vector;
 
    -------------------------------------------------------------------------

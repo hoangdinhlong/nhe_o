@@ -32,7 +32,7 @@ A **WAL Commit Barrier** solves both the premature-read race condition and the p
 - **Mode 2: Transactional WAL-Committed Delivery (`Durable => True`, PostgreSQL `NOTIFY` semantics)**
   - When a transaction calls `Notify (Ctx, Channel, Payload)` while `Ctx.State = Tx_Active`, the message is **not** placed into subscriber ring buffers yet. Instead, it is appended to a bounded **Transactional Staging Queue** associated with `Ctx.Id`.
   - **On `Commit_Tx`**:
-    1. `Nhe_O.Transaction` encodes the WAL frame with CRC32 and flushes it to disk (`Posix_Write_WAL` + `Posix_Fsync`).
+    1. `Nhe_O.Transaction` encodes the WAL frame with CRC32 and flushes it to disk (`Posix_Pwrite_WAL` + `Posix_Fsync`).
     2. **Only after `Status = Status_Ok` and `Ctx.State = Tx_Committed`** (the *WAL Commit Barrier*), the staged notifications for `Ctx.Id` are atomically flushed into the subscriber ring buffers of `Nhe_O.PubSub`.
   - **On `Rollback_Tx` (or failed `Commit_Tx`)**:
     - The staged notifications for `Ctx.Id` are simply discarded (`Staged_Count := 0`). Subscribers never see a notification from an aborted transaction.
@@ -108,8 +108,8 @@ Notice how the precondition `Pre => Ctx.State = Tx_Committed` on `Flush_Committe
 
 ## 5. Where it lives in the project
 
-- **ADR**: [`ADR-004`](../../DECISIONS.md#L36-L40) — *Dual-Mode Pub/Sub: Fast In-Memory Ring Buffers + Optional `DURABLE` WAL-Committed Dispatch*.
-- **Domain Invariant**: [`BR-005`](../../domain/business-rules.md#L13) — *Dual-Mode Pub/Sub Delivery (In-Memory & Durable WAL)*.
+- **ADR**: [`ADR-004`](../../DECISIONS.md) — *Dual-Mode Pub/Sub: Fast In-Memory Ring Buffers + Optional `DURABLE` WAL-Committed Dispatch*.
+- **Domain Invariant**: [`BR-005`](../../domain/business-rules.md) — *Dual-Mode Pub/Sub Delivery, `Owner_Tx` Guard & Overflow Accounting*.
 - **Active Epic**: [`docs/epics/02-storage-indexing-and-rag-executor/PROGRESS.md`](../../epics/02-storage-indexing-and-rag-executor/PROGRESS.md) — Task 5.
 - **Code Modules**: [`src/nhe_o-pubsub.ads`](../../../src/nhe_o-pubsub.ads) and [`src/nhe_o-transaction.ads`](../../../src/nhe_o-transaction.ads).
 

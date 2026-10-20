@@ -1,4 +1,4 @@
---  Formally verified C ABI / FFI SDK Layer for Nhe_O (Epic 03 / ADR-005 / HIGH-01 / HIGH-02 / HIGH-08)
+--  Formally verified C ABI / FFI SDK Layer for Nhe_O (ADR-005 / BR-007)
 --  Exposes Convention => C symbols in 100% pragma SPARK_Mode (On) with zero
 --  preconditions (all C inputs are defensively validated before crossing into
 --  bounded SPARK types).
@@ -80,7 +80,7 @@ package Nhe_O.C_API is
           External_Name => "nhe_o_init";
 
    --  Initialize embedded Nhe_O C runtime state with caller-specified DB/WAL paths
-   --  and embedding dimension Dim in 1 .. 4096, recovering existing state when present (R2-CRIT-02)
+   --  and embedding dimension Dim in 1 .. 4096, recovering existing state when present
    procedure C_Init_With_Paths
      (DB_Path_Buf  : in     C_Text_Buf;
       DB_Path_Len  : in     int;
@@ -123,7 +123,7 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_vector_distance_3d";
 
-   --  Compute N-D (1 .. 4096) L2 distance, Cosine distance, and 1-bit Hamming distance (HIGH-02)
+   --  Compute N-D (1 .. 4096) L2 distance, Cosine distance, and 1-bit Hamming distance
    procedure C_Vector_Distance_ND
      (A_Buf        : in     C_Vec_Buf;
       B_Buf        : in     C_Vec_Buf;
@@ -138,7 +138,7 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_vector_distance_nd";
 
-   --  Redis SET / SETEX operation via C ABI (durable WAL append, rejects TTL_Sec < 0, HIGH-01/08, R2-CRIT-02)
+   --  Redis SET / SETEX operation via C ABI (durable WAL append, rejects TTL_Sec < 0)
    procedure C_KV_Set
      (Key_Buf    : in     C_Ident_Buf;
       Key_Len    : in     int;
@@ -154,7 +154,7 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_kv_set";
 
-   --  Redis GET operation via C ABI (writes only 1 .. Out_Val_Len, HIGH-01)
+   --  Redis GET operation via C ABI (writes only 1 .. Out_Val_Len)
    procedure C_KV_Get
      (Key_Buf     : in     C_Ident_Buf;
       Key_Len     : in     int;
@@ -169,7 +169,7 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_kv_get";
 
-   --  Redis DEL operation via C ABI (durable WAL append, R2-CRIT-02)
+   --  Redis DEL operation via C ABI (durable WAL append)
    procedure C_KV_Del
      (Key_Buf     : in     C_Ident_Buf;
       Key_Len     : in     int;
@@ -182,7 +182,7 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_kv_del";
 
-   --  Redis EXISTS operation via C ABI (HIGH-02, HIGH-08)
+   --  Redis EXISTS operation via C ABI
    procedure C_KV_Exists
      (Key_Buf    : in     C_Ident_Buf;
       Key_Len    : in     int;
@@ -195,7 +195,7 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_kv_exists";
 
-   --  Redis EXPIRE operation via C ABI (HIGH-02, HIGH-08, R2-CRIT-02)
+   --  Redis EXPIRE operation via C ABI
    procedure C_KV_Expire
      (Key_Buf     : in     C_Ident_Buf;
       Key_Len     : in     int;
@@ -210,7 +210,7 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_kv_expire";
 
-   --  Redis TTL operation via C ABI (HIGH-02, HIGH-08)
+   --  Redis TTL operation via C ABI
    procedure C_KV_TTL
      (Key_Buf    : in     C_Ident_Buf;
       Key_Len    : in     int;
@@ -223,7 +223,7 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_kv_ttl";
 
-   --  Redis INCRBY operation via C ABI (R2-CRIT-02)
+   --  Redis INCRBY operation via C ABI
    procedure C_KV_Incr_By
      (Key_Buf     : in     C_Ident_Buf;
       Key_Len     : in     int;
@@ -251,7 +251,7 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_pubsub_subscribe";
 
-   --  Pub/Sub UNSUBSCRIBE via C ABI (HIGH-02)
+   --  Pub/Sub UNSUBSCRIBE via C ABI
    procedure C_PubSub_Unsubscribe
      (Sub_Id     : in     int;
       Out_Status :    out int)
@@ -277,7 +277,7 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_pubsub_publish";
 
-   --  Pub/Sub POLL via C ABI (writes only 1 .. Out_*_Len, HIGH-01)
+   --  Pub/Sub POLL via C ABI (writes only 1 .. Out_*_Len)
    procedure C_PubSub_Poll
      (Sub_Id          : in     int;
       Out_Chan_Buf    : in out C_Ident_Buf;
@@ -308,7 +308,7 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_rag_ingest_3d";
 
-   --  Hybrid RAG Document Ingestion for N-D vectors (1 .. 4096-D, HIGH-02)
+   --  Hybrid RAG Document Ingestion for N-D vectors (1 .. 4096-D)
    procedure C_RAG_Ingest_ND
      (Doc_Id         : in     int;
       Summary_Buf    : in     C_Text_Buf;
@@ -324,7 +324,7 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_rag_ingest_nd";
 
-   --  Hybrid RAG Document Ingestion with JSONB Metadata + Full 16KB TOAST Parent Payload (R2-LOW-03)
+   --  Hybrid RAG Document Ingestion with JSONB Metadata + Full 16KB TOAST Parent Payload
    procedure C_RAG_Ingest_Full_ND
      (Doc_Id         : in     int;
       Meta_JSON_Buf  : in     C_Text_Buf;
@@ -344,7 +344,7 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_rag_ingest_full_nd";
 
-   --  Durable Hybrid RAG Document Deletion via C ABI (R2-HIGH-01)
+   --  Durable Hybrid RAG Document Deletion via C ABI
    procedure C_RAG_Delete
      (Doc_Id     : in     int;
       Out_Status :    out int)
@@ -375,7 +375,7 @@ package Nhe_O.C_API is
           External_Name => "nhe_o_rag_query_3d";
 
    --  Hybrid RAG Query for N-D vectors (1 .. 4096-D) returning retrieved TOAST
-   --  parent text in Out_Parent_Buf (HIGH-01, HIGH-02)
+   --  parent text in Out_Parent_Buf
    procedure C_RAG_Query_ND
      (Query_Vec_Buf    : in     C_Vec_Buf;
       Dim              : in     int;
@@ -396,7 +396,7 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_rag_query_nd";
 
-   --  Hybrid RAG Query with JSONB `@>` Filter + Full 16KB TOAST Parent Output Buffer (R2-LOW-03)
+   --  Hybrid RAG Query with JSONB `@>` Filter + Full 16KB TOAST Parent Output Buffer
    procedure C_RAG_Query_Full_ND
      (Query_Vec_Buf    : in     C_Vec_Buf;
       Dim              : in     int;

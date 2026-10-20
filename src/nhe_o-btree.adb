@@ -1,5 +1,5 @@
 --  Formally verified Multi-Page B+Tree Index with Multi-Level Node Splitting
---  (CRIT-02, CRIT-03, MED-03)
+--  (ADR-001, ADR-003, ADR-006, BR-001)
 pragma SPARK_Mode (On);
 
 with Nhe_O.Transaction;
@@ -13,7 +13,7 @@ package body Nhe_O.BTree is
    Half_U64 : constant Unsigned_64 := 16#8000_0000_0000_0000#;
 
    -------------------------------------------------------------------------
-   --  Bijective 64-bit Key <-> (Hi, Lo) Serialization Helpers (CRIT-03)
+   --  Bijective 64-bit Key <-> (Hi, Lo) Serialization Helpers
    -------------------------------------------------------------------------
 
    procedure Key_To_Words
@@ -64,7 +64,7 @@ package body Nhe_O.BTree is
    end Init_BTree;
 
    -------------------------------------------------------------------------
-   --  Multi-Level Internal Node Routing (CRIT-02)
+   --  Multi-Level Internal Node Routing
    -------------------------------------------------------------------------
 
    function Find_Child_Slot
@@ -180,7 +180,7 @@ package body Nhe_O.BTree is
    end Insert_Into_Non_Full_Internal;
 
    -------------------------------------------------------------------------
-   --  Insert_Key (Multi-Level Split Propagation & Root Promotion, CRIT-02)
+   --  Insert_Key (Multi-Level Split Propagation & Root Promotion)
    -------------------------------------------------------------------------
 
    procedure Insert_Key
@@ -542,7 +542,7 @@ package body Nhe_O.BTree is
    end Search_Key;
 
    -------------------------------------------------------------------------
-   --  Delete_Key (R2-MED-04, R3-MED-03)
+   --  Delete_Key
    -------------------------------------------------------------------------
 
    procedure Delete_Key
@@ -590,7 +590,7 @@ package body Nhe_O.BTree is
             Removed := True;
 
             --  Reclaim empty/underflowed leaf nodes and stale internal separator keys
-            --  when a multi-node B+Tree leaf drops below minimum occupancy (R3-MED-03)
+            --  when a multi-node B+Tree leaf drops below minimum occupancy
             if Leaf.Num_Keys < 2 and then Tree.Node_Count > 1 then
                Saved_Total  := Tree.Total_Keys;
                Saved_Splits := Tree.Split_Count;
@@ -643,7 +643,7 @@ package body Nhe_O.BTree is
    end Delete_Key;
 
    -------------------------------------------------------------------------
-   --  Range_Scan (Leftmost-Leaf Descent + Leaf Chain Verification, CRIT-02)
+   --  Range_Scan (Leftmost-Leaf Descent + Leaf Chain Verification)
    -------------------------------------------------------------------------
 
    procedure Range_Scan
@@ -802,7 +802,7 @@ package body Nhe_O.BTree is
          return;
       end if;
 
-      --  Verify IEEE 802.3 CRC32 checksum over the page (CRIT-03)
+      --  Verify IEEE 802.3 CRC32 checksum over the page
       Stored_CRC       := Get_U32_BE (Page, 13);
       Zeroed_Page (13) := 0;
       Zeroed_Page (14) := 0;
@@ -822,11 +822,15 @@ package body Nhe_O.BTree is
 
       if Natural (Page (6)) > Max_Keys_Per_Node
         or else Natural (Page (7)) > Max_BTree_Nodes
+        or else Page (8) /= 0
+        or else (for some B in 117 .. Nhe_O.Page_Size => Page (B) /= 0)
       then
          return;
       end if;
 
-      if Temp_Node.Kind = Node_Internal and then Page (7) /= 0 then
+      if Temp_Node.Kind = Node_Internal
+        and then (Page (6) = 0 or else Page (7) /= 0)
+      then
          return;
       end if;
 
@@ -837,6 +841,13 @@ package body Nhe_O.BTree is
       if Raw_Page <= Unsigned_32 (Max_Page_Id) then
          Temp_Node.Page_Id := Valid_Page_Id (Raw_Page);
       else
+         return;
+      end if;
+
+      if Temp_Node.Kind = Node_Leaf
+        and then Temp_Node.Page_Id > 1
+        and then Temp_Node.Num_Keys < 2
+      then
          return;
       end if;
 
@@ -862,6 +873,12 @@ package body Nhe_O.BTree is
             Target_Slot => Positive (Raw_TSlot),
             TOAST_Root  => Valid_Page_Id (Raw_Toast)
          );
+      end loop;
+
+      for I in 2 .. Temp_Node.Num_Keys loop
+         if Temp_Node.Keys (I - 1) >= Temp_Node.Keys (I) then
+            return;
+         end if;
       end loop;
 
       for C in Child_Slot_Index loop

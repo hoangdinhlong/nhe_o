@@ -1,5 +1,5 @@
 --  Formally verified Dual-Mode Ring-Buffer & Durable WAL Pub/Sub Broker
---  (BR-005, ADR-004, HIGH-07, MED-03)
+--  (BR-005, ADR-004)
 pragma SPARK_Mode (On);
 
 with Nhe_O.Types;       use Nhe_O.Types;
@@ -32,7 +32,7 @@ package Nhe_O.PubSub is
       Ring    : Message_Ring  := [others => (others => <>)];
    end record;
 
-   --  Ring-buffer structural invariant for a subscriber slot (MED-03)
+   --  Ring-buffer structural invariant for a subscriber slot
    function Is_Valid_Subscriber_Ring (Slot : Subscriber_Slot) return Boolean is
      (((Slot.Head - 1 + Slot.Count) mod Queue_Capacity) + 1 = Slot.Tail);
 
@@ -59,7 +59,7 @@ package Nhe_O.PubSub is
    end record;
 
    --  Match exact channel or glob '*' wildcard pattern at any position
-   --  (e.g., "*", "events.*", "*.error", "rag.*.indexed"; R3-MED-05)
+   --  (e.g., "*", "events.*", "*.error", "rag.*.indexed")
    function Matches_Channel
      (Pattern : Bounded_Ident;
       Channel : Bounded_Ident) return Boolean
@@ -98,7 +98,7 @@ package Nhe_O.PubSub is
           Always_Terminates,
           Pre    => Channel.Length > 0;
 
-   --  Mode 1 with explicit overflow reporting (HIGH-07): reports both Delivered
+   --  Mode 1 with explicit overflow reporting: reports both Delivered
    --  and Dropped subscriber counts when a matching subscriber's ring is full.
    procedure Publish
      (Broker    : in out PubSub_Broker;
@@ -111,7 +111,7 @@ package Nhe_O.PubSub is
           Pre    => Channel.Length > 0;
 
    --  Mode 2 (PostgreSQL NOTIFY — Durable): Stage a notification inside an active transaction
-   --  held behind the WAL Commit Barrier until Commit_Tx succeeds (ADR-004 / BR-005 / HIGH-07)
+   --  held behind the WAL Commit Barrier until Commit_Tx succeeds (ADR-004 / BR-005)
    procedure Stage_Notify
      (Ctx     : in     Transaction_Context;
       Staging : in out Tx_Notification_Buffer;
@@ -126,7 +126,7 @@ package Nhe_O.PubSub is
                        and then Staging.Owner_Tx = Ctx.Id);
 
    --  Flush staged notifications across the WAL Commit Barrier ONLY after Tx_Committed
-   --  and only when Staging.Owner_Tx matches Ctx.Id (HIGH-07, R2-MED-05)
+   --  and only when Staging.Owner_Tx matches Ctx.Id
    procedure Flush_Committed_Notifications
      (Ctx             : in     Transaction_Context;
       Staging         : in out Tx_Notification_Buffer;
@@ -139,7 +139,7 @@ package Nhe_O.PubSub is
                      then Staging.Count = 0
                      else Staging = Staging'Old);
 
-   --  Discard staged notifications when a transaction rolls back or aborts (HIGH-07, R2-MED-05)
+   --  Discard staged notifications when a transaction rolls back or aborts
    procedure Discard_Staged_Notifications
      (Ctx     : in     Transaction_Context;
       Staging : in out Tx_Notification_Buffer)

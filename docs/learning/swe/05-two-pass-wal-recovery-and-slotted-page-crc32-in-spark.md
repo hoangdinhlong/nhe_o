@@ -9,14 +9,14 @@
 
 ## 1. Context — the problem
 
-During the post-Epic-03 adversarial audit (`CRIT-01`, `CRIT-04`, `CRIT-05` in [`ADVERSARIAL-REVIEW.md`](../../epics/04-post-epic-03-grooming-and-hardening/ADVERSARIAL-REVIEW.md)), we identified three classic storage-engine hazards that **Absence of Run-Time Errors (AoRTE)** alone cannot catch:
+During the post-Epic-03 adversarial audit ([`ADVERSARIAL-REVIEW.md`](../../epics/04-post-epic-03-grooming-and-hardening/ADVERSARIAL-REVIEW.md)), we identified three classic storage-engine hazards that **Absence of Run-Time Errors (AoRTE)** alone cannot catch:
 
-1. **Single-Pass WAL Replay of Uncommitted Transactions (`CRIT-05`)**:
-   - When a transaction writes a multi-page 16KB TOAST chain (`Write_TOAST_Chain`), it appends 3–5 intermediate WAL frames (`Frame 0 .. Frame k-1`) before calling `Commit_Tx`.
+1. **Single-Pass WAL Replay of Uncommitted Transactions**:
+   - When a transaction writes a multi-page 16KB TOAST chain (`Write_TOAST_Chain`), it stages 3–5 intermediate `WAL_Frame_Data` frames (`Frame 0 .. Frame k-1`) before calling `Commit_Tx`.
    - If the process crashes before `Commit_Tx` writes the final commit frame, a naive single-pass `Redo_WAL_Recovery` sees valid CRC32 checksums on `Frame 0 .. Frame k-1` and replays them onto `.db`—violating ACID **Atomicity**!
-2. **Torn Tail Frames vs. Clean EOF (`HIGH-06`)**:
+2. **Torn Tail Frames vs. Clean EOF**:
    - If `Read_WAL_Frame` returns a single `Success : out Boolean` flag, `Redo_WAL_Recovery` cannot tell whether `Success = False` means a clean 0-byte EOF at a frame boundary (`N_Read = 0`) or a mid-frame disk error / torn write (`0 < N_Read < 4120`).
-3. **Volatile Tuple Directories (`CRIT-01`)**:
+3. **Volatile Tuple Directories**:
    - Without a primary 4096-byte `"SLOT"` slotted-page serializer containing the `MVCC_Tuple_Header` (`Xmin`, `Xmax`) and 16-byte `TOAST_Pointer` values, TOAST overflow chains on disk become unreachable after a restart.
 
 ---
@@ -25,7 +25,7 @@ During the post-Epic-03 adversarial audit (`CRIT-01`, `CRIT-04`, `CRIT-05` in [`
 
 ### 1. Frame Classification Inside the CRC32 Envelope (`WAL_Frame_Kind`)
 Every 4,120-byte WAL frame (`24B header + 4096B page`) carries a 1-byte `WAL_Frame_Kind` tag at byte 17:
-- `0` (`WAL_Frame_Data`): Intermediate transaction page write (e.g., TOAST overflow chunks).
+- `0` (`WAL_Frame_Data`): Intermediate transaction page write (`NO-STEAL` staging for TOAST overflow chunks and primary pages).
 - `1` (`WAL_Frame_Commit`): Transaction commit barrier written exclusively by `Commit_Tx`.
 - `2` (`WAL_Frame_KV`): Self-contained durable Key-Value mutation (`"KVMG"` page).
 
@@ -44,6 +44,6 @@ Instead of writing pages to `.db` on the first scan, `Redo_WAL_Recovery` execute
 
 ## 3. Where it lives in the project
 
-- **ADR**: [`ADR-006`](../../DECISIONS.md) — *2-Pass Committed-Only WAL Recovery, Bounded CLOG, Primary `"SLOT"` Slotted Pages & 2-Stage 4096-D Vector TOAST Re-Ranking*.
+- **ADR**: [`ADR-006`](../../DECISIONS.md) — *NO-STEAL WAL Staging, 2-Pass Committed-Only WAL Recovery, Unified 8192-Entry CLOG, Primary `"SLOT"` Pages & `"VTST"` / `"RMET"` TOAST Chains*.
 - **Domain Specification**: [`docs/domain/storage-and-wal-format.md`](../../domain/storage-and-wal-format.md).
 - **Code Modules**: [`src/nhe_o-transaction.ads`](../../../src/nhe_o-transaction.ads), [`src/nhe_o-transaction.adb`](../../../src/nhe_o-transaction.adb), and [`src/nhe_o-io.adb`](../../../src/nhe_o-io.adb).

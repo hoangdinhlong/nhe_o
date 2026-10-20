@@ -3,7 +3,7 @@
 > **Takeaway:** Automated SMT solvers (`cvc5`, `Z3`, `Alt-Ergo`) reason about loops by mathematical induction (forgetting everything outside `pragma Loop_Invariant`) and treat IEEE-754 floating-point arithmetic as non-associative and rounding-sensitive. To achieve 100% formal proof (`0 unproved`) in a vector database, you must (1) bound floating-point accumulators linearly by iteration count (`Sum <= Float (I) * Max_Step`), (2) guard floating-point divisions (`abs (Dot) < Denom`) against rounding overshoot, and (3) state quantified inductive loop invariants (`for all J in 1 .. I => ...`) that directly imply the subprogram's `Post` contract.
 
 **Tags:** swe, ai
-**Related ADRs:** [ADR-002](../../DECISIONS.md), [ADR-003](../../DECISIONS.md)
+**Related ADRs:** [ADR-002](../../DECISIONS.md), [ADR-003](../../DECISIONS.md), [ADR-005](../../DECISIONS.md), [ADR-006](../../DECISIONS.md)
 
 ---
 
@@ -162,7 +162,7 @@ Because if `Guess = X` and `X > Float'Last / 2.0`, then `Guess + X / Guess` (`X 
 |---|---|---|---|
 | **1. Suppress Floating-Point Overflow Checks (`pragma Suppress`)** | Zero proof effort on floating-point loops. | Violates AoRTE guarantees; silent `Inf` or `NaN` values can corrupt HNSW graph edges. | Unverified prototypes only. |
 | **2. Fixed-Point Arithmetic Only** | Integer/fixed-point SMT theories are much faster than IEEE-754 float theories. | Loses compatibility with standard `Float32` LLM embeddings (`pgvector` `VECTOR(d)`). | Financial/accounting columns (`Pg_Numeric`). |
-| **3. Linearly Bounded IEEE-754 Loop Invariants + Algebraic Offsets (Nhé O's choice)** | Retains full `Float32` `pgvector` compatibility while proving 100% of all 3,776 checks in `gnatprove`. | Requires explicit range subtypes (`Vector_Component in -1.0e6 .. 1.0e6`) and linear loop bounds. | Formally verified vector & RAG databases (`ADR-002`, `ADR-003`, `ADR-006`). |
+| **3. Linearly Bounded IEEE-754 Loop Invariants + Algebraic Offsets (Nhé O's choice)** | Retains full `Float32` `pgvector` compatibility while proving 100% of all 4,077 checks in `gnatprove`. | Requires explicit range subtypes (`Vector_Component in -1.0e6 .. 1.0e6`) and linear loop bounds. | Formally verified vector & RAG databases (`ADR-002`, `ADR-003`, `ADR-006`). |
 
 ---
 

@@ -1,5 +1,5 @@
 --  Formally verified Universal RAG & Hybrid SQL Query Executor
---  (ADR-003, ADR-004, CRIT-01, CRIT-04, CRIT-07, HIGH-05, HIGH-09, MED-03, Q-003)
+--  (ADR-003, ADR-004, ADR-006, BR-002, BR-006, Q-003)
 --  Unifies B+Tree PK Index, 4096-D Quantized HNSW, JSONB Filter, 4KB TOAST Parent
 --  & Vector Overflow Chains, Slotted Page Persistence, MVCC CLOG + Prior Version
 --  Chains, GraphRAG 1-Hop Links, and Durable WAL-Committed Pub/Sub Notifications.
@@ -22,7 +22,7 @@ package Nhe_O.RAG is
    subtype Optional_Doc_Id is Natural range 0 .. Max_RAG_Docs;
 
    --  Upper bound on Next_TOAST_Pg guaranteeing room for 3 full TOAST chains
-   --  (Parent + Vector + Extended Metadata, HIGH-09 / R3-HIGH-04)
+   --  (Parent + Vector + Extended Metadata)
    Max_Safe_TOAST_Page : constant Valid_Page_Id :=
      Max_Page_Id - (3 * Max_TOAST_Chunks);
 
@@ -34,10 +34,10 @@ package Nhe_O.RAG is
       Summary_Text         : Bounded_Text      := (Length => 0, Data => [others => ' ']);
       Toast_Ptr            : TOAST_Pointer     := (others => <>);
       Vec_Toast_Ptr        : TOAST_Pointer     := (others => <>); --  4096-D full vector TOAST (Q-003)
-      Meta_Toast_Ptr       : TOAST_Pointer     := (others => <>); --  Lossless summary+JSONB TOAST (R3-HIGH-04)
+      Meta_Toast_Ptr       : TOAST_Pointer     := (others => <>); --  Lossless summary+JSONB TOAST
       Related_Doc_Id       : Optional_Doc_Id   := 0;              --  1-hop GraphRAG entity edge
-      Cur_HNSW_Node        : HNSW_Node         := (others => <>); --  Active HNSW snapshot (R3-HIGH-02)
-      --  Prior MVCC tuple version preserved for historical snapshots & rollback (CRIT-04, R3-HIGH-02)
+      Cur_HNSW_Node        : HNSW_Node         := (others => <>); --  Active HNSW snapshot
+      --  Prior MVCC tuple version preserved for historical snapshots & rollback
       Has_Prior_Version    : Boolean           := False;
       Prior_Tuple_Hdr      : MVCC_Tuple_Header := (Xmin => 1, Xmax => 0);
       Prior_Metadata       : JSONB_Document    := (others => <>);
@@ -61,7 +61,7 @@ package Nhe_O.RAG is
       Docs          : RAG_Document_Table := [others => (others => <>)];
    end record;
 
-   --  Structural invariant check for a RAG_Engine instance (MED-03)
+   --  Structural invariant check for a RAG_Engine instance
    function Is_Valid_RAG_Engine (Engine : RAG_Engine) return Boolean is
      (Engine.Vector_Graph.Dim = Engine.Dim
       and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
@@ -105,7 +105,7 @@ package Nhe_O.RAG is
                     and then Is_Valid_RAG_Engine (Engine);
 
    --  Case-insensitive substring check for Hybrid Lexical + Vector RAG.
-   --  Returns False when Keyword.Length = 0 (HIGH-05).
+   --  Returns False when Keyword.Length = 0.
    function Contains_Keyword
      (Text    : Bounded_Text;
       Keyword : Bounded_Text) return Boolean
@@ -113,7 +113,7 @@ package Nhe_O.RAG is
           Post   => (if Keyword.Length = 0 then not Contains_Keyword'Result);
 
    --  MVCC logical delete of a document at transaction Ctx (sets Xmax := Ctx.Id
-   --  and removes Doc_Id from PK_Tree and Vector_Graph, CRIT-04 / R3-HIGH-02)
+   --  and removes Doc_Id from PK_Tree and Vector_Graph)
    procedure Delete_Document
      (Engine : in out RAG_Engine;
       Ctx    : in     Transaction_Context;
@@ -132,7 +132,7 @@ package Nhe_O.RAG is
                     and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
                     and then Engine.Next_TOAST_Pg = Engine.Next_TOAST_Pg'Old;
 
-   --  Durable WAL-staged MVCC delete of a document at transaction Ctx (R2-HIGH-01, R3-HIGH-02)
+   --  Durable WAL-staged MVCC delete of a document at transaction Ctx
    procedure Delete_Document
      (Engine   : in out RAG_Engine;
       Ctx      : in     Transaction_Context;
@@ -156,7 +156,7 @@ package Nhe_O.RAG is
                     and then Engine.Next_TOAST_Pg = Engine.Next_TOAST_Pg'Old;
 
    --  Roll back in-memory RAG_Engine mutations (Docs, PK_Tree, Vector_Graph,
-   --  CLOG, and Next_TOAST_Pg) performed by transaction Tx_Num (R2-CRIT-01)
+   --  CLOG, and Next_TOAST_Pg) performed by transaction Tx_Num
    procedure Rollback_RAG_Tx
      (Engine : in out RAG_Engine;
       Tx_Num : in     Valid_Tx_Id)
@@ -172,7 +172,7 @@ package Nhe_O.RAG is
                     and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
                     and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page;
 
-   --  Encode Engine.Docs into a 4096-byte primary Slotted_Page (`"SLOT"`, CRIT-01)
+   --  Encode Engine.Docs into a 4096-byte primary Slotted_Page (`"SLOT"`)
    procedure Build_RAG_Slotted_Page
      (Engine   : in     RAG_Engine;
       LSN_Tx   : in     Valid_Tx_Id;
@@ -180,7 +180,7 @@ package Nhe_O.RAG is
      with Global => null,
           Always_Terminates;
 
-   --  Recover a RAG_Engine from on-disk WAL + Page 1 Slotted_Page (CRIT-01, CRIT-05)
+   --  Recover a RAG_Engine from on-disk WAL + Page 1 Slotted_Page
    procedure Recover_RAG_Engine
      (Engine   :    out RAG_Engine;
       Dim      : in     Vector_Dim;
@@ -200,7 +200,7 @@ package Nhe_O.RAG is
    --  1. Persists oversized parent chunk (and full >64-D vector when Dim > 64) to 4KB TOAST chains
    --  2. Indexes Doc_Id in B+Tree (Nhe_O.BTree)
    --  3. Indexes Embedding in Multi-Layer Quantized HNSW Graph (Nhe_O.HNSW)
-   --  4. Preserves prior MVCC version & persists primary Slotted_Page on Page 1 (CRIT-01, CRIT-04)
+   --  4. Preserves prior MVCC version & persists primary Slotted_Page on Page 1
    --  5. Stages a DURABLE WAL notification on channel "rag.indexed" (Nhe_O.PubSub)
    procedure Ingest_Document
      (Engine         : in out RAG_Engine;

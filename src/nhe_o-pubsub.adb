@@ -160,7 +160,7 @@ package body Nhe_O.PubSub is
    begin
       Total_Delivered := 0;
 
-      --  Enforce WAL Commit Barrier and transaction ownership (HIGH-07, R2-MED-05)
+      --  Enforce WAL Commit Barrier and transaction ownership
       if Ctx.State = Tx_Committed
         and then (Staging.Count = 0 or else Staging.Owner_Tx = Ctx.Id)
       then

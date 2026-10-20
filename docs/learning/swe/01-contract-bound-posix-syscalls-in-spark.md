@@ -1,6 +1,6 @@
 # Contract-Bound POSIX Syscalls in `SPARK_Mode (On)`
 
-> **Takeaway:** By bypassing exception-raising Ada standard file libraries (`Ada.Direct_IO`, `Ada.Streams.Stream_IO`) and binding directly to exception-free POSIX C kernel syscalls (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`, `unlink`) with `Side_Effects`, an embedded storage engine can keep 100% of its I/O orchestration — path sanitization, NUL-termination, 64-bit offset arithmetic, short-read/write detection, and `fsync` durability checks — inside `pragma SPARK_Mode (On);`.
+> **Takeaway:** By bypassing exception-raising Ada standard file libraries (`Ada.Direct_IO`, `Ada.Streams.Stream_IO`) and binding directly to exception-free POSIX C kernel syscalls (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `close`, `unlink`, `access`) with `Side_Effects`, an embedded storage engine can keep 100% of its I/O orchestration — path sanitization, NUL-termination, 64-bit offset arithmetic, short-read/write detection, and `fsync` durability checks — inside `pragma SPARK_Mode (On);`.
 
 **Tags:** swe
 **Related ADRs:** [ADR-002](../../DECISIONS.md)
@@ -23,7 +23,7 @@ In a database engine, the I/O layer is where pages and Write-Ahead Log (WAL) fra
 
 ## 2. The concept, explained simply
 
-The OS kernel itself (Linux / POSIX) **does not raise Ada exceptions**. Kernel system calls (`open`, `pread`, `pwrite`, `write`, `fsync`, `close`, `unlink`) are plain C functions that communicate outcomes entirely through **return values** (`int` file descriptors/status codes, or `ssize_t` byte counts):
+The OS kernel itself (Linux / POSIX) **does not raise Ada exceptions**. Kernel system calls (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `close`, `unlink`, `access`) are plain C functions that communicate outcomes entirely through **return values** (`int` file descriptors/status codes, or `ssize_t` byte counts):
 - `open(...)` returns a non-negative file descriptor (`Fd >= 0`) on success, or `-1` on failure.
 - `pread(fd, buf, count, offset)` and `pwrite(fd, buf, count, offset)` atomically seek and transfer bytes at a given 64-bit file `offset` without mutating the file descriptor's seek pointer, returning the exact number of bytes transferred (`ssize_t`) or `-1` on error.
 - `fsync(fd)` and `close(fd)` return `0` on success or `-1` on error.
@@ -145,11 +145,11 @@ Notice what `SPARK_Mode (On)` verifies inside `Write_Page` and `Read_Page`:
 
 ## 5. Where it lives in the project
 
-- **ADR**: [`ADR-002`](../../DECISIONS.md#L24-L28) — *100% `SPARK_Mode (On)` Mandate via Statically Bounded Memory and Contract-Bound POSIX Syscall I/O*.
-- **Domain Invariant**: [`BR-001`](../../domain/business-rules.md#L9) — *100% `SPARK_Mode (On)` Verification Invariant*.
-- **Architecture**: [`docs/reference/ARCHITECTURE.md`](../../reference/ARCHITECTURE.md#L9-L47) — System Overview & Contract-Bound POSIX I/O diagram.
+- **ADR**: [`ADR-002`](../../DECISIONS.md) — *100% `SPARK_Mode (On)` Mandate via Statically Bounded Memory and Contract-Bound POSIX Syscall I/O*.
+- **Domain Invariant**: [`BR-001`](../../domain/business-rules.md) — *100% `SPARK_Mode (On)` & Silver/Gold Verification Invariant*.
+- **Architecture**: [`docs/reference/ARCHITECTURE.md`](../../reference/ARCHITECTURE.md) — System Overview & Contract-Bound POSIX I/O diagram.
 - **Specification**: [`src/nhe_o-io.ads`](../../../src/nhe_o-io.ads) — `Valid_Page_Id`, `Page_Buffer`, `WAL_Frame_Buffer`, `Has_Embedded_NUL`, `To_C_Path`, and I/O contracts.
-- **Implementation**: [`src/nhe_o-io.adb`](../../../src/nhe_o-io.adb) — `Posix_Open`, `Posix_Pwrite`, `Posix_Pread`, `Posix_Write_WAL`, `Posix_Pread_WAL`, `Posix_Fsync`, `Posix_Close`, `Posix_Unlink`.
+- **Implementation**: [`src/nhe_o-io.adb`](../../../src/nhe_o-io.adb) — `Posix_Open`, `Posix_Pwrite`, `Posix_Pread`, `Posix_Pwrite_WAL`, `Posix_Pread_WAL`, `Posix_Lseek`, `Posix_Fsync`, `Posix_Close`, `Posix_Unlink`, `Posix_Access`.
 
 ---
 
