@@ -108,6 +108,20 @@ package Nhe_O.JSON is
                                             not (Doc.Fields (J).Active
                                                  and then Equal_Ident (Doc.Fields (J).Key, Key))));
 
+   --  A document whose every active field has a non-empty key that no earlier
+   --  active field repeats and a value valid for its kind (Is_Valid_Field_Value),
+   --  so that re-inserting its active fields with Put_Field (as RAG recovery does)
+   --  succeeds and keeps every key and kind
+   function Is_Valid_JSONB_Document (Doc : JSONB_Document) return Boolean is
+     (for all I in 1 .. Doc.Count =>
+        (if Doc.Fields (I).Active then
+           Doc.Fields (I).Key.Length > 0
+           and then Is_Valid_Field_Value (Doc.Fields (I).Val, Doc.Fields (I).Kind)
+           and then (for all J in 1 .. I - 1 =>
+                       not (Doc.Fields (J).Active
+                            and then Equal_Ident (Doc.Fields (J).Key, Doc.Fields (I).Key)))))
+     with Global => null;
+
    --  Put or update a field in a decomposed JSONB document (`jsonb_set`),
    --  validating Val against Kind
    procedure Put_Field

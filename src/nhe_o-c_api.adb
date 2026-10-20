@@ -1320,6 +1320,7 @@ package body Nhe_O.C_API is
       Ingest_Document
         (Engine         => G_RAG_Engine,
          Ctx            => Tx,
+         Snapshot       => Take_Snapshot (G_RAG_Engine),
          DB_Path        => G_DB_Path,
          WAL_Path       => G_WAL_Path,
          Staging        => Staging,
@@ -1439,6 +1440,7 @@ package body Nhe_O.C_API is
       Delete_Document
         (Engine   => G_RAG_Engine,
          Ctx      => Tx,
+         Snapshot => Take_Snapshot (G_RAG_Engine),
          DB_Path  => G_DB_Path,
          WAL_Path => G_WAL_Path,
          Doc_Id   => RAG_Doc_Slot (Doc_Id),

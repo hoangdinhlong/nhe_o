@@ -975,8 +975,10 @@ def run_self_test() -> None:
     # Verify N-D (4096-D) RAG with custom paths, persistence across restart,
     # lossless "RMET" summary (>63B) + JSONB metadata recovery,
     # durable KV incr_by/expire recovery, and durable deletion
-    db_4096 = Path("/tmp/nhe_o_py_4096.db")
-    wal_4096 = Path("/tmp/nhe_o_py_4096.wal")
+    # Private directory, so concurrent self-test runs never share these files
+    work_dir = Path(tempfile.mkdtemp(prefix="nhe_o_py_"))
+    db_4096 = work_dir / "nhe_o_py_4096.db"
+    wal_4096 = work_dir / "nhe_o_py_4096.wal"
     db_4096.unlink(missing_ok=True)
     wal_4096.unlink(missing_ok=True)
 
@@ -1099,7 +1101,7 @@ def run_self_test() -> None:
     # ... also when they only alias one file
     exc = _expect_error(
         NheOError,
-        lambda: engine.init_with_paths(str(db_4096), "/tmp/./nhe_o_py_4096.db", dim=3),
+        lambda: engine.init_with_paths(str(db_4096), f"{work_dir}/./nhe_o_py_4096.db", dim=3),
         "Expected NheOError when db_path and wal_path alias one file",
     )
     _check(getattr(exc, "status", None) == STATUS_INVALID_ARG, "alias status")
@@ -1224,6 +1226,7 @@ def run_self_test() -> None:
 
     # close() releases the engine and its scratch files; a new engine can then open
     engine.close()
+    shutil.rmtree(work_dir, ignore_errors=True)
     _expect_error(RuntimeError, lambda: engine.kv_get("x"), "Expected RuntimeError after close()")
     with NheOEngine(dim=8) as scratch:
         scratch.rag_ingest_nd(1, "eight dimensions", [1.0] * 8)

@@ -45,12 +45,14 @@ package body Nhe_O.RAG is
       elsif (Code in 16#1E00# .. 16#1E95# or else Code in 16#1EA0# .. 16#1EFF#)
         and then Code mod 2 = 0
       then Code + 1
+      elsif Code = 16#1E9B# then 16#1E61#
       elsif Code = 16#1E9E# then 16#DF#
       else Code)
      with Pre => Code <= 16#10FFFF#;
 
    --  Decode the UTF-8 sequence starting at Pos of S and case-fold it. Malformed bytes
-   --  and 4-byte sequences are compared byte-wise through codes above 16#10FFFF#.
+   --  (including overlong forms and encoded surrogates) and 4-byte sequences are
+   --  compared byte-wise through codes above 16#10FFFF#.
    procedure Decode_Folded
      (S    : in     Bounded_Text;
       Pos  : in     Text_Index;
@@ -79,7 +81,11 @@ package body Nhe_O.RAG is
       elsif B0 in 16#E0# .. 16#EF# and then Pos + 1 < S.Length then
          B1 := Character'Pos (S.Data (Pos + 1));
          B2 := Character'Pos (S.Data (Pos + 2));
-         if B1 in 16#80# .. 16#BF# and then B2 in 16#80# .. 16#BF# then
+         --  E0 needs A0 .. BF (no overlong form), ED needs 80 .. 9F (no surrogate)
+         if B1 in (if B0 = 16#E0# then 16#A0# else 16#80#)
+                  .. (if B0 = 16#ED# then 16#9F# else 16#BF#)
+           and then B2 in 16#80# .. 16#BF#
+         then
             Code := Fold_Latin ((B0 - 16#E0#) * 4096 + (B1 - 16#80#) * 64 + (B2 - 16#80#));
             Len  := 3;
             return;
@@ -164,17 +170,82 @@ package body Nhe_O.RAG is
       end loop;
    end Capture_Doc_HNSW_Node;
 
-   procedure Delete_Document
+   --  Mark the live version of Doc_Id deleted by Tx and drop Doc_Id from PK_Tree and
+   --  Vector_Graph. When that version is Tx's own and replaced a prior version, the slot
+   --  reverts to the prior version, deleted by Tx (or still by its committed deleter):
+   --  keeping Tx's version, which no snapshot can see, would push the prior version out
+   --  of the single prior-version slot at the next update.
+   procedure Apply_Delete
      (Engine : in out RAG_Engine;
-      Ctx    : in     Transaction_Context;
-      Doc_Id : in     RAG_Doc_Slot;
-      Status :    out Engine_Status)
+      Tx     : in     Valid_Tx_Id;
+      Doc_Id : in     RAG_Doc_Slot)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Engine.Vector_Graph.Dim = Engine.Dim
+                    and then Engine.Vector_Graph.Node_Count <= Max_HNSW_Nodes
+                    and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count,
+          Post   => Engine.Dim = Engine.Dim'Old
+                    and then Engine.Vector_Graph.Dim = Engine.Dim
+                    and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
+                    and then Engine.Next_TOAST_Pg = Engine.Next_TOAST_Pg'Old
+                    and then Engine.CLOG (Tx) = Tx_Active
    is
+      Prior_Hdr : constant MVCC_Tuple_Header := Engine.Docs (Doc_Id).Prior_Tuple_Hdr;
       Removed   : Boolean;
       HNSW_Snap : HNSW_Node;
       pragma Warnings (Off, Removed);
    begin
-      if Has_Write_Conflict (Engine, Doc_Id, Ctx.Id)
+      if Engine.Docs (Doc_Id).Tuple_Hdr.Xmin = Tx
+        and then Engine.Docs (Doc_Id).Has_Prior_Version
+      then
+         Engine.Docs (Doc_Id).Tuple_Hdr :=
+           (Xmin => Prior_Hdr.Xmin,
+            Xmax => (if Prior_Hdr.Xmax = 0 then Tx else Prior_Hdr.Xmax));
+         Engine.Docs (Doc_Id).Metadata             := Engine.Docs (Doc_Id).Prior_Metadata;
+         Engine.Docs (Doc_Id).Summary_Text         := Engine.Docs (Doc_Id).Prior_Summary;
+         Engine.Docs (Doc_Id).Toast_Ptr            := Engine.Docs (Doc_Id).Prior_Toast_Ptr;
+         Engine.Docs (Doc_Id).Vec_Toast_Ptr        := Engine.Docs (Doc_Id).Prior_Vec_Toast_Ptr;
+         Engine.Docs (Doc_Id).Meta_Toast_Ptr       := Engine.Docs (Doc_Id).Prior_Meta_Toast_Ptr;
+         Engine.Docs (Doc_Id).Related_Doc_Id       := Engine.Docs (Doc_Id).Prior_Related_Id;
+         Engine.Docs (Doc_Id).Cur_HNSW_Node        := Engine.Docs (Doc_Id).Prior_HNSW_Node;
+         Engine.Docs (Doc_Id).Has_Prior_Version    := False;
+         Engine.Docs (Doc_Id).Prior_Tuple_Hdr      := (Xmin => 1, Xmax => 0);
+         Engine.Docs (Doc_Id).Prior_Metadata       := (others => <>);
+         Engine.Docs (Doc_Id).Prior_Summary        := (Length => 0, Data => [others => ' ']);
+         Engine.Docs (Doc_Id).Prior_Toast_Ptr      := (others => <>);
+         Engine.Docs (Doc_Id).Prior_Vec_Toast_Ptr  := (others => <>);
+         Engine.Docs (Doc_Id).Prior_Meta_Toast_Ptr := (others => <>);
+         Engine.Docs (Doc_Id).Prior_Related_Id     := 0;
+         Engine.Docs (Doc_Id).Prior_HNSW_Node      := (others => <>);
+      else
+         Capture_Doc_HNSW_Node (Engine.Vector_Graph, Doc_Id, HNSW_Snap);
+         if HNSW_Snap.Active then
+            Engine.Docs (Doc_Id).Cur_HNSW_Node := HNSW_Snap;
+         end if;
+         Engine.Docs (Doc_Id).Tuple_Hdr.Xmax := Tx;
+      end if;
+
+      Set_CLOG_State (Engine.CLOG, Tx, Tx_Active);
+      if Engine.Doc_Count > 0 then
+         Engine.Doc_Count := Engine.Doc_Count - 1;
+      end if;
+
+      --  Synchronize PK_Tree and Vector_Graph on delete
+      Delete_Key (Engine.PK_Tree, Integer_64 (Doc_Id), Removed);
+      Remove_Vector (Engine.Vector_Graph, Doc_Id);
+   end Apply_Delete;
+
+   procedure Delete_Document
+     (Engine   : in out RAG_Engine;
+      Ctx      : in     Transaction_Context;
+      Snapshot : in     Commit_Seq_Number;
+      Doc_Id   : in     RAG_Doc_Slot;
+      Status   :    out Engine_Status)
+   is
+   begin
+      if Has_Write_Conflict (Engine, Doc_Id, Ctx.Id, Snapshot)
         or else Engine.CLOG (Ctx.Id) in Tx_Aborted | Tx_Committed
       then
          Status := Status_Tx_Aborted;
@@ -188,21 +259,7 @@ package body Nhe_O.RAG is
          return;
       end if;
 
-      Capture_Doc_HNSW_Node (Engine.Vector_Graph, Doc_Id, HNSW_Snap);
-      if HNSW_Snap.Active then
-         Engine.Docs (Doc_Id).Cur_HNSW_Node := HNSW_Snap;
-      end if;
-
-      Set_CLOG_State (Engine.CLOG, Ctx.Id, Tx_Active);
-      Engine.Docs (Doc_Id).Tuple_Hdr.Xmax := Ctx.Id;
-      if Engine.Doc_Count > 0 then
-         Engine.Doc_Count := Engine.Doc_Count - 1;
-      end if;
-
-      --  Synchronize PK_Tree and Vector_Graph on delete
-      Delete_Key (Engine.PK_Tree, Integer_64 (Doc_Id), Removed);
-      Remove_Vector (Engine.Vector_Graph, Doc_Id);
-
+      Apply_Delete (Engine, Ctx.Id, Doc_Id);
       Status := Status_Ok;
    end Delete_Document;
 
@@ -563,6 +620,7 @@ package body Nhe_O.RAG is
    procedure Delete_Document
      (Engine   : in out RAG_Engine;
       Ctx      : in     Transaction_Context;
+      Snapshot : in     Commit_Seq_Number;
       DB_Path  : in     Bounded_Text;
       WAL_Path : in     Bounded_Text;
       Doc_Id   : in     RAG_Doc_Slot;
@@ -578,11 +636,8 @@ package body Nhe_O.RAG is
       Slot_CRC        : Unsigned_32;
       pragma Warnings (Off, Slot_CRC);
       WAL_Ok          : Boolean;
-      Removed         : Boolean;
-      HNSW_Snap       : HNSW_Node;
-      pragma Warnings (Off, Removed);
    begin
-      if Has_Write_Conflict (Engine, Doc_Id, Ctx.Id)
+      if Has_Write_Conflict (Engine, Doc_Id, Ctx.Id, Snapshot)
         or else Engine.CLOG (Ctx.Id) in Tx_Aborted | Tx_Committed
       then
          Status := Status_Tx_Aborted;
@@ -606,23 +661,11 @@ package body Nhe_O.RAG is
          return;
       end if;
 
-      Capture_Doc_HNSW_Node (Engine.Vector_Graph, Doc_Id, HNSW_Snap);
-      if HNSW_Snap.Active then
-         Engine.Docs (Doc_Id).Cur_HNSW_Node := HNSW_Snap;
-      end if;
-
-      Set_CLOG_State (Engine.CLOG, Ctx.Id, Tx_Active);
-      Engine.Docs (Doc_Id).Tuple_Hdr.Xmax := Ctx.Id;
-      if Engine.Doc_Count > 0 then
-         Engine.Doc_Count := Engine.Doc_Count - 1;
-      end if;
-
-      --  Synchronize PK_Tree and Vector_Graph on delete
-      Delete_Key (Engine.PK_Tree, Integer_64 (Doc_Id), Removed);
-      Remove_Vector (Engine.Vector_Graph, Doc_Id);
+      Apply_Delete (Engine, Ctx.Id, Doc_Id);
 
       --  Stage updated Slotted_Page in WAL (NO-STEAL; Commit_Tx flushes to DB_Path).
-      --  A failed append leaves the WAL unchanged, so only memory must be restored.
+      --  After a failed append only memory is restored: a Page 1 frame the append could
+      --  not roll back is superseded by Ctx's commit page and never replayed alone.
       Build_RAG_Slotted_Page (Engine, Ctx.Id, Slot_Page);
       Encode_WAL_Frame (Ctx.Id, 1, Slot_Page, Slot_CRC, Slot_WAL, WAL_Frame_Data);
       Append_WAL_Frame (WAL_Path, Slot_WAL, WAL_Ok);
@@ -643,76 +686,52 @@ package body Nhe_O.RAG is
    --  Recompute_TOAST_High_Water_Mark & Rollback_RAG_Tx
    -------------------------------------------------------------------------
 
+   --  End page (exclusive) of the chain P, 0 for an empty pointer
+   function Chain_End (P : TOAST_Pointer) return Natural is
+     (if P.Chunk_Count > 0 then P.Root_Overflow_Page + P.Chunk_Count else 0);
+
+   --  The pages Staged_Tx staged for Engine.Docs (S) are still reserved
+   function Has_Reserved_Staging (Engine : RAG_Engine; S : RAG_Doc_Slot) return Boolean is
+     (Engine.Docs (S).Staged_Tx /= 0
+      and then Engine.CLOG (Engine.Docs (S).Staged_Tx) = Tx_Active
+      and then Engine.Docs (S).Staged_End > Engine.Docs (S).Staged_First);
+
+   --  Next_TOAST_Pg := one past the highest page of any live or prior chain and of any
+   --  page range staged by a transaction that is still active
    procedure Recompute_TOAST_High_Water_Mark
-     (Engine        : in out RAG_Engine;
-      Updating_Slot : in     Optional_Doc_Id)
+     (Engine : in out RAG_Engine)
      with Pre  => Engine.Vector_Graph.Dim = Engine.Dim
                   and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
                   and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count,
           Post => Engine = (Engine'Old with delta Next_TOAST_Pg => Engine.Next_TOAST_Pg)
                   and then Engine.Next_TOAST_Pg in 10 .. Max_Safe_TOAST_Page
    is
-      HWM      : Valid_Page_Id := 10;
-      End_Page : Natural;
+      HWM : Valid_Page_Id := 10;
+
+      procedure Include (End_Page : Natural)
+        with Pre  => HWM in 10 .. Max_Safe_TOAST_Page,
+             Post => HWM in 10 .. Max_Safe_TOAST_Page
+      is
+      begin
+         if End_Page > HWM and then End_Page <= Max_Safe_TOAST_Page then
+            HWM := End_Page;
+         end if;
+      end Include;
    begin
       for S in RAG_Doc_Slot loop
          pragma Loop_Invariant (HWM in 10 .. Max_Safe_TOAST_Page);
          if Engine.Docs (S).Active then
-            if S /= Updating_Slot
-              or else Is_Tx_Committed (Engine.CLOG, Engine.Docs (S).Tuple_Hdr.Xmin)
-            then
-               End_Page :=
-                 Engine.Docs (S).Toast_Ptr.Root_Overflow_Page +
-                 Engine.Docs (S).Toast_Ptr.Chunk_Count;
-               if End_Page > HWM and then End_Page <= Max_Safe_TOAST_Page then
-                  HWM := End_Page;
-               end if;
-
-               End_Page :=
-                 Engine.Docs (S).Vec_Toast_Ptr.Root_Overflow_Page +
-                 Engine.Docs (S).Vec_Toast_Ptr.Chunk_Count;
-               if End_Page > HWM and then End_Page <= Max_Safe_TOAST_Page then
-                  HWM := End_Page;
-               end if;
-
-               if Engine.Docs (S).Meta_Toast_Ptr.Total_Byte_Length > 0 then
-                  End_Page :=
-                    Engine.Docs (S).Meta_Toast_Ptr.Root_Overflow_Page +
-                    Engine.Docs (S).Meta_Toast_Ptr.Chunk_Count;
-                  if End_Page > HWM and then End_Page <= Max_Safe_TOAST_Page then
-                     HWM := End_Page;
-                  end if;
-               end if;
+            Include (Chain_End (Engine.Docs (S).Toast_Ptr));
+            Include (Chain_End (Engine.Docs (S).Vec_Toast_Ptr));
+            Include (Chain_End (Engine.Docs (S).Meta_Toast_Ptr));
+            if Engine.Docs (S).Has_Prior_Version then
+               Include (Chain_End (Engine.Docs (S).Prior_Toast_Ptr));
+               Include (Chain_End (Engine.Docs (S).Prior_Vec_Toast_Ptr));
+               Include (Chain_End (Engine.Docs (S).Prior_Meta_Toast_Ptr));
             end if;
-
-            if Engine.Docs (S).Has_Prior_Version
-              and then (S /= Updating_Slot
-                        or else not Is_Tx_Committed
-                          (Engine.CLOG, Engine.Docs (S).Tuple_Hdr.Xmin))
-            then
-               End_Page :=
-                 Engine.Docs (S).Prior_Toast_Ptr.Root_Overflow_Page +
-                 Engine.Docs (S).Prior_Toast_Ptr.Chunk_Count;
-               if End_Page > HWM and then End_Page <= Max_Safe_TOAST_Page then
-                  HWM := End_Page;
-               end if;
-
-               End_Page :=
-                 Engine.Docs (S).Prior_Vec_Toast_Ptr.Root_Overflow_Page +
-                 Engine.Docs (S).Prior_Vec_Toast_Ptr.Chunk_Count;
-               if End_Page > HWM and then End_Page <= Max_Safe_TOAST_Page then
-                  HWM := End_Page;
-               end if;
-
-               if Engine.Docs (S).Prior_Meta_Toast_Ptr.Total_Byte_Length > 0 then
-                  End_Page :=
-                    Engine.Docs (S).Prior_Meta_Toast_Ptr.Root_Overflow_Page +
-                    Engine.Docs (S).Prior_Meta_Toast_Ptr.Chunk_Count;
-                  if End_Page > HWM and then End_Page <= Max_Safe_TOAST_Page then
-                     HWM := End_Page;
-                  end if;
-               end if;
-            end if;
+         end if;
+         if Has_Reserved_Staging (Engine, S) then
+            Include (Engine.Docs (S).Staged_End);
          end if;
       end loop;
 
@@ -769,7 +788,10 @@ package body Nhe_O.RAG is
                      Prior_Vec_Toast_Ptr  => (others => <>),
                      Prior_Meta_Toast_Ptr => (others => <>),
                      Prior_Related_Id     => 0,
-                     Prior_HNSW_Node      => (others => <>)
+                     Prior_HNSW_Node      => (others => <>),
+                     Staged_Tx            => 0,
+                     Staged_First         => 10,
+                     Staged_End           => 10
                   );
 
                   if Prior_Was_Deleted then
@@ -822,7 +844,7 @@ package body Nhe_O.RAG is
          end if;
       end loop;
 
-      Recompute_TOAST_High_Water_Mark (Engine, 0);
+      Recompute_TOAST_High_Water_Mark (Engine);
    end Rollback_RAG_Tx;
 
    -------------------------------------------------------------------------
@@ -891,6 +913,115 @@ package body Nhe_O.RAG is
 
       return True;
    end Is_TOAST_Range_Free;
+
+   subtype TOAST_Run is Positive range 1 .. Max_TOAST_Chunks;
+
+   --  May the writer Tx use pages Cand_Start .. Cand_Start + Cand_Count - 1 for a new
+   --  version of Updating_Slot? Reserved are the live and prior chains of every other
+   --  slot (Is_TOAST_Range_Free), the chains Updating_Slot keeps as its prior
+   --  (Keep_Prior), the ranges Used_A / Used_B already chosen for this version, and the
+   --  pages staged by any other transaction that is still active: its commit
+   --  materializes every frame it staged, those of versions it has since superseded
+   --  included. Tx may reuse pages it staged itself: its later frames overwrite them in
+   --  WAL order, both at commit and in redo.
+   function Is_TOAST_Range_Available
+     (Engine          : RAG_Engine;
+      Tx              : Valid_Tx_Id;
+      Updating_Slot   : RAG_Doc_Slot;
+      Keep_Prior      : Boolean;
+      Retained_Toast  : TOAST_Pointer;
+      Retained_Vec_P  : TOAST_Pointer;
+      Retained_Meta_P : TOAST_Pointer;
+      Used_A_Start    : Valid_Page_Id;
+      Used_A_Count    : TOAST_Chunk_Count;
+      Used_B_Start    : Valid_Page_Id;
+      Used_B_Count    : TOAST_Chunk_Count;
+      Cand_Start      : Valid_Page_Id;
+      Cand_Count      : TOAST_Run) return Boolean
+   is
+   begin
+      if Ranges_Overlap (Used_A_Start, Used_A_Count, Cand_Start, Cand_Count)
+        or else Ranges_Overlap (Used_B_Start, Used_B_Count, Cand_Start, Cand_Count)
+        or else not Is_TOAST_Range_Free
+          (Engine, Updating_Slot, Keep_Prior, Retained_Toast, Retained_Vec_P,
+           Retained_Meta_P, Cand_Start, Cand_Count)
+      then
+         return False;
+      end if;
+
+      for S in RAG_Doc_Slot loop
+         if Has_Reserved_Staging (Engine, S)
+           and then Engine.Docs (S).Staged_Tx /= Tx
+           and then Ranges_Overlap
+             (Engine.Docs (S).Staged_First,
+              Engine.Docs (S).Staged_End - Engine.Docs (S).Staged_First,
+              Cand_Start, Cand_Count)
+         then
+            return False;
+         end if;
+      end loop;
+      return True;
+   end Is_TOAST_Range_Available;
+
+   --  Lowest Start in 10 .. Max_Safe_TOAST_Page - Count from which Count pages are
+   --  available (Is_TOAST_Range_Available); Found is False when there is none. The
+   --  lowest available start is page 10 or the end of a reserved range, so only those
+   --  candidates are tried (first fit: pages freed below the high-water mark are reused).
+   procedure Find_TOAST_Range
+     (Engine          : in     RAG_Engine;
+      Tx              : in     Valid_Tx_Id;
+      Updating_Slot   : in     RAG_Doc_Slot;
+      Keep_Prior      : in     Boolean;
+      Retained_Toast  : in     TOAST_Pointer;
+      Retained_Vec_P  : in     TOAST_Pointer;
+      Retained_Meta_P : in     TOAST_Pointer;
+      Used_A_Start    : in     Valid_Page_Id;
+      Used_A_Count    : in     TOAST_Chunk_Count;
+      Used_B_Start    : in     Valid_Page_Id;
+      Used_B_Count    : in     TOAST_Chunk_Count;
+      Count           : in     TOAST_Run;
+      Start           :    out Valid_Page_Id;
+      Found           :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Post   => (if Found then Start in 10 .. Max_Safe_TOAST_Page - Count)
+   is
+      procedure Try (Cand : Natural)
+        with Pre  => (if Found then Start in 10 .. Max_Safe_TOAST_Page - Count),
+             Post => (if Found then Start in 10 .. Max_Safe_TOAST_Page - Count)
+      is
+      begin
+         if Cand in 10 .. Max_Safe_TOAST_Page - Count
+           and then (not Found or else Cand < Start)
+           and then Is_TOAST_Range_Available
+             (Engine, Tx, Updating_Slot, Keep_Prior, Retained_Toast, Retained_Vec_P,
+              Retained_Meta_P, Used_A_Start, Used_A_Count, Used_B_Start, Used_B_Count,
+              Cand, Count)
+         then
+            Start := Cand;
+            Found := True;
+         end if;
+      end Try;
+   begin
+      Start := 10;
+      Found := False;
+      Try (10);
+      for S in RAG_Doc_Slot loop
+         pragma Loop_Invariant (if Found then Start in 10 .. Max_Safe_TOAST_Page - Count);
+         Try (Chain_End (Engine.Docs (S).Toast_Ptr));
+         Try (Chain_End (Engine.Docs (S).Vec_Toast_Ptr));
+         Try (Chain_End (Engine.Docs (S).Meta_Toast_Ptr));
+         Try (Chain_End (Engine.Docs (S).Prior_Toast_Ptr));
+         Try (Chain_End (Engine.Docs (S).Prior_Vec_Toast_Ptr));
+         Try (Chain_End (Engine.Docs (S).Prior_Meta_Toast_Ptr));
+         Try (Engine.Docs (S).Staged_End);
+      end loop;
+      Try (Chain_End (Retained_Toast));
+      Try (Chain_End (Retained_Vec_P));
+      Try (Chain_End (Retained_Meta_P));
+      Try (Used_A_Start + Used_A_Count);
+      Try (Used_B_Start + Used_B_Count);
+   end Find_TOAST_Range;
 
    procedure Recover_RAG_Engine
      (Engine      :    out RAG_Engine;
@@ -1406,6 +1537,10 @@ package body Nhe_O.RAG is
                  Engine.Docs (P).Tuple_Hdr.Xmin = 1
                  and then Engine.Docs (P).Tuple_Hdr.Xmax = 0
                  and then not Engine.Docs (P).Has_Prior_Version));
+         --  No transaction is active, so no staged page stays reserved
+         Engine.Docs (S).Staged_Tx    := 0;
+         Engine.Docs (S).Staged_First := 10;
+         Engine.Docs (S).Staged_End   := 10;
          if Engine.Docs (S).Active then
             if Engine.Docs (S).Tuple_Hdr.Xmax > 0 then
                --  Committed delete: no snapshot can see this document any more (its
@@ -1439,7 +1574,7 @@ package body Nhe_O.RAG is
          end if;
       end loop;
 
-      Recompute_TOAST_High_Water_Mark (Engine, 0);
+      Recompute_TOAST_High_Water_Mark (Engine);
       Status := Status_Ok;
    end Freeze_RAG_Engine;
 
@@ -1450,6 +1585,7 @@ package body Nhe_O.RAG is
    procedure Ingest_Document
      (Engine         : in out RAG_Engine;
       Ctx            : in     Transaction_Context;
+      Snapshot       : in     Commit_Seq_Number;
       DB_Path        : in     Bounded_Text;
       WAL_Path       : in     Bounded_Text;
       Staging        : in out Tx_Notification_Buffer;
@@ -1507,25 +1643,7 @@ package body Nhe_O.RAG is
       Retained_HNSW      : constant HNSW_Node          :=
         (if Old_Entry.Active and then Old_Xmin_Comm
          then Old_Entry.Cur_HNSW_Node else Old_Entry.Prior_HNSW_Node);
-      Retired_Doc_Ptr    : constant TOAST_Pointer      :=
-        (if Old_Entry.Active and then Old_Xmin_Comm and then Old_Entry.Has_Prior_Version
-         then Old_Entry.Prior_Toast_Ptr
-         elsif Old_Entry.Active and then not Old_Xmin_Comm
-         then Old_Entry.Toast_Ptr
-         else (others => <>));
-      Retired_Vec_Ptr    : constant TOAST_Pointer      :=
-        (if Old_Entry.Active and then Old_Xmin_Comm and then Old_Entry.Has_Prior_Version
-         then Old_Entry.Prior_Vec_Toast_Ptr
-         elsif Old_Entry.Active and then not Old_Xmin_Comm
-         then Old_Entry.Vec_Toast_Ptr
-         else (others => <>));
-      Retired_Meta_Ptr   : constant TOAST_Pointer      :=
-        (if Old_Entry.Active and then Old_Xmin_Comm and then Old_Entry.Has_Prior_Version
-         then Old_Entry.Prior_Meta_Toast_Ptr
-         elsif Old_Entry.Active and then not Old_Xmin_Comm
-         then Old_Entry.Meta_Toast_Ptr
-         else (others => <>));
-      Needed_Doc_Chunks  : constant Positive           :=
+      Needed_Doc_Chunks  : constant TOAST_Run          :=
         ((Parent_Length - 1) / TOAST_Chunk_Max_Bytes) + 1;
       Use_Meta_Chain     : constant Boolean            :=
         Needs_Meta_TOAST (Summary_Text, Metadata);
@@ -1534,13 +1652,16 @@ package body Nhe_O.RAG is
       Meta_Ptr           : TOAST_Pointer               := (others => <>);
       Vec_Payload        : TOAST_Payload_Buffer;
       Vec_Byte_Len       : Valid_TOAST_Length;
-      Needed_Vec_Chunks  : Positive;
+      Needed_Vec_Chunks  : TOAST_Run;
       Meta_Payload       : TOAST_Payload_Buffer        := [others => 0];
       Meta_Byte_Len      : Valid_TOAST_Length          := 1;
-      Needed_Meta_Chunks : Positive;
+      Needed_Meta_Chunks : TOAST_Run                   := 1;
       Start_Pg           : Valid_Page_Id;
       Vec_Start_Pg       : Valid_Page_Id;
       Meta_Start_Pg      : Valid_Page_Id               := 10;
+      Found              : Boolean;
+      Staged_First       : Valid_Page_Id;
+      Staged_End         : Valid_Page_Id;
       New_HNSW_Node      : HNSW_Node;
       Sub_Stat           : Engine_Status;
       Slot_Page          : Page_Buffer;
@@ -1556,13 +1677,21 @@ package body Nhe_O.RAG is
 
       --  Undo every in-memory mutation of this call. When WAL frames were already
       --  appended, truncate the WAL back to its size at entry; if that is impossible
-      --  the transaction is poisoned so its orphan frames can never be committed.
+      --  the transaction is poisoned and all its versions are rolled back at once
+      --  (Rollback_RAG_Tx), so its orphan frames can never be committed and no other
+      --  transaction builds on, or deletes, a version that can never commit.
       procedure Restore_State
-        with Pre  => WAL_Path.Length > 0,
+        with Pre  => WAL_Path.Length > 0
+                     and then Saved_Graph.Dim = Engine.Dim
+                     and then Saved_PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                     and then Saved_PK_Tree.Root_Node in 1 .. Saved_PK_Tree.Node_Count
+                     and then Saved_Next_TOAST <= Max_Safe_TOAST_Page
+                     and then Saved_Tx_State /= Tx_Committed,
              Post => Engine.Dim = Engine.Dim'Old
-                     and then Engine.PK_Tree = Saved_PK_Tree
-                     and then Engine.Vector_Graph = Saved_Graph
-                     and then Engine.Next_TOAST_Pg = Saved_Next_TOAST
+                     and then Engine.Vector_Graph.Dim = Engine.Dim
+                     and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                     and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
+                     and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page
       is
          Trunc_Ok   : Boolean;
          Exists_Now : Boolean;
@@ -1581,16 +1710,23 @@ package body Nhe_O.RAG is
                Trunc_Ok := (WAL_Start = 0);
             end if;
             if not Trunc_Ok then
-               Engine.CLOG (Ctx.Id) := Tx_Aborted;
+               Rollback_RAG_Tx (Engine, Ctx.Id);
             end if;
          end if;
       end Restore_State;
    begin
-      --  First-updater-wins conflict detection and poisoned-transaction guard
-      if Has_Write_Conflict (Engine, Doc_Id, Ctx.Id)
+      --  Snapshot-isolation conflict detection and poisoned / finished transaction guard
+      if Has_Write_Conflict (Engine, Doc_Id, Ctx.Id, Snapshot)
         or else Engine.CLOG (Ctx.Id) in Tx_Aborted | Tx_Committed
       then
          Status := Status_Tx_Aborted;
+         return;
+      end if;
+
+      --  Recovery re-inserts every stored metadata field with Put_Field: refuse a
+      --  document it would reject before anything is written
+      if not Is_Valid_JSONB_Document (Metadata) then
+         Status := Status_Invalid_Syntax;
          return;
       end if;
 
@@ -1618,99 +1754,49 @@ package body Nhe_O.RAG is
          return;
       end if;
 
-      --  Reclaim tail TOAST pages from retired versions before allocating
-      Recompute_TOAST_High_Water_Mark
-        (Engine        => Engine,
-         Updating_Slot => (if Old_Entry.Active then Doc_Id else 0));
-
-      --  1. Determine non-overlapping TOAST page range for parent payload
-      if Old_Entry.Active
-        and then Retired_Doc_Ptr.Root_Overflow_Page in 10 .. Max_Safe_TOAST_Page
-        and then Needed_Doc_Chunks <= Retired_Doc_Ptr.Chunk_Count
-        and then Is_TOAST_Range_Free
-          (Engine, Doc_Id, Keep_Prior,
-           Retained_Toast, Retained_Vec_P, Retained_Meta_P,
-           Retired_Doc_Ptr.Root_Overflow_Page, Needed_Doc_Chunks)
-      then
-         Start_Pg := Retired_Doc_Ptr.Root_Overflow_Page;
-      elsif Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page - Needed_Doc_Chunks then
-         Start_Pg := Engine.Next_TOAST_Pg;
-      else
-         Restore_State;
+      --  1-3. Lowest free TOAST pages (first fit) for the parent chunk, the full Float32
+      --  embedding and, when needed, the extended summary / JSONB metadata ("RMET")
+      Find_TOAST_Range
+        (Engine, Ctx.Id, Doc_Id, Keep_Prior, Retained_Toast, Retained_Vec_P, Retained_Meta_P,
+         10, 0, 10, 0, Needed_Doc_Chunks, Start_Pg, Found);
+      if not Found then
          Status := Status_Capacity_Exceeded;
          return;
       end if;
 
-      if Start_Pg <= Max_Safe_TOAST_Page - Needed_Doc_Chunks
-        and then Start_Pg + Needed_Doc_Chunks > Engine.Next_TOAST_Pg
-      then
-         Engine.Next_TOAST_Pg := Start_Pg + Needed_Doc_Chunks;
-      end if;
-
-      --  2. Determine non-overlapping TOAST page range for full Float32 Embedding
       Encode_Vector_TOAST (Embedding, Vec_Payload, Vec_Byte_Len);
       Needed_Vec_Chunks := ((Vec_Byte_Len - 1) / TOAST_Chunk_Max_Bytes) + 1;
-
-      if Old_Entry.Active
-        and then Retired_Vec_Ptr.Root_Overflow_Page in 10 .. Max_Safe_TOAST_Page
-        and then Needed_Vec_Chunks <= Retired_Vec_Ptr.Chunk_Count
-        and then not Ranges_Overlap
-          (Start_Pg, Needed_Doc_Chunks,
-           Retired_Vec_Ptr.Root_Overflow_Page, Needed_Vec_Chunks)
-        and then Is_TOAST_Range_Free
-          (Engine, Doc_Id, Keep_Prior,
-           Retained_Toast, Retained_Vec_P, Retained_Meta_P,
-           Retired_Vec_Ptr.Root_Overflow_Page, Needed_Vec_Chunks)
-      then
-         Vec_Start_Pg := Retired_Vec_Ptr.Root_Overflow_Page;
-      elsif Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page - Needed_Vec_Chunks then
-         Vec_Start_Pg := Engine.Next_TOAST_Pg;
-      else
-         Restore_State;
+      Find_TOAST_Range
+        (Engine, Ctx.Id, Doc_Id, Keep_Prior, Retained_Toast, Retained_Vec_P, Retained_Meta_P,
+         Start_Pg, Needed_Doc_Chunks, 10, 0, Needed_Vec_Chunks, Vec_Start_Pg, Found);
+      if not Found then
          Status := Status_Capacity_Exceeded;
          return;
       end if;
+      Staged_First := Natural'Min (Start_Pg, Vec_Start_Pg);
+      Staged_End   := Natural'Max (Start_Pg + Needed_Doc_Chunks, Vec_Start_Pg + Needed_Vec_Chunks);
 
-      if Vec_Start_Pg <= Max_Safe_TOAST_Page - Needed_Vec_Chunks
-        and then Vec_Start_Pg + Needed_Vec_Chunks > Engine.Next_TOAST_Pg
-      then
-         Engine.Next_TOAST_Pg := Vec_Start_Pg + Needed_Vec_Chunks;
-      end if;
-
-      --  3. Determine non-overlapping TOAST page range for extended summary/JSONB ("RMET")
       if Use_Meta_Chain then
          Encode_Meta_TOAST (Summary_Text, Metadata, Meta_Payload, Meta_Byte_Len);
          Needed_Meta_Chunks := ((Meta_Byte_Len - 1) / TOAST_Chunk_Max_Bytes) + 1;
-
-         if Old_Entry.Active
-           and then Retired_Meta_Ptr.Chunk_Count > 0
-           and then Retired_Meta_Ptr.Root_Overflow_Page in 10 .. Max_Safe_TOAST_Page
-           and then Needed_Meta_Chunks <= Retired_Meta_Ptr.Chunk_Count
-           and then not Ranges_Overlap
-             (Start_Pg, Needed_Doc_Chunks,
-              Retired_Meta_Ptr.Root_Overflow_Page, Needed_Meta_Chunks)
-           and then not Ranges_Overlap
-             (Vec_Start_Pg, Needed_Vec_Chunks,
-              Retired_Meta_Ptr.Root_Overflow_Page, Needed_Meta_Chunks)
-           and then Is_TOAST_Range_Free
-             (Engine, Doc_Id, Keep_Prior,
-              Retained_Toast, Retained_Vec_P, Retained_Meta_P,
-              Retired_Meta_Ptr.Root_Overflow_Page, Needed_Meta_Chunks)
-         then
-            Meta_Start_Pg := Retired_Meta_Ptr.Root_Overflow_Page;
-         elsif Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page - Needed_Meta_Chunks then
-            Meta_Start_Pg := Engine.Next_TOAST_Pg;
-         else
-            Restore_State;
+         Find_TOAST_Range
+           (Engine, Ctx.Id, Doc_Id, Keep_Prior, Retained_Toast, Retained_Vec_P, Retained_Meta_P,
+            Start_Pg, Needed_Doc_Chunks, Vec_Start_Pg, Needed_Vec_Chunks, Needed_Meta_Chunks,
+            Meta_Start_Pg, Found);
+         if not Found then
             Status := Status_Capacity_Exceeded;
             return;
          end if;
+         Staged_First := Natural'Min (Staged_First, Meta_Start_Pg);
+         Staged_End   := Natural'Max (Staged_End, Meta_Start_Pg + Needed_Meta_Chunks);
+      end if;
 
-         if Meta_Start_Pg <= Max_Safe_TOAST_Page - Needed_Meta_Chunks
-           and then Meta_Start_Pg + Needed_Meta_Chunks > Engine.Next_TOAST_Pg
-         then
-            Engine.Next_TOAST_Pg := Meta_Start_Pg + Needed_Meta_Chunks;
-         end if;
+      --  The staged hull also keeps what Ctx staged here before (superseded versions)
+      if Old_Entry.Staged_Tx = Ctx.Id
+        and then Old_Entry.Staged_End > Old_Entry.Staged_First
+      then
+         Staged_First := Natural'Min (Staged_First, Old_Entry.Staged_First);
+         Staged_End   := Natural'Max (Staged_End, Old_Entry.Staged_End);
       end if;
 
       --  4. Perform in-memory B+Tree and HNSW updates BEFORE writing WAL frames
@@ -1834,10 +1920,13 @@ package body Nhe_O.RAG is
          Prior_Vec_Toast_Ptr  => Retained_Vec_P,
          Prior_Meta_Toast_Ptr => Retained_Meta_P,
          Prior_Related_Id     => Retained_Rel,
-         Prior_HNSW_Node      => Retained_HNSW
+         Prior_HNSW_Node      => Retained_HNSW,
+         Staged_Tx            => Ctx.Id,
+         Staged_First         => Staged_First,
+         Staged_End           => Staged_End
       );
 
-      Recompute_TOAST_High_Water_Mark (Engine, 0);
+      Recompute_TOAST_High_Water_Mark (Engine);
 
       --  7. Stage primary 4096-byte Slotted_Page in WAL on Page_Id = 1 (NO-STEAL)
       Build_RAG_Slotted_Page (Engine, Ctx.Id, Slot_Page);

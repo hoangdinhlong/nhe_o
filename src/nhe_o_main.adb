@@ -43,6 +43,33 @@ procedure Nhe_O_Main is
       end if;
    end Check;
 
+   --  "/tmp/nhe_o_<pid>_<Name>" (through "/tmp/./" when Dotted, for the alias checks):
+   --  every test file is private to this process, so concurrent runs never share one
+   function Test_Path
+     (Name   : String;
+      Dotted : Boolean := False) return Bounded_Text
+     with Global => null,
+          Pre    => Name'Length <= 64,
+          Post   => Test_Path'Result.Length > 0
+   is
+      Dec   : String (1 .. 10) := [others => '0'];  --  Natural'Last has 10 digits
+      V     : Natural          := Get_Process_Id;
+      First : Positive range 1 .. 10 := 10;
+   begin
+      for I in reverse Dec'Range loop
+         Dec (I) := Character'Val (Character'Pos ('0') + V mod 10);
+         V := V / 10;
+      end loop;
+      for I in Dec'Range loop
+         if Dec (I) /= '0' then
+            First := I;
+            exit;
+         end if;
+      end loop;
+      return Make_Text ((if Dotted then "/tmp/./" else "/tmp/") & "nhe_o_" & Dec (First .. Dec'Last)
+                        & "_" & Name);
+   end Test_Path;
+
    --  Parse positive integer TTL from Bounded_Text (fallback Default_TTL on empty/invalid)
    procedure Parse_Positive_Int
      (Text    : in     Bounded_Text;
@@ -344,9 +371,9 @@ procedure Nhe_O_Main is
    Dec_Tx        : Valid_Tx_Id;
    Dec_Page_Id   : Valid_Page_Id;
    Dec_Kind      : WAL_Frame_Kind;
-   DB_File       : constant Bounded_Text := Make_Text ("/tmp/nhe_o_verify.nhe_o");
-   WAL_File      : constant Bounded_Text := Make_Text ("/tmp/nhe_o_verify.nhe_o.wal");
-   KV_WAL_File   : constant Bounded_Text := Make_Text ("/tmp/nhe_o_kv.nhe_o.wal");
+   DB_File       : constant Bounded_Text := Test_Path ("verify.nhe_o");
+   WAL_File      : constant Bounded_Text := Test_Path ("verify.nhe_o.wal");
+   KV_WAL_File   : constant Bounded_Text := Test_Path ("kv.nhe_o.wal");
    NUL_Path      : Bounded_Text := Make_Text ("/tmp/nhe_o_bad");
    Tx_Status     : Engine_Status;
    Read_Ok       : Boolean;
@@ -374,7 +401,7 @@ procedure Nhe_O_Main is
    WAL_Bad       : WAL_Frame_Buffer;
    Tail_Size     : File_Size;
    DB_Size       : File_Size;
-   Foreign_File  : constant Bounded_Text := Make_Text ("/tmp/nhe_o_verify_foreign.bin");
+   Foreign_File  : constant Bounded_Text := Test_Path ("verify_foreign.bin");
    Size_Ok       : Boolean;
    Trunc_Ok      : Boolean;
 
@@ -455,6 +482,9 @@ procedure Nhe_O_Main is
       Local_JSON_St  : Engine_Status;
       Flush_Pend     : Boolean;
       Snap_Before    : Commit_Seq_Number;
+      Tx_Snap        : Commit_Seq_Number;
+      Snap_Lo        : Commit_Seq_Number;
+      Snap_Hi        : Commit_Seq_Number;
       Tx_Lo          : Transaction_Context;
       Tx_Hi          : Transaction_Context;
       Tie_Tx         : Transaction_Context;
@@ -531,9 +561,11 @@ procedure Nhe_O_Main is
       Put_Field (Meta_RAG_Query, Make_Ident ("lang"), Make_Text ("vi"), JSONB_String, Local_JSON_St);
 
       Begin_Tx (Next_Tx_Id, Tx_RAG);
+      Tx_Snap := Take_Snapshot (RAG_Store);
       Ingest_Document
         (Engine         => RAG_Store,
          Ctx            => Tx_RAG,
+         Snapshot       => Tx_Snap,
          DB_Path        => DB_File,
          WAL_Path       => WAL_File,
          Staging        => RAG_Staging,
@@ -552,6 +584,7 @@ procedure Nhe_O_Main is
          Ingest_Document
            (Engine         => RAG_Store,
             Ctx            => Tx_RAG,
+            Snapshot       => Tx_Snap,
             DB_Path        => DB_File,
             WAL_Path       => WAL_File,
             Staging        => RAG_Staging,
@@ -578,10 +611,12 @@ procedure Nhe_O_Main is
 
       --  Ingest an aborted update to Doc_Id = 1 and verify MVCC prior-version + Rollback_RAG_Tx
       Begin_Tx (Next_Tx_Id, Tx_RAG_Aborted);
+      Tx_Snap := Take_Snapshot (RAG_Store);
       if RAG_Store.Next_TOAST_Pg <= Max_Safe_TOAST_Page then
          Ingest_Document
            (Engine         => RAG_Store,
             Ctx            => Tx_RAG_Aborted,
+            Snapshot       => Tx_Snap,
             DB_Path        => DB_File,
             WAL_Path       => WAL_File,
             Staging        => RAG_Staging,
@@ -686,7 +721,8 @@ procedure Nhe_O_Main is
       --  Doc_Id = 2 even when Top_K = 1
       Snap_Before := Take_Snapshot (RAG_Store);
       Begin_Tx (Next_Tx_Id, Tx_RAG_Del);
-      Delete_Document (RAG_Store, Tx_RAG_Del, DB_File, WAL_File, Doc_Id => 2, Status => RAG_Status);
+      Delete_Document
+        (RAG_Store, Tx_RAG_Del, Snap_Before, DB_File, WAL_File, Doc_Id => 2, Status => RAG_Status);
       Check (RAG_Status = Status_Ok and then RAG_Store.Doc_Count = 1);
       Commit_RAG_Tx
         (RAG_Store, Tx_RAG_Del, DB_File, WAL_File, RAG_Staging, Broker,
@@ -716,11 +752,14 @@ procedure Nhe_O_Main is
       --  Snapshot isolation by commit order, first-updater-wins write conflicts, and a
       --  commit's Page 1 never carrying another transaction's uncommitted version
       Begin_Tx (Next_Tx_Id, Tx_Lo);
+      Snap_Lo := Take_Snapshot (RAG_Store);
       Begin_Tx (Next_Tx_Id, Tx_Hi);
+      Snap_Hi := Take_Snapshot (RAG_Store);
       if RAG_Store.Next_TOAST_Pg <= Max_Safe_TOAST_Page then
          Ingest_Document
            (Engine         => RAG_Store,
             Ctx            => Tx_Lo,
+            Snapshot       => Snap_Lo,
             DB_Path        => DB_File,
             WAL_Path       => WAL_File,
             Staging        => RAG_Staging,
@@ -739,6 +778,7 @@ procedure Nhe_O_Main is
          Ingest_Document
            (Engine         => RAG_Store,
             Ctx            => Tx_Hi,
+            Snapshot       => Snap_Hi,
             DB_Path        => DB_File,
             WAL_Path       => WAL_File,
             Staging        => Staging_Buf,
@@ -757,6 +797,7 @@ procedure Nhe_O_Main is
          Ingest_Document
            (Engine         => RAG_Store,
             Ctx            => Tx_Hi,
+            Snapshot       => Snap_Hi,
             DB_Path        => DB_File,
             WAL_Path       => WAL_File,
             Staging        => Staging_Buf,
@@ -794,11 +835,13 @@ procedure Nhe_O_Main is
 
       --  Equal-distance hits are ordered by Doc_Id, before and after recovery
       Begin_Tx (Next_Tx_Id, Tie_Tx);
+      Tx_Snap := Take_Snapshot (RAG_Store);
       for Tie_Doc in RAG_Doc_Slot range 6 .. 7 loop
          if RAG_Store.Next_TOAST_Pg <= Max_Safe_TOAST_Page then
             Ingest_Document
               (Engine         => RAG_Store,
                Ctx            => Tie_Tx,
+               Snapshot       => Tx_Snap,
                DB_Path        => DB_File,
                WAL_Path       => WAL_File,
                Staging        => RAG_Staging,
@@ -913,11 +956,10 @@ procedure Nhe_O_Main is
       Check (not Contains_Keyword (Make_Text (Viet_Lower), Make_Text ("")));
 
       --  A missing database recovers an empty engine instead of failing
-      Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_missing.db"));
-      Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_missing.wal"));
+      Delete_File_If_Exists (Test_Path ("missing.db"));
+      Delete_File_If_Exists (Test_Path ("missing.wal"));
       Recover_RAG_Engine
-        (RAG_Recovered, 3, Make_Text ("/tmp/nhe_o_missing.db"), Make_Text ("/tmp/nhe_o_missing.wal"),
-         RAG_Status);
+        (RAG_Recovered, 3, Test_Path ("missing.db"), Test_Path ("missing.wal"), RAG_Status);
       Check (RAG_Status = Status_Ok and then RAG_Recovered.Doc_Count = 0);
 
       Unsubscribe (Broker, Sub_Exact);
@@ -927,6 +969,261 @@ procedure Nhe_O_Main is
       Delete_File_If_Exists (WAL_File);
       Print_Line ("  => Passed: Hybrid SQL + JSONB + RMET TOAST + Stage-2 Re-Rank + Durable Delete + Recovery verified.");
    end Verify_RAG_And_PubSub;
+
+   --  10b. Round 13 RAG regressions: pages staged by an active transaction stay reserved,
+   --  snapshot-isolation write conflicts, metadata validation, first-fit page reuse after
+   --  a freeze, own-delete collapse, and UTF-8 keyword decoding
+   procedure Verify_RAG_Isolation_And_Pages (Next_Tx_Id : in out Valid_Tx_Id)
+     with Pre => Next_Tx_Id <= Max_Tx_Id - 64,
+          Always_Terminates
+   is
+      Eng      : RAG_Engine;
+      Rec      : RAG_Engine;
+      Stg_1    : Tx_Notification_Buffer;
+      Stg_2    : Tx_Notification_Buffer;
+      Broker   : PubSub_Broker;
+      T1       : Transaction_Context;
+      T2       : Transaction_Context;
+      S1       : Commit_Seq_Number;
+      S2       : Commit_Seq_Number;
+      Snap_Old : Commit_Seq_Number;
+      St       : Engine_Status;
+      Deliv    : Natural;
+      Flush    : Boolean;
+      Res      : RAG_Query_Result;
+      Chunk    : TOAST_Payload_Buffer;
+      Pages_Ok : Boolean := True;
+      Payload  : constant TOAST_Payload_Buffer := [others => Character'Pos ('p')];
+      Long_Sum : constant String := [1 .. 100 => 's'];
+      No_Meta  : constant JSONB_Document := (others => <>);
+      Bad_Kind : constant JSONB_Document :=
+        (Count  => 1,
+         Fields => [1      => (Key => Make_Ident ("ok"), Val => Make_Text ("yes"),
+                               Kind => JSONB_Boolean, Active => True),
+                    others => (others => <>)]);
+      Dup_Key  : constant JSONB_Document :=
+        (Count  => 2,
+         Fields => [1      => (Key => Make_Ident ("a"), Val => Make_Text ("1"),
+                               Kind => JSONB_Number, Active => True),
+                    2      => (Key => Make_Ident ("a"), Val => Make_Text ("2"),
+                               Kind => JSONB_Number, Active => True),
+                    others => (others => <>)]);
+      Query    : constant Bounded_Text :=
+        Make_Text ("SELECT id FROM rag_docs ORDER BY emb <-> $1 LIMIT 8;");
+
+      procedure Put_Doc
+        (Ctx     : in     Transaction_Context;
+         Snap    : in     Commit_Seq_Number;
+         Stg     : in out Tx_Notification_Buffer;
+         Doc     : in     RAG_Doc_Slot;
+         Meta    : in     JSONB_Document;
+         Summary : in     String;
+         X       : in     Vector_Component;
+         Status  :    out Engine_Status)
+        with Pre  => Ctx.State = Tx_Active
+                     and then Summary'Length <= Max_Text_Len
+                     and then Eng.Dim = 3
+                     and then Eng.Vector_Graph.Dim = Eng.Dim
+                     and then Eng.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                     and then Eng.PK_Tree.Root_Node in 1 .. Eng.PK_Tree.Node_Count
+                     and then Eng.Next_TOAST_Pg <= Max_Safe_TOAST_Page,
+             Post => Eng.Dim = 3
+                     and then Eng.Vector_Graph.Dim = Eng.Dim
+                     and then Eng.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                     and then Eng.PK_Tree.Root_Node in 1 .. Eng.PK_Tree.Node_Count
+                     and then Eng.Next_TOAST_Pg <= Max_Safe_TOAST_Page
+      is
+      begin
+         Ingest_Document
+           (Engine         => Eng,
+            Ctx            => Ctx,
+            Snapshot       => Snap,
+            DB_Path        => DB_File,
+            WAL_Path       => WAL_File,
+            Staging        => Stg,
+            Doc_Id         => Doc,
+            Metadata       => Meta,
+            Summary_Text   => Make_Text (Summary),
+            Embedding      => Make_Vector_3D (X, 1.0, 0.0),
+            Parent_Payload => Payload,
+            Parent_Length  => 100,
+            Related_Doc_Id => 0,
+            Layer_Hint     => 1,
+            Status         => Status);
+      end Put_Doc;
+
+      procedure Commit
+        (Ctx    : in out Transaction_Context;
+         Stg    : in out Tx_Notification_Buffer;
+         Status :    out Engine_Status)
+        with Pre  => Ctx.State = Tx_Active
+                     and then Eng.Dim = 3
+                     and then Eng.Vector_Graph.Dim = Eng.Dim
+                     and then Eng.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                     and then Eng.PK_Tree.Root_Node in 1 .. Eng.PK_Tree.Node_Count
+                     and then Eng.Next_TOAST_Pg <= Max_Safe_TOAST_Page,
+             Post => Eng.Dim = 3
+                     and then Eng.Vector_Graph.Dim = Eng.Dim
+                     and then Eng.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                     and then Eng.PK_Tree.Root_Node in 1 .. Eng.PK_Tree.Node_Count
+                     and then Eng.Next_TOAST_Pg <= Max_Safe_TOAST_Page
+      is
+      begin
+         Commit_RAG_Tx (Eng, Ctx, DB_File, WAL_File, Stg, Broker, Deliv, Status, Flush);
+      end Commit;
+
+      procedure Query_At
+        (Snap   : in     Commit_Seq_Number;
+         X      : in     Vector_Component;
+         Status :    out Engine_Status)
+        with Pre => Eng.Dim = 3
+                    and then Eng.Vector_Graph.Dim = Eng.Dim
+                    and then Eng.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Eng.PK_Tree.Root_Node in 1 .. Eng.PK_Tree.Node_Count
+      is
+      begin
+         Execute_Hybrid_RAG_Query
+           (Engine            => Eng,
+            Snapshot          => Snap,
+            DB_Path           => DB_File,
+            SQL_Query         => Query,
+            Query_Vec         => Make_Vector_3D (X, 1.0, 0.0),
+            Encoding          => Encoding_Float32,
+            Use_Meta_Filter   => False,
+            Filter_Meta       => No_Meta,
+            Use_Keyword_Boost => False,
+            Keyword           => Make_Text (""),
+            Top_K             => 8,
+            Result            => Res,
+            Top_Parent_Chunk  => Chunk,
+            Status            => Status);
+      end Query_At;
+   begin
+      Delete_File_If_Exists (DB_File);
+      Delete_File_If_Exists (WAL_File);
+      Init_RAG_Engine (Eng, Dim => 3);
+
+      --  R13-RAG-01: T1 stages doc 1 on pages 10 .. 12 (parent, vector, RMET), then
+      --  supersedes it with a version on pages 10 .. 11; page 12 stays reserved for T1,
+      --  so T2's concurrent commit never shares a page that T1's commit rewrites
+      Begin_Tx (Next_Tx_Id, T1);
+      S1 := Take_Snapshot (Eng);
+      Begin_Tx (Next_Tx_Id, T2);
+      S2 := Take_Snapshot (Eng);
+      Put_Doc (T1, S1, Stg_1, 1, No_Meta, Long_Sum, 1.0, St);
+      Check (St = Status_Ok and then Eng.Docs (1).Meta_Toast_Ptr.Chunk_Count = 1);
+      Put_Doc (T1, S1, Stg_1, 1, No_Meta, "short", 1.0, St);
+      Check (St = Status_Ok and then Eng.Docs (1).Meta_Toast_Ptr.Chunk_Count = 0);
+      Put_Doc (T2, S2, Stg_2, 2, No_Meta, "other", 5.0, St);
+      Check (St = Status_Ok
+             and then Eng.Docs (2).Toast_Ptr.Root_Overflow_Page >= 13
+             and then Eng.Docs (2).Vec_Toast_Ptr.Root_Overflow_Page >= 13);
+      Commit (T2, Stg_2, St);
+      Check (St = Status_Ok);
+      Commit (T1, Stg_1, St);
+      Check (St = Status_Ok);
+      Query_At (Take_Snapshot (Eng), 5.0, St);
+      Check (St = Status_Ok and then Res.Count = 2 and then Res.Hits (1).Doc_Id = 2);
+      Recover_RAG_Engine (Rec, 3, DB_File, WAL_File, St);
+      Check (St = Status_Ok and then Rec.Doc_Count = 2);
+
+      --  R13-RAG-02: no lost update: a writer whose snapshot predates another
+      --  transaction's commit of the same document is aborted, and so is a delete of a
+      --  document committed after the deleter's snapshot
+      Begin_Tx (Next_Tx_Id, T1);
+      S1 := Take_Snapshot (Eng);
+      Begin_Tx (Next_Tx_Id, T2);
+      S2 := Take_Snapshot (Eng);
+      Put_Doc (T2, S2, Stg_2, 1, No_Meta, "balance=150", 2.0, St);
+      Check (St = Status_Ok);
+      Commit (T2, Stg_2, St);
+      Check (St = Status_Ok);
+      Put_Doc (T1, S1, Stg_1, 1, No_Meta, "balance=120", 3.0, St);
+      Check (St = Status_Tx_Aborted and then Eng.Docs (1).Tuple_Hdr.Xmin = T2.Id);
+      Begin_Tx (Next_Tx_Id, T2);
+      S2 := Take_Snapshot (Eng);
+      Put_Doc (T2, S2, Stg_2, 3, No_Meta, "new", 7.0, St);
+      Check (St = Status_Ok);
+      Commit (T2, Stg_2, St);
+      Check (St = Status_Ok);
+      Delete_Document (Eng, T1, S1, DB_File, WAL_File, 3, St);
+      Check (St = Status_Tx_Aborted and then Eng.Docs (3).Tuple_Hdr.Xmax = 0);
+
+      --  R13-RAG-04: metadata that recovery would reject is refused before any write
+      Put_Doc (T1, S1, Stg_1, 4, Bad_Kind, "bad kind", 9.0, St);
+      Check (St = Status_Invalid_Syntax and then not Eng.Docs (4).Active);
+      Put_Doc (T1, S1, Stg_1, 4, Dup_Key, "duplicate key", 9.0, St);
+      Check (St = Status_Invalid_Syntax and then not Eng.Docs (4).Active);
+      Rollback_Tx (T1);
+      Rollback_RAG_Tx (Eng, T1.Id);
+      Discard_Staged_Notifications (T1, Stg_1);
+
+      --  R13-RAG-07: deleting a transaction's own new version keeps the version it
+      --  replaced, so an older snapshot still sees doc 1 after the next update
+      Snap_Old := Take_Snapshot (Eng);
+      Begin_Tx (Next_Tx_Id, T1);
+      S1 := Take_Snapshot (Eng);
+      if Eng.Next_TOAST_Pg <= Max_Safe_TOAST_Page then
+         Put_Doc (T1, S1, Stg_1, 1, No_Meta, "v3", 4.0, St);
+         Check (St = Status_Ok);
+         Delete_Document (Eng, T1, S1, DB_File, WAL_File, 1, St);
+         Check (St = Status_Ok
+                and then Eng.Docs (1).Tuple_Hdr.Xmin /= T1.Id
+                and then Eng.Docs (1).Tuple_Hdr.Xmax = T1.Id
+                and then not Eng.Docs (1).Has_Prior_Version);
+      end if;
+      if Eng.Next_TOAST_Pg <= Max_Safe_TOAST_Page then
+         Commit (T1, Stg_1, St);
+         Check (St = Status_Ok);
+         Begin_Tx (Next_Tx_Id, T2);
+         S2 := Take_Snapshot (Eng);
+         Put_Doc (T2, S2, Stg_2, 1, No_Meta, "v4", 6.0, St);
+         Check (St = Status_Ok);
+         Query_At (Snap_Old, 2.0, St);
+         Check (St = Status_Ok and then Res.Count = 3 and then Res.Hits (1).Doc_Id = 1);
+         Commit (T2, Stg_2, St);
+         Check (St = Status_Ok);
+      end if;
+
+      --  R13-RAG-05: pages freed below the high-water mark are reused (first fit), so a
+      --  document updated once per checkpoint no longer grows the database file
+      Delete_File_If_Exists (DB_File);
+      Delete_File_If_Exists (WAL_File);
+      Init_RAG_Engine (Eng, Dim => 3);
+      for Cycle in 1 .. 6 loop
+         pragma Loop_Invariant (Next_Tx_Id <= Next_Tx_Id'Loop_Entry + Tx_Id (Cycle - 1));
+         pragma Loop_Invariant
+           (Eng.Dim = 3
+            and then Eng.Vector_Graph.Dim = Eng.Dim
+            and then Eng.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+            and then Eng.PK_Tree.Root_Node in 1 .. Eng.PK_Tree.Node_Count
+            and then Eng.Next_TOAST_Pg <= Max_Safe_TOAST_Page);
+         Begin_Tx (Next_Tx_Id, T1);
+         Put_Doc (T1, Take_Snapshot (Eng), Stg_1, 5, No_Meta, "cycle", Float (Cycle), St);
+         Commit (T1, Stg_1, St);
+         Freeze_RAG_Engine (Eng, St);
+         Pages_Ok := Pages_Ok and then St = Status_Ok and then Eng.Next_TOAST_Pg <= 14;
+      end loop;
+      Check (Pages_Ok);
+      Recover_RAG_Engine (Rec, 3, DB_File, WAL_File, St);
+      Check (St = Status_Ok and then Rec.Doc_Count = 1);
+
+      --  R13-RAG-10 / R13-RAG-11: overlong UTF-8 never folds into a letter, and U+1E9B
+      --  (long s with dot above) folds like U+1E60 / U+1E61
+      Check (not Contains_Keyword
+                   (Make_Text ([Character'Val (16#E0#), Character'Val (16#81#), Character'Val (16#81#)]),
+                    Make_Text ("a")));
+      Check (not Contains_Keyword
+                   (Make_Text ([Character'Val (16#E0#), Character'Val (16#83#), Character'Val (16#89#)]),
+                    Make_Text ([Character'Val (16#C3#), Character'Val (16#A9#)])));
+      Check (Contains_Keyword
+               (Make_Text ([Character'Val (16#E1#), Character'Val (16#BA#), Character'Val (16#9B#)]),
+                Make_Text ([Character'Val (16#E1#), Character'Val (16#B9#), Character'Val (16#A0#)])));
+
+      Delete_File_If_Exists (DB_File);
+      Delete_File_If_Exists (WAL_File);
+      Print_Line ("  => Passed: Snapshot-isolation write conflicts, staged TOAST page reservation, first-fit page reuse, and own-delete collapse verified.");
+   end Verify_RAG_Isolation_And_Pages;
 
    --  Copy S into a NUL-padded C text buffer
    function To_C_Text (S : String) return C_Text_Buf
@@ -972,11 +1269,18 @@ procedure Nhe_O_Main is
    C_Empty_Text  : constant C_Text_Buf  := [others => nul];
    C_Src_Filter  : constant C_Text_Buf  := To_C_Text ("{""source"":""c_api""}");
    C_Empty_Obj   : constant C_Text_Buf  := To_C_Text ("{}");
-   C_DB_Buf      : constant C_Text_Buf  := To_C_Text ("/tmp/nhe_o_capi_persist.db");
-   C_WAL_Buf     : constant C_Text_Buf  := To_C_Text ("/tmp/nhe_o_capi_persist.wal");
-   C_Ckpt_Buf    : constant C_Text_Buf  := To_C_Text ("/tmp/nhe_o_capi_persist.wal.ckpt");
-   C_Alias_A     : constant C_Text_Buf  := To_C_Text ("/tmp/nhe_o_capi_alias.db");
-   C_Alias_B     : constant C_Text_Buf  := To_C_Text ("/tmp/./nhe_o_capi_alias.db");
+   C_DB_Path     : constant Bounded_Text := Test_Path ("capi_persist.db");
+   C_WAL_Path    : constant Bounded_Text := Test_Path ("capi_persist.wal");
+   C_Ckpt_Path   : constant Bounded_Text := Test_Path ("capi_persist.wal.ckpt");
+   C_Alias_Path  : constant Bounded_Text := Test_Path ("capi_alias.db");
+   C_Alias_Dot   : constant Bounded_Text := Test_Path ("capi_alias.db", Dotted => True);
+   C_DB_Buf      : constant C_Text_Buf   := To_C_Text (C_DB_Path.Data (1 .. C_DB_Path.Length));
+   C_WAL_Buf     : constant C_Text_Buf   := To_C_Text (C_WAL_Path.Data (1 .. C_WAL_Path.Length));
+   C_Ckpt_Buf    : constant C_Text_Buf   := To_C_Text (C_Ckpt_Path.Data (1 .. C_Ckpt_Path.Length));
+   C_Alias_A     : constant C_Text_Buf   := To_C_Text (C_Alias_Path.Data (1 .. C_Alias_Path.Length));
+   C_Alias_B     : constant C_Text_Buf   := To_C_Text (C_Alias_Dot.Data (1 .. C_Alias_Dot.Length));
+   C_DB_Len      : constant int          := int (C_DB_Path.Length);
+   C_WAL_Len     : constant int          := int (C_WAL_Path.Length);
    C_Saved_DB    : Bounded_Text;
    C_Saved_Tx    : Valid_Tx_Id;
    C_Saved_WAL   : Bounded_Text;
@@ -2323,9 +2627,9 @@ begin
    Check (Evict_Same);
 
    --  A missing WAL is an empty log
-   Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_kv_missing.wal"));
+   Delete_File_If_Exists (Test_Path ("kv_missing.wal"));
    KV_Evict_R := (others => <>);
-   Recover_KV_From_WAL (KV_Evict_R, Make_Text ("/tmp/nhe_o_kv_missing.wal"), 5000, 8, KV_Rec_Cnt, KV_Status);
+   Recover_KV_From_WAL (KV_Evict_R, Test_Path ("kv_missing.wal"), 5000, 8, KV_Rec_Cnt, KV_Status);
    Check (KV_Status = Status_Ok and then KV_Rec_Cnt = 0 and then Occupied_Count (KV_Evict_R) = 0);
 
    --  DEL at timestamp Now frees an expired entry without reporting a removal
@@ -2353,6 +2657,11 @@ begin
 
    --  9 & 10. Verify Dual-Mode Pub/Sub & Universal Local LLM RAG
    Verify_RAG_And_PubSub (Next_Tx);
+   if Next_Tx <= Max_Tx_Id - 64 then
+      Verify_RAG_Isolation_And_Pages (Next_Tx);
+   else
+      Check (False);
+   end if;
 
    --  11. Verify Formally Proven C ABI / FFI SDK (`Nhe_O.C_API`)
    Print_Line ("[11/11] Verifying C ABI / FFI SDK & Defensive Boundary Contracts (Nhe_O.C_API)...");
@@ -2466,10 +2775,10 @@ begin
    Make_Absolute_Path (Make_Text ("rel.db"), C_Abs_Path, C_Abs_Ok);
    Check (C_Abs_Ok and then C_Abs_Path.Length > 7 and then C_Abs_Path.Data (1) = '/'
           and then C_Abs_Path.Data (C_Abs_Path.Length - 6) = '/');
-   Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_capi_alias.db"));
-   C_Init_With_Paths (C_Alias_A, 24, C_Alias_B, 26, 3, C_Rc);
+   Delete_File_If_Exists (C_Alias_Path);
+   C_Init_With_Paths (C_Alias_A, int (C_Alias_Path.Length), C_Alias_B, int (C_Alias_Dot.Length), 3, C_Rc);
    Check (C_Rc = C_Status_Invalid_Arg and then not G_Initialized);
-   Check_File_Exists (Make_Text ("/tmp/nhe_o_capi_alias.db"), C_File_Found);
+   Check_File_Exists (C_Alias_Path, C_File_Found);
    Check (not C_File_Found);
 
    --  Persistent database: checkpoint compacts the WAL, reopening recovers the same state.
@@ -2479,9 +2788,9 @@ begin
    C_KV_Set (C_Key_Buf, 3, C_Val_Buf, 2, 1000, 0, C_Rc);
    Check (C_Rc = C_Status_Ok);
    C_Saved_WAL := G_WAL_Path;
-   Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_capi_persist.db"));
-   Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_capi_persist.wal"));
-   C_Init_With_Paths (C_DB_Buf, 26, C_WAL_Buf, 27, 3, C_Rc);
+   Delete_File_If_Exists (C_DB_Path);
+   Delete_File_If_Exists (C_WAL_Path);
+   C_Init_With_Paths (C_DB_Buf, C_DB_Len, C_WAL_Buf, C_WAL_Len, 3, C_Rc);
    Check (C_Rc = C_Status_Ok and then not G_Ephemeral);
    if C_Saved_WAL.Length > 0 then
       Check_File_Exists (C_Saved_WAL, C_File_Found);
@@ -2499,14 +2808,14 @@ begin
    Check (C_Rc = C_Status_Ok);
    C_Checkpoint (C_Rc);
    Check (C_Rc = C_Status_Ok and then G_Next_Tx = 2 and then G_Next_KV_Seq = 2);
-   Get_File_Size (Make_Text ("/tmp/nhe_o_capi_persist.wal"), C_WAL_Size, C_Size_Ok);
+   Get_File_Size (C_WAL_Path, C_WAL_Size, C_Size_Ok);
    Check (C_Size_Ok and then C_WAL_Size = 2 * WAL_Frame_Size);
    C_RAG_Ingest_ND (3, C_Val_Buf, 2, C_Vec_ND_C, 3, 0, C_Rc);
    Check (C_Rc = C_Status_Ok);
    C_Close (C_Rc);
    Check (C_Rc = C_Status_Ok);
    --  nhe_o_close checkpointed the database: ids restart above the frozen transaction
-   C_Init_With_Paths (C_DB_Buf, 26, C_WAL_Buf, 27, 3, C_Rc);
+   C_Init_With_Paths (C_DB_Buf, C_DB_Len, C_WAL_Buf, C_WAL_Len, 3, C_Rc);
    Check (C_Rc = C_Status_Ok and then G_Next_Tx = 2);
    C_KV_Get (C_Key_Buf, 3, 1020, C_Out_Val_Buf, C_Out_Val_Len, C_Rc);
    Check (C_Rc = C_Status_Ok and then C_Out_Val_Len = 2);
@@ -2528,15 +2837,15 @@ begin
       C_KV_Set (C_Key_Buf, 3, C_Val_Buf, 2, Integer_64 (Round), 0, C_Rc);
       Check (C_Rc = C_Status_Ok);
    end loop;
-   Get_File_Size (Make_Text ("/tmp/nhe_o_capi_persist.wal"), C_WAL_Size, C_Size_Ok);
+   Get_File_Size (C_WAL_Path, C_WAL_Size, C_Size_Ok);
    Check (C_Size_Ok and then C_WAL_Size < Checkpoint_WAL_Frames * WAL_Frame_Size
           and then G_Next_KV_Seq < 600);
 
    --  An I/O failure on a durable write latches the write fault until the next reopen,
    --  whose recovery drops the torn WAL tail
-   Get_File_Size (Make_Text ("/tmp/nhe_o_capi_persist.wal"), C_WAL_Size, C_Size_Ok);
+   Get_File_Size (C_WAL_Path, C_WAL_Size, C_Size_Ok);
    if C_Size_Ok and then C_WAL_Size > 0 then
-      Truncate_File (Make_Text ("/tmp/nhe_o_capi_persist.wal"), C_WAL_Size - 1, C_Size_Ok);
+      Truncate_File (C_WAL_Path, C_WAL_Size - 1, C_Size_Ok);
       Check (C_Size_Ok);
    else
       Check (False);
@@ -2547,7 +2856,7 @@ begin
    Check (C_Rc = C_Status_IO_Error);
    C_RAG_Delete (1, C_Rc);
    Check (C_Rc = C_Status_IO_Error);
-   C_Init_With_Paths (C_DB_Buf, 26, C_WAL_Buf, 27, 3, C_Rc);
+   C_Init_With_Paths (C_DB_Buf, C_DB_Len, C_WAL_Buf, C_WAL_Len, 3, C_Rc);
    Check (C_Rc = C_Status_Ok and then not G_Write_Fault);
    C_KV_Set (C_Key_Buf, 3, C_Val_Buf, 2, 5000, 0, C_Rc);
    Check (C_Rc = C_Status_Ok);
@@ -2559,16 +2868,16 @@ begin
 
    --  Swapped arguments and a database named "<wal>.ckpt" are refused without touching
    --  either file
-   Get_File_Size (Make_Text ("/tmp/nhe_o_capi_persist.wal"), C_WAL_Size, C_Size_Ok);
+   Get_File_Size (C_WAL_Path, C_WAL_Size, C_Size_Ok);
    Check (C_Size_Ok);
-   C_Init_With_Paths (C_WAL_Buf, 27, C_DB_Buf, 26, 3, C_Rc);
+   C_Init_With_Paths (C_WAL_Buf, C_WAL_Len, C_DB_Buf, C_DB_Len, 3, C_Rc);
    Check (C_Rc = C_Status_Invalid_Arg and then not G_Initialized);
-   Get_File_Size (Make_Text ("/tmp/nhe_o_capi_persist.wal"), C_Rem_TTL, C_Size_Ok);
+   Get_File_Size (C_WAL_Path, C_Rem_TTL, C_Size_Ok);
    Check (C_Size_Ok and then C_Rem_TTL = C_WAL_Size);
-   C_Init_With_Paths (C_Ckpt_Buf, 32, C_WAL_Buf, 27, 3, C_Rc);
+   C_Init_With_Paths (C_Ckpt_Buf, int (C_Ckpt_Path.Length), C_WAL_Buf, C_WAL_Len, 3, C_Rc);
    Check (C_Rc = C_Status_Invalid_Arg and then not G_Initialized);
-   Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_capi_persist.db"));
-   Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_capi_persist.wal"));
+   Delete_File_If_Exists (C_DB_Path);
+   Delete_File_If_Exists (C_WAL_Path);
    Print_Line ("  => Passed: C ABI / FFI exports, N-D vector/RAG/Delete FFI, checkpoint, recovery, and defensive boundary guards verified.");
 
    Print_Blank_Line;
