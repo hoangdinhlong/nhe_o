@@ -299,7 +299,9 @@ void nhe_o_rag_ingest_nd(
     int         *out_status
 );
 
-/* parent_len 0..16392 (0: the summary is the parent chunk; both 0 is invalid) */
+/* parent_len 0..16392 (0: the summary is the parent chunk; both 0 is invalid).
+ * meta_json_len 0 (and nhe_o_rag_ingest_3d / _nd) store an empty metadata
+ * object, which only the filter {} matches. */
 void nhe_o_rag_ingest_full_nd(
     int          doc_id,
     const char  *meta_json_buf,

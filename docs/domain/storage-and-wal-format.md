@@ -57,7 +57,7 @@ Defined in `src/nhe_o-transaction.ad[sb]` (`Encode_Slotted_Page` / `Decode_Slott
 ### 2.1 RAG Tuple `Inline_Data (1 .. 208)` Layout (`Build_RAG_Slotted_Page`, `BR-006`)
 | Inline Offset | Size | Field | Description |
 |---|---|---|---|
-| `1 .. 16` | 16 B | `Vec_Toast_Ptr` | Inline 16-byte `TOAST_Pointer` to the `"VTST"` 4096-D `Float32` vector TOAST chain |
+| `1 .. 16` | 16 B | `Vec_Toast_Ptr` | Inline 16-byte `TOAST_Pointer` to the `"VTS2"` (legacy `"VTST"`) up to 4096-D `Float32` vector TOAST chain |
 | `17` | 1 B | `Summary_Len` | Inline byte length of `Summary_Text` (`0 .. 63`) |
 | `18 .. 80` | 63 B | `Summary_Text` | Up to 63 inline fast-path bytes of document summary text (`17 + 1 .. 17 + Summary_Len`) |
 | `81 .. 96` | 16 B | `Meta_Toast_Ptr` | Inline 16-byte `TOAST_Pointer` to the `"RMET"` extended summary (`> 63 B`) & JSONB metadata TOAST chain (zeroed when inline-only) |
@@ -66,7 +66,7 @@ Defined in `src/nhe_o-transaction.ad[sb]` (`Encode_Slotted_Page` / `Decode_Slott
 
 ---
 
-## 3. Inline 16-Byte TOAST Pointer, 4096-Byte `"TOAS"` Page, `"VTST"` Vector & `"RMET"` Metadata Payloads
+## 3. Inline 16-Byte TOAST Pointer, 4096-Byte `"TOAS"` Page, `"VTS2"` Vector & `"RMET"` Metadata Payloads
 
 Defined in `src/nhe_o-transaction.ad[sb]` (`Encode_TOAST_Pointer`, `Decode_TOAST_Pointer`, `Write_TOAST_Chain`, `Read_TOAST_Chain`, `BR-006`), `src/nhe_o-vector.ad[sb]` (`Encode_Vector_TOAST`, `Decode_Vector_TOAST`, `ADR-006`), and `src/nhe_o-rag.adb` (`Encode_Meta_TOAST`, `Decode_Meta_TOAST`, `ADR-006`).
 
@@ -74,7 +74,7 @@ Defined in `src/nhe_o-transaction.ad[sb]` (`Encode_TOAST_Pointer`, `Decode_TOAST
 | Byte Offset | Size | Field | Invariant |
 |---|---|---|---|
 | `1 .. 4` | 4 B | `Root_Overflow_Page` | `Valid_Page_Id` (`<= Max_Page_Id - Chunk_Count + 1`) |
-| `5 .. 8` | 4 B | `Total_Byte_Length` | `1 .. 16_392` (`Max_TOAST_Payload_Bytes`, accommodating `8B` `"VTST"` header + `4096 * 4B`) |
+| `5 .. 8` | 4 B | `Total_Byte_Length` | `1 .. 16_392` (`Max_TOAST_Payload_Bytes`, accommodating `8B` `"VTS2"` header + `4096 * 4B`) |
 | `9 .. 12` | 4 B | `Chunk_Count` | `((Total_Byte_Length - 1) / 4080) + 1` (`1 .. 5`) |
 | `13 .. 16` | 4 B | `Payload_CRC32` | IEEE 802.3 CRC-32 across all `1 .. Total_Byte_Length` bytes |
 
@@ -85,7 +85,7 @@ Defined in `src/nhe_o-transaction.ad[sb]` (`Encode_TOAST_Pointer`, `Decode_TOAST
 | `5 .. 8` | 4 B | `Next_Page_Id` | Next contiguous overflow page ID (`Cur_Page_Id + 1` on non-terminal chunks, `0` on terminal chunk, verified by `Read_TOAST_Chain`) |
 | `9 .. 12` | 4 B | `Chunk_Bytes` | Active payload bytes in this page (`4080` on non-terminal chunks, `1 .. 4080` on terminal chunk) |
 | `13 .. 16` | 4 B | `Chunk_CRC32` | IEEE 802.3 CRC-32 over payload bytes `17 .. 16 + Chunk_Bytes` |
-| `17 .. 4096` | 4080 B | `Chunk_Data` | Raw slice of oversized parent chunk, `"VTST"` 4096-D `Float32` vector, or `"RMET"` extended summary/JSONB metadata (trailing unused bytes `17 + Chunk_Bytes .. 4096` verified zeroed) |
+| `17 .. 4096` | 4080 B | `Chunk_Data` | Raw slice of oversized parent chunk, `"VTS2"` (legacy `"VTST"`) `Float32` vector, or `"RMET"` extended summary/JSONB metadata (trailing unused bytes `17 + Chunk_Bytes .. 4096` verified zeroed) |
 
 ### 3.3 Vector TOAST Payload (`"VTS2"`, legacy `"VTST"`; `Encode_Vector_TOAST`, `ADR-018`)
 | Byte Offset | Size | Field | Description |

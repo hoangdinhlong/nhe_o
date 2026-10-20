@@ -1288,6 +1288,7 @@ package body Nhe_O.C_API is
          return;
       end if;
 
+      --  Without metadata the document stores an empty object (matched only by `{}`)
       if Meta_JSON_Len > 0 then
          Meta_Raw := To_Bounded_Text (Meta_JSON_Buf, Text_Length (Meta_JSON_Len));
          Parse_JSONB (Meta_Raw, Meta, Status);
@@ -1295,8 +1296,6 @@ package body Nhe_O.C_API is
             Out_Status := To_C_Status (Status);
             return;
          end if;
-      else
-         Put_Field (Meta, Make_Ident ("source"), Make_Text ("c_api"), JSONB_String, Status);
       end if;
 
       Summary := To_Bounded_Text (Summary_Buf, Text_Length (Summary_Len));

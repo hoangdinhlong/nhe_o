@@ -968,7 +968,10 @@ procedure Nhe_O_Main is
    C_Par_Bytes   : int;
    C_Vec_ND_C    : constant C_Vec_Buf   := [1 => -1.0, 2 => -1.0, 3 => 0.0, others => 0.0];
    C_Big_Parent  : constant C_Toast_Buf := [others => To_C ('x')];
+   C_Full_Par    : C_Toast_Buf          := [others => nul];
    C_Empty_Text  : constant C_Text_Buf  := [others => nul];
+   C_Src_Filter  : constant C_Text_Buf  := To_C_Text ("{""source"":""c_api""}");
+   C_Empty_Obj   : constant C_Text_Buf  := To_C_Text ("{}");
    C_DB_Buf      : constant C_Text_Buf  := To_C_Text ("/tmp/nhe_o_capi_persist.db");
    C_WAL_Buf     : constant C_Text_Buf  := To_C_Text ("/tmp/nhe_o_capi_persist.wal");
    C_Ckpt_Buf    : constant C_Text_Buf  := To_C_Text ("/tmp/nhe_o_capi_persist.wal.ckpt");
@@ -1444,7 +1447,7 @@ begin
           and then Contains (Doc_Filter, Doc_Parsed)
           and then Contains (Doc_Filter, Doc_Filter));
 
-   --  Verify RFC 8259 escape decoding (including \uXXXX) and depth-4 nested @> containment
+   --  Verify RFC 8259 escape decoding (including \uXXXX) and nested @> containment
    Parse_JSONB (Make_Text ("{""msg"":""a\nb\u0041"", ""num"":1.0, ""sub"":{""nested"":{""leaf"":{""y"":2,""x"":1.0}}}, ""arr"":[{""k"":1.0,""m"":2}]}"), Doc_Parsed, JSON_Stat);
    Check (JSON_Stat = Status_Ok);
    Parse_JSONB (Make_Text ("{""msg"":""anbA""}"), Doc_Filter, JSON_Stat);
@@ -1635,6 +1638,17 @@ begin
       Parse_JSONB (Make_Text ("{""a"":[{"""":1}]}"), Doc_Parsed, JSON_Stat);
       Check (JSON_Stat = Status_Invalid_Syntax);
       Check (not Is_Valid_Field_Value (Make_Text ("[{"""":1}]"), JSONB_Array));
+
+      --  R13-JS-01: syntax is checked before the ingest limits, so invalid JSON is always
+      --  Invalid_Syntax, whichever limit an earlier part of the text breaks
+      Parse_JSONB (Make_Text ("{""" & [1 .. Max_Ident_Len + 1 => 'k'] & """:1,}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Invalid_Syntax and then Doc_Parsed.Count = 0);
+      Parse_JSONB (Make_Text ("{""" & [1 .. Max_Ident_Len + 1 => 'k'] & """:1"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Invalid_Syntax);
+      Parse_JSONB (Make_Text ("{""a"":" & [1 .. Max_JSONB_Depth => '['] & "x"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Invalid_Syntax);
+      Parse_JSONB (Make_Text ("{""a"":1e500000,}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Invalid_Syntax);
    end;
    Print_Line ("  => Passed: RFC 8259 JSON validator, escape decoding, and `?`, `->`, `->>`, `@>` verified.");
 
@@ -2407,6 +2421,17 @@ begin
      (-1.0, -1.0, 0.0, 0, C_Empty_Text, 0, 1,
       C_Hit_Cnt, C_Top_Doc, C_Top_Dist, C_Par_Bytes, C_Graph_Hit, C_Rc);
    Check (C_Rc = C_Status_Ok and then C_Top_Doc = 3 and then C_Par_Bytes = 6_000);
+
+   --  R13-JS-03: documents ingested without metadata store an empty object, so only
+   --  the filter {} matches them (no hidden "source" field)
+   C_RAG_Query_Full_ND
+     (C_Vec_ND_A, 3, 0, C_Src_Filter, 18, C_Empty_Text, 0, 4,
+      C_Hit_Cnt, C_Top_Doc, C_Top_Dist, C_Full_Par, C_Par_Bytes, C_Graph_Hit, C_Rc);
+   Check (C_Rc = C_Status_Ok and then C_Hit_Cnt = 0);
+   C_RAG_Query_Full_ND
+     (C_Vec_ND_A, 3, 0, C_Empty_Obj, 2, C_Empty_Text, 0, 4,
+      C_Hit_Cnt, C_Top_Doc, C_Top_Dist, C_Full_Par, C_Par_Bytes, C_Graph_Hit, C_Rc);
+   Check (C_Rc = C_Status_Ok and then C_Hit_Cnt = 2 and then C_Top_Doc = 1);
 
    --  An empty summary with an empty parent chunk is rejected
    C_RAG_Ingest_Full_ND (4, C_Empty_Text, 0, C_Empty_Text, 0, C_Big_Parent, 0, C_Vec_ND_A, 3, 0, C_Rc);

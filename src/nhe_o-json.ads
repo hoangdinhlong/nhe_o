@@ -129,7 +129,8 @@ package Nhe_O.JSON is
    --  (duplicate keys: the last occurrence wins, at every depth as in PostgreSQL).
    --  Status_Invalid_Syntax: not Is_Valid_JSON (incl. ill-formed UTF-8, lone or
    --  reversed `\u` surrogates, U+0000), not an object root, or an empty object
-   --  key at any depth.
+   --  key at any depth. Syntax is checked first, so text that is not valid JSON
+   --  is Status_Invalid_Syntax even when it also breaks an ingest limit.
    --  Status_Capacity_Exceeded: more than Max_JSON_Fields distinct top-level
    --  keys, a key longer than Max_Ident_Len decoded bytes (any depth), nesting
    --  deeper than Max_JSONB_Depth, or a number outside the PostgreSQL numeric
@@ -141,10 +142,17 @@ package Nhe_O.JSON is
       Status :    out Engine_Status)
      with Global => null,
           Always_Terminates,
-          Post   => (if Status /= Status_Ok then Doc.Count = 0);
+          Post   => (if Status /= Status_Ok then Doc.Count = 0)
+                    and then (if not Is_Valid_JSON (Raw) then Status = Status_Invalid_Syntax);
 
    --  PostgreSQL `->` operator: Extract JSON object field as a valid JSON value
-   --  (e.g., string values are returned quoted as `"val"`, never truncated)
+   --  (e.g., string values are returned quoted as `"val"`, never truncated).
+   --  Strings, booleans and null come back as PostgreSQL prints them; numbers,
+   --  objects and arrays come back as their stored input literal (spelling,
+   --  whitespace, key order and duplicate keys kept), which is jsonb-equal to
+   --  PostgreSQL's value but not always the same text (`1e2` for `100`), so a
+   --  returned container must be read with jsonb rules (the last duplicate key
+   --  wins)
    procedure Get_Field
      (Doc   : in     JSONB_Document;
       Key   : in     Bounded_Ident;
@@ -169,6 +177,8 @@ package Nhe_O.JSON is
 
    --  PostgreSQL `->>` operator: Extract JSON object field as unquoted TEXT.
    --  A JSON null yields SQL NULL (Is_Null) instead of the text "null".
+   --  Strings yield their decoded bytes as in PostgreSQL; numbers, objects and
+   --  arrays yield their stored input literal (see Get_Field)
    procedure Get_Field_Text
      (Doc     : in     JSONB_Document;
       Key     : in     Bounded_Ident;

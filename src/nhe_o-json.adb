@@ -1283,6 +1283,13 @@ package body Nhe_O.JSON is
    begin
       Doc := (others => <>);
 
+      --  Syntax first: an ingest limit met before a syntax error must not turn
+      --  invalid JSON into Status_Capacity_Exceeded
+      if not Is_Valid_JSON (Raw) then
+         Status := Status_Invalid_Syntax;
+         return;
+      end if;
+
       --  All JSONB ingest rules are checked on the whole document first, so a
       --  nested value can never be stored in a form `@>` cannot compare
       Status := Check_JSON_Text (Raw, True, Max_JSONB_Depth);

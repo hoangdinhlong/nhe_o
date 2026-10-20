@@ -652,6 +652,7 @@ class NheOEngine:
         """Ingest (or update) one document as one durable transaction.
 
         parent_text defaults to the summary; at least one of them must be non-empty.
+        An empty metadata_json stores an empty object, matched only by the filter "{}".
         """
         m_buf, m_len = _make_text_buf(metadata_json)
         s_buf, s_len = _make_text_buf(summary)
