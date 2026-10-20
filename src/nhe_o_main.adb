@@ -1083,6 +1083,185 @@ begin
    Check (SQL_Status = Status_Invalid_Syntax);
    Analyze_SQL (Make_Text ("SELECT col$1abc FROM docs;"), SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Ok and then not SQL_Desc.Has_Positional_Param);
+
+   --  SQL-1: E'...' strings, $tag$ dollar quoting, nested comments and NUL bytes
+   --  can neither hide a ';' nor leak operators into the feature flags
+   Analyze_SQL (Make_Text ("SELECT $$O'$$; DROP TABLE docs; SELECT $$'$$"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax and then SQL_Desc.Kind = Stmt_Unknown);
+   Analyze_SQL (Make_Text ("SELECT $$--$$; DROP TABLE docs;"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT 1 /* /* */ ' */ ; DROP TABLE docs; -- '"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT $a$ ; $A$ ; DROP TABLE docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT 1 -- x" & ASCII.NUL & ASCII.LF & "FROM docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT $$it's$$ FROM docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Kind = Stmt_Select
+          and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("docs")));
+   Analyze_SQL (Make_Text ("SELECT E'it\'s' FROM docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Kind = Stmt_Select);
+   Analyze_SQL (Make_Text ("SELECT $$ $1 :: <=> ? $$ FROM docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok
+          and then not SQL_Desc.Has_Positional_Param
+          and then not SQL_Desc.Has_Pg_Type_Cast
+          and then not SQL_Desc.Has_Vector_Operator
+          and then not SQL_Desc.Has_JSONB_Operator);
+   Analyze_SQL (Make_Text ("SELECT 1 /* a /* b */ c */ FROM docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("docs")));
+
+   --  SQL-2: multi-word key words match any whitespace / comment run
+   Analyze_SQL (Make_Text ("SELECT id FROM docs ORDER  BY a ORDER  BY b"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs ORDER  BY a WHERE x = 1"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs ORDER" & ASCII.LF & "BY a"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Has_Order_By);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs ORDER/**/BY a"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Has_Order_By);
+   Analyze_SQL (Make_Text ("INSERT INTO docs VALUES (1) ON  CONFLICT DO NOTHING"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Has_Upsert_Conflict);
+   Analyze_SQL (Make_Text ("CREATE TABLE IF  NOT" & ASCII.LF & "EXISTS docs (id INT)"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Kind = Stmt_Create_Table
+          and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("docs")));
+
+   --  SQL-3: LIMIT / OFFSET / FETCH / locking tails in either order
+   Analyze_SQL (Make_Text ("SELECT id FROM docs ORDER BY emb <-> $1 LIMIT 5 OFFSET 10"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Has_Limit and then SQL_Desc.Limit_Value = 5
+          and then SQL_Desc.Has_Offset and then SQL_Desc.Offset_Value = 10);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs ORDER BY emb <-> $1 OFFSET 10 LIMIT 5"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Limit_Value = 5 and then SQL_Desc.Offset_Value = 10);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs LIMIT 5 FOR UPDATE"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Has_Limit and then SQL_Desc.Limit_Value = 5);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs FETCH FIRST 3 ROWS ONLY"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Has_Limit and then SQL_Desc.Limit_Value = 3);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs LIMIT ALL"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then not SQL_Desc.Has_Limit and then SQL_Desc.Limit_Value = 0
+          and then not SQL_Desc.Has_Param_Limit);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs LIMIT $1 OFFSET $2"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then not SQL_Desc.Has_Limit and then SQL_Desc.Has_Param_Limit
+          and then SQL_Desc.Has_Offset and then SQL_Desc.Has_Param_Offset);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs LIMIT 5 LIMIT 6"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs OFFSET 1 OFFSET 2"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs LIMIT 5 garbage"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT id FROM docs LIMIT 2147483648"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+
+   --  SQL-4: clause key words count only outside parentheses; set operations,
+   --  CTEs, derived tables, and IS [NOT] DISTINCT FROM
+   Analyze_SQL (Make_Text ("SELECT id FROM docs WHERE a IS DISTINCT FROM b"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Has_Where
+          and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("docs")));
+   Analyze_SQL (Make_Text ("SELECT EXTRACT(YEAR FROM created_at) FROM docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("docs")));
+   Analyze_SQL (Make_Text ("SELECT substring(name FROM 1 FOR 3) FROM docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Column_Count = 1);
+   Analyze_SQL (Make_Text ("SELECT EXTRACT(EPOCH FROM now())"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Table_Or_Target.Length = 0);
+   Analyze_SQL (Make_Text ("SELECT * FROM docs WHERE id IN (SELECT doc_id FROM tags)"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("docs")));
+   Analyze_SQL (Make_Text ("SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.id=t.id)"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("t")));
+   Analyze_SQL (Make_Text ("SELECT row_number() OVER (ORDER BY id) FROM docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then not SQL_Desc.Has_Order_By);
+   Analyze_SQL (Make_Text ("SELECT count(*) FILTER (WHERE x>0) FROM docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then not SQL_Desc.Has_Where);
+   Analyze_SQL (Make_Text ("SELECT a FROM t UNION SELECT a FROM u"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Kind = Stmt_Select
+          and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("t")));
+   Analyze_SQL (Make_Text ("WITH x AS (SELECT 1) SELECT * FROM x"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Kind = Stmt_Select
+          and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("x")));
+   Analyze_SQL (Make_Text ("SELECT * FROM (SELECT 1) AS s"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Table_Or_Target.Length = 0);
+   Analyze_SQL (Make_Text ("SELECT a FROM t GROUP BY a WHERE x = 1"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT a FROM t UNION SELECT a, b FROM u"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("WITH x AS (DELETE FROM t RETURNING *) SELECT * FROM x"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT * FROM t WHERE x IN (DELETE FROM u RETURNING id)"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT * INTO backup_docs FROM docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+
+   --  SQL-5: select-list width ignores commas inside [] as well as ()
+   Analyze_SQL (Make_Text ("SELECT ARRAY[1,2,3] FROM docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Column_Count = 1);
+   Analyze_SQL (Make_Text ("SELECT id, emb <-> ARRAY[1,2,3]::vector FROM docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Column_Count = 2 and then SQL_Desc.Has_Vector_Operator);
+
+   --  SQL-6: multi-word / spaced types, FLOAT(p), VARCHAR up to 10485760
+   Resolve_Pg_Type (Make_Ident ("TIMESTAMP WITH TIME ZONE"), Resolved_T, Type_Valid);
+   Check (Type_Valid and then Resolved_T = Pg_Timestamptz);
+   Resolve_Pg_Type (Make_Ident ("TIMESTAMP(3) WITHOUT TIME ZONE"), Resolved_T, Type_Valid);
+   Check (Type_Valid and then Resolved_T = Pg_Timestamptz);
+   Resolve_Pg_Type (Make_Ident ("DOUBLE  PRECISION"), Resolved_T, Type_Valid);
+   Check (Type_Valid and then Resolved_T = Pg_Double_Precision);
+   Resolve_Pg_Type (Make_Ident ("VARCHAR(10485760)"), Resolved_T, Type_Valid);
+   Check (Type_Valid and then Resolved_T = Pg_Text);
+   Resolve_Pg_Type (Make_Ident ("VARCHAR(10485761)"), Resolved_T, Type_Valid);
+   Check (not Type_Valid and then Resolved_T = Pg_Text);
+   Resolve_Pg_Type (Make_Ident ("FLOAT"), Resolved_T, Type_Valid);
+   Check (Type_Valid and then Resolved_T = Pg_Double_Precision);
+   Resolve_Pg_Type (Make_Ident ("FLOAT(24)"), Resolved_T, Type_Valid);
+   Check (Type_Valid and then Resolved_T = Pg_Real);
+   Resolve_Pg_Type (Make_Ident ("FLOAT(25)"), Resolved_T, Type_Valid);
+   Check (Type_Valid and then Resolved_T = Pg_Double_Precision);
+   Resolve_Pg_Type (Make_Ident ("FLOAT(54)"), Resolved_T, Type_Valid);
+   Check (not Type_Valid);
+   Resolve_Pg_Type (Make_Ident ("VECTOR(4097)"), Resolved_T, Type_Valid);
+   Check (not Type_Valid);
+   Resolve_Pg_Type (Make_Ident ("NUMERIC(0)"), Resolved_T, Type_Valid);
+   Check (not Type_Valid);
+   Resolve_Pg_Type (Make_Ident ("NUMERIC(39)"), Resolved_T, Type_Valid);
+   Check (not Type_Valid);
+   Resolve_Pg_Type (Make_Ident ("VARCHAR(0)"), Resolved_T, Type_Valid);
+   Check (not Type_Valid);
+   Resolve_Pg_Type (Make_Ident ("NUMERIC(10,-2)"), Resolved_T, Type_Valid);
+   Check (not Type_Valid);
+   Resolve_Pg_Type (Make_Ident ("VECTOR(+3)"), Resolved_T, Type_Valid);
+   Check (not Type_Valid);
+
+   --  SQL-7: only recognised column / table constraints may follow a column type
+   Analyze_SQL (Make_Text ("CREATE TABLE t (id INT DROP TABLE users)"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("CREATE TABLE t (id INT !!! ??? @@@)"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax and then not SQL_Desc.Has_JSONB_Operator);
+   Analyze_SQL (Make_Text ("CREATE TABLE t (id BIGINT NOT NULL, ts TIMESTAMP WITH TIME ZONE DEFAULT now(), "
+                           & "u INT REFERENCES users (id) ON DELETE CASCADE, PRIMARY KEY (id))"),
+                SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Kind = Stmt_Create_Table
+          and then SQL_Desc.Column_Count = 3);
+
+   --  SQL-8: a delimited identifier is one name token everywhere
+   Analyze_SQL (Make_Text ("SELECT * FROM ""My Table"""), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("My Table")));
+   Analyze_SQL (Make_Text ("INSERT INTO ""My Table"" VALUES (1)"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("My Table")));
+   Analyze_SQL (Make_Text ("UPDATE ""My Table"" SET a=1"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("My Table")));
+   Analyze_SQL (Make_Text ("DELETE FROM ""My Table"""), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("My Table")));
+   Analyze_SQL (Make_Text ("CREATE TABLE ""My Table"" (id INT)"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("My Table")));
+   Analyze_SQL (Make_Text ("CREATE TABLE t (""a""""b"" INT)"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Column_Count = 1);
+   Analyze_SQL (Make_Text ("SELECT * FROM """""), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+
+   --  SQL-9: FF / VT are whitespace and $01 is a positional parameter
+   Analyze_SQL (Make_Text ("SELECT id" & ASCII.FF & "FROM docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("docs")));
+   Analyze_SQL (Make_Text ("SELECT id FROM" & ASCII.VT & "docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("docs")));
+   Analyze_SQL (Make_Text ("SELECT $01 FROM t"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then SQL_Desc.Has_Positional_Param);
+   Analyze_SQL (Make_Text ("SELECT $0 FROM t"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
    Print_Line ("  => Passed: PostgreSQL SELECT/DDL, clause grammar, and VECTOR(1..4096) verified.");
 
    --  2. Verify Vector Similarity & 4096-D Int8 / Binary Quantization (`ADR-003`)
