@@ -1103,6 +1103,10 @@ procedure Nhe_O_Main is
       Delete_File_If_Exists (WAL_File);
       Init_RAG_Engine (Eng, Dim => 3);
 
+      --  A snapshot newer than every commit is not a snapshot of this engine
+      Query_At (1, 1.0, St);
+      Check (St = Status_Tx_Aborted);
+
       --  R13-RAG-01: T1 stages doc 1 on pages 10 .. 12 (parent, vector, RMET), then
       --  supersedes it with a version on pages 10 .. 11; page 12 stays reserved for T1,
       --  so T2's concurrent commit never shares a page that T1's commit rewrites

@@ -84,8 +84,11 @@ package Nhe_O.RAG is
       and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
       and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page);
 
-   --  Snapshot for MVCC reads: the commit sequence number of the latest commit the
-   --  engine has observed. Commits observed later are invisible to this snapshot.
+   --  Snapshot for MVCC reads and writes: the commit sequence number of the latest
+   --  commit the engine has observed. Commits observed later are invisible to this
+   --  snapshot. A snapshot is valid until the engine is frozen (Freeze_RAG_Engine),
+   --  recovered or re-initialized; reads and writes refuse one newer than every
+   --  commit observed (Status_Tx_Aborted).
    function Take_Snapshot (Engine : RAG_Engine) return Commit_Seq_Number is
      (Engine.Last_Commit_Seq);
 
@@ -207,8 +210,8 @@ package Nhe_O.RAG is
    --  has a prior version reverts the slot to that prior version, deleted by Ctx, so the
    --  single prior-version slot never holds a version no snapshot can see.
    --  Status_Not_Found when Doc_Id has no live version. Status_Tx_Aborted, with the
-   --  engine unchanged, on a write conflict (Has_Write_Conflict) or when Ctx was
-   --  already aborted or committed.
+   --  engine unchanged, on a write conflict (Has_Write_Conflict), a Snapshot newer
+   --  than Last_Commit_Seq, or when Ctx was already aborted or committed.
    procedure Delete_Document
      (Engine   : in out RAG_Engine;
       Ctx      : in     Transaction_Context;
@@ -424,8 +427,8 @@ package Nhe_O.RAG is
    --  4. Preserves prior MVCC version & persists primary Slotted_Page on Page 1
    --  5. Stages a DURABLE WAL notification on channel "rag.indexed" (Nhe_O.PubSub)
    --  The engine is unchanged after Status_Tx_Aborted (a write conflict, see
-   --  Has_Write_Conflict; Ctx already aborted or committed; Staging owned by another
-   --  transaction), after Status_Invalid_Syntax (Metadata is not a valid JSONB document,
+   --  Has_Write_Conflict; a Snapshot newer than Last_Commit_Seq; Ctx already aborted
+   --  or committed; Staging owned by another transaction), after Status_Invalid_Syntax (Metadata is not a valid JSONB document,
    --  see Is_Valid_JSONB_Document) and after Status_Capacity_Exceeded. A failure after
    --  the first WAL frame was appended restores the engine and truncates the WAL back;
    --  if that truncation fails, Ctx is poisoned (CLOG (Ctx.Id) := Tx_Aborted) and all
@@ -470,7 +473,8 @@ package Nhe_O.RAG is
    --  row window is applied: LIMIT n / FETCH FIRST n caps the hits below Top_K and
    --  OFFSET n skips the first n ranked hits. LIMIT $n / OFFSET $n are rejected
    --  (Status_Invalid_Syntax: the query vector is the only bound parameter) and so is
-   --  a window ending past rank Max_RAG_Hits (Status_Capacity_Exceeded).
+   --  a window ending past rank Max_RAG_Hits (Status_Capacity_Exceeded). A Snapshot
+   --  newer than Engine.Last_Commit_Seq is refused with Status_Tx_Aborted.
    procedure Execute_Hybrid_RAG_Query
      (Engine            : in     RAG_Engine;
       Snapshot          : in     Commit_Seq_Number;

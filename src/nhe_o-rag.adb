@@ -246,6 +246,7 @@ package body Nhe_O.RAG is
    is
    begin
       if Has_Write_Conflict (Engine, Doc_Id, Ctx.Id, Snapshot)
+        or else Snapshot > Engine.Last_Commit_Seq
         or else Engine.CLOG (Ctx.Id) in Tx_Aborted | Tx_Committed
       then
          Status := Status_Tx_Aborted;
@@ -638,6 +639,7 @@ package body Nhe_O.RAG is
       WAL_Ok          : Boolean;
    begin
       if Has_Write_Conflict (Engine, Doc_Id, Ctx.Id, Snapshot)
+        or else Snapshot > Engine.Last_Commit_Seq
         or else Engine.CLOG (Ctx.Id) in Tx_Aborted | Tx_Committed
       then
          Status := Status_Tx_Aborted;
@@ -1717,6 +1719,7 @@ package body Nhe_O.RAG is
    begin
       --  Snapshot-isolation conflict detection and poisoned / finished transaction guard
       if Has_Write_Conflict (Engine, Doc_Id, Ctx.Id, Snapshot)
+        or else Snapshot > Engine.Last_Commit_Seq
         or else Engine.CLOG (Ctx.Id) in Tx_Aborted | Tx_Committed
       then
          Status := Status_Tx_Aborted;
@@ -2242,6 +2245,13 @@ package body Nhe_O.RAG is
    begin
       Result           := (others => <>);
       Top_Parent_Chunk := [others => 0];
+
+      --  A snapshot newer than every commit the engine observed is not one of its
+      --  snapshots (or predates a freeze or recovery that reset the sequence)
+      if Snapshot > Engine.Last_Commit_Seq then
+         Status := Status_Tx_Aborted;
+         return;
+      end if;
 
       --  1. Parse & validate PostgreSQL RAG SQL query
       Analyze_SQL (SQL_Query, SQL_Desc, SQL_Stat);

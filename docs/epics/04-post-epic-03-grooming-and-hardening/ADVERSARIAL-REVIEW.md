@@ -1,12 +1,13 @@
-# Adversarial System Review (`v0.3.0` — Epics 01–03 Audit & Epic 04 Multi-Round Remediation Record)
+# Adversarial System Review (`v0.3.0` → `v0.4.0` — Epics 01–03 Audit & Epic 04 Multi-Round Remediation Record)
 
-_Date: 2026-10-20 · Status: ✅ All 84 Findings Remediated & Formally Verified (`4,246 / 4,246` Checks Proved, `0 Unproved`, `0 Warnings` — Round 1: 24/24 · Round 2: 16/16 · Round 3: 18/18 · Round 4: 12/12 · Round 5: 3/3 · Round 6: Challenged by R7 · Round 7: 7/7 · Round 8: Initial Pass · Round 9: 3/3 · Round 10: 1/1 · Round 11: 0 Issues Found)_
+_Date: 2026-10-20 · Status: Rounds 1–11 (84 findings, `v0.3.0`) remediated and formally verified; Rounds 12–13 (89 findings, `v0.4.0`, Part V) remediated, compiled and regression-tested; convergence rounds continue until a full-system round finds nothing, after which the `gnatprove` gate re-measures the proof counts (Round 1: 24/24 · Round 2: 16/16 · Round 3: 18/18 · Round 4: 12/12 · Round 5: 3/3 · Round 6: Challenged by R7 · Round 7: 7/7 · Round 8: Initial Pass · Round 9: 3/3 · Round 10: 1/1 · Round 11: 0 Issues Found · Round 12: 55/55 · Round 13: 34/34)_
 
-This document records all eleven rounds of full-system adversarial audits conducted on **Nhé O (`v0.3.0`)** in **Epic 04 (`04-post-epic-03-grooming-and-hardening`)**:
+This document records the full-system adversarial audits conducted on **Nhé O** in **Epic 04 (`04-post-epic-03-grooming-and-hardening`)**:
 - **Part I (Round 1 Audit — 24 Findings: `7 Critical, 9 High, 5 Medium, 3 Low`)**: All 24 findings remediated and formally verified in Tasks 1–6.
 - **Part II (Round 2 Deep System Audit — 16 Findings: `2 Critical, 5 High, 5 Medium, 4 Low`)**: All 16 semantic ACID/MVCC, FFI persistence, `"VTST"` `Float32` TOAST precision, parser boundary, and binary spec findings remediated and formally verified in Tasks 7–11.
 - **Part III (Round 3 Full-System Adversarial Audit — 18 Findings: `3 Critical, 5 High, 6 Medium, 4 Low`)**: All 18 protocol, allocator, recovery, index-lifecycle, parser, and documentation findings remediated and formally verified in Tasks 12–16.
 - **Part IV (Rounds 4–11 Convergence & Fast-Loop Audit — 26 Findings: `1 Critical, 9 High, 12 Medium, 4 Low` + Round 11 Zero-Defect Verification)**: All 12 Round-4 findings (`R4-CRIT-01`..`R4-LOW-02`), 3 Round-5 findings (`R5-HIGH-01`..`R5-LOW-01`), 7 Round-7 challenger findings (`R7-HIGH-01`..`R7-LOW-01`), and 4 Fast-Loop Rounds 9–10 findings (`R9-HIGH-01`, `R9-MED-01`, `R9-MED-02`, `R10-MED-01`) remediated, followed by a clean Round-11 full-system review (`0` issues found) and formal proof in Tasks 17–20 (`4,246 / 4,246` VCs proved, `0 unproved`, `0 warnings`).
+- **Part V (Rounds 12–13 Independent Full-System Re-Review — 89 unique findings: `3 Critical, 17 High, 26 Medium, 43 Low`)**: Reviewers with independent oracles (PostgreSQL 16, Redis semantics, fault injection, crash images, randomized models) found crash-safety, isolation, durability, JSON/SQL fidelity, index exactness and C ABI defects that the Round-11 review and the proofs had not covered (Rounds 1–11 rows above describe the `v0.3.0` code they fixed; several were later superseded, as Part V notes). All were fixed in Tasks 21–22 (`v0.4.0`, `ADR-009`..`ADR-019`).
 
 
 ---
@@ -199,4 +200,114 @@ Conducted on `2026-10-20` as an iterative fix-and-re-audit convergence loop acro
 | `R9-MED-02` | Medium | `Nhe_O.Types` / `Vector` / `JSON` / `HNSW` / `Transaction` / `KV` / `RAG` | **Anti-Tautology Contract Strengthening (`src/nhe_o-*.ad[sb]`):** Eliminated all 15 literal `Post => True` contracts across `src/nhe_o-json.adb`, `src/nhe_o-transaction.adb`, `src/nhe_o-kv.adb`, and `src/nhe_o-rag.adb`, and replaced subtype-range tautological `>= 0.0` postconditions on `Non_Negative_Float` functions (`L2_Distance_Squared`, `Sqrt_Bounded`, `L2_Distance`, `Int8_L2_Distance`, `Node_Pair_Distance`) and `Make_Vector_3D`, `Make_Ident`, `Make_Text`, `Equal_Ident_Case_Insensitive`, `Parse_JSONB`, `Get_Field`, and `Get_Field_Text` with non-tautological functional contracts. | ✅ Remediated in Epic 04 (Task 20) |
 | `R10-MED-01` | Medium | `Nhe_O.SQL` | **`ON CONFLICT` / `RETURNING` Clause-Order Validation, `DOUBLE PRECISION` Modifier Rejection & `Analyze_SQL` / `Resolve_Pg_Type` Postconditions (`src/nhe_o-sql.ad[sb]`):** Extended `Validate_Clause_Structure` to enforce `ON CONFLICT` (only on `Stmt_Insert`, non-empty body, at most once) and `RETURNING` (only on `Stmt_Insert | Stmt_Update | Stmt_Delete`, non-empty body, after `WHERE`/`ON CONFLICT`, at most once), rejected `DOUBLE PRECISION(...)` type modifiers in `Is_Valid_Column_Def_Slice`, and added non-tautological `Post` contracts to `Analyze_SQL` and `Resolve_Pg_Type`. | ✅ Remediated in Epic 04 (Task 20) |
 | `ROUND-11` | Verification | All 26 `src/*.ad[sb]`, `include/nhe_o.h`, `bindings/python/nhe_o.py`, `docs/` | **Round 11 (Fast-Loop Round 3) Full-System Convergence Review:** Audited all 14 Ada/SPARK packages, C header, Python SDK, and documentation after Rounds 9–10 remediation. **0 issues found.** Formally verified via the outer heavy gate `gnatprove -P nhe_o.gpr --mode=all --level=2 -j24` (`4,246 / 4,246` checks proved: `1,316` Flow + `2,930` Provers, `0 unproved`, `0 warnings`, max proof time `< 1s`). | ✅ Verified in Epic 04 (Task 20) |
+
+---
+
+# Part V — Rounds 12–13 Independent Full-System Re-Review (`R12-*`, `R13-*`, `v0.4.0`)
+
+Round 12 re-reviewed every subsystem from scratch with independent oracles; Round 13 reviewed the Round-12 fixes and everything else again. IDs carry the reviewing area (`TX` storage / WAL / transactions, `RAG`, `KV`, `JS` JSON, `SQL`, `CA` C ABI / SDK / CLI / build, `IDX` B+Tree / HNSW / vector). Duplicates reported by several reviewers are listed once.
+
+## 14. Round 12 Findings (55)
+
+| ID | Severity | Subsystem | Finding | Remediation |
+|---|---|---|---|---|
+| `R12-TX-1` | High | `Transaction` / `C_API` | A torn last WAL frame, a CRC-bad last frame or a torn database tail left by a crash made the database unopenable. | ✅ `Repair_WAL_Tail` / `Repair_DB_Tail` before redo (`ADR-009`, `cd1fdf3`; hardened by `R13-TX-02`) |
+| `R12-TX-2` | High | `Transaction` / `C_API` | Phantom commit: `Commit_Tx` reported an abort after its barrier was durable, and the C ABI rolled back a transaction recovery would replay. | ✅ The durable barrier append is the commit point; `Flush_Pending` + in-place redo (`ADR-009`, `cd1fdf3`) |
+| `R12-TX-3` | High | `KV` / `IO` | Phantom KV write: an `fsync` / `close` failure after `pwrite` left a frame recovery would replay. | ✅ Failed appends are truncated and fsynced (best effort, `ADR-012` latch) (`cd1fdf3`) |
+| `R12-TX-4` | High | `Transaction` | Redo replayed data frames in WAL order instead of commit order. | ✅ Pass 2 replays each barrier's own frames in commit order (`ADR-009`, `cd1fdf3`) |
+| `R12-TX-5` | Medium | `C_API` / `Transaction` | No checkpoint: a lifetime budget of 4096 WAL frames and 8191 transaction ids. | ✅ `nhe_o_checkpoint` + automatic thresholds (`ADR-011`, `cd1fdf3`) |
+| `R12-TX-6` | Medium | `Transaction` / `C_API` | Transaction ids could be reused after recovery (`Max_Recovered_Tx` counted committed transactions only), poisoning the WAL. | ✅ `Max_Seen_Tx` over every frame and tuple seeds ids (`cd1fdf3`) |
+| `R12-TX-7` | Medium | `RAG` | Not snapshot isolation: transaction-id snapshots let a later-committing lower id become visible; the 2-argument rule allowed dirty reads. | ✅ Commit sequence numbers (`ADR-010`, `cd1fdf3`) |
+| `R12-TX-8` | Low | `IO` | `Read_WAL_Frame` reported EOF for index ≥ 4096 whatever the file size. | ✅ (`cd1fdf3`) |
+| `R12-TX-9` | Low | `Transaction` | `Encode_Slotted_Page` had no precondition and no round-trip guarantee. | ✅ (`cd1fdf3`) |
+| `R12-TX-10` | Low | `IO` | Opening a FIFO blocked, contradicting `Always_Terminates`. | ✅ `O_NONBLOCK` opens (`cd1fdf3`) |
+| `R12-TX-11` | Low | `C_API` | The database / WAL alias guard compared path text only. | ✅ `stat` device + inode (`cd1fdf3`) |
+| `R12-TX-12` | Low | All | Missing or weak contracts on WAL / page subprograms. | ✅ (`cd1fdf3`) |
+| `R12-TX-13` | Low | `docs/` | Storage doc drift (VTST tiers, unoccupied slots, CRC coverage, finding status, `unlink` return code). | ✅ (`cd1fdf3`, `fca9d31`) |
+| `R12-RAG-1` | Critical | `RAG` | A commit's Page 1 carried another active transaction's uncommitted versions and deletions, which recovery then treated as committed. | ✅ `Build_RAG_Slotted_Page` persists committed or own versions only (`ADR-010`, `cd1fdf3`) |
+| `R12-RAG-2` | High | `RAG` | Orphan frames of a failed ingest were flushed by the same transaction's commit onto reused pages, bricking the database. | ✅ Failed ingests truncate the WAL or poison the transaction (`cd1fdf3`) |
+| `R12-RAG-4` | High | `RAG` | No write-write conflict detection in the Ada API (lost updates). | ✅ First-updater-wins (`ADR-010`, `cd1fdf3`; completed by `R13-RAG-02`) |
+| `R12-RAG-6` | Medium | `RAG` | A single prior version: rolling back an update that displaced an older prior cannot resurrect it. | ✅ Documented limit (`ADR-010`, `BR-002`) |
+| `R12-RAG-8` | Low | `RAG` | `Rollback_RAG_Tx` accepted a committed transaction. | ✅ `Pre => CLOG (Tx) /= Tx_Committed` (`cd1fdf3`) |
+| `R12-RAG-9` | Low | `RAG` | Recovering a new or empty database returned an I/O error. | ✅ Missing / empty database recovers an empty engine (`cd1fdf3`) |
+| `R12-RAG-10` | Low | `RAG` | Equal-distance hits changed order across a restart. | ✅ Total order: distance, keyword match, `Doc_Id` (`cd1fdf3`) |
+| `R12-RAG-11` | Low | `RAG` | Keyword case folding covered ASCII only. | ✅ Latin / Vietnamese UTF-8 folding (`cd1fdf3`) |
+| `R12-KV-1` | High | `KV` | Replay chose different eviction victims than the run (GET recency is not logged), resurrecting or losing keys. | ✅ Slot-hinted SET frames (`ADR-014`, `cd1fdf3`) |
+| `R12-KV-2` | Low | `KV` | Replay clock used a running maximum. | ✅ (`cd1fdf3`) |
+| `R12-KV-3` | Low | `KV` | DEL counted expired keys as removed. | ✅ `Removed` iff live at `Now` (`ADR-014`, `cd1fdf3`) |
+| `R12-KV-4` | Low | `KV` | INCRBY accepted `+5`, `007`, `-0`. | ✅ Redis `string2ll` rules (`cd1fdf3`) |
+| `R12-KV-5` | Low | `KV` / `PubSub` | Contract and doc gaps (recovery, `Publish`, flush). | ✅ (`cd1fdf3`, `8693eee`) |
+| `R12-JS-1` | Medium | `JSON` | `\u` surrogate pairs decoded to CESU-8; lone surrogates accepted. | ✅ 4-byte UTF-8; lone / reversed surrogates rejected (`aa3b5d1`) |
+| `R12-JS-2` | Medium | `JSON` | `Format_Quoted_JSON_String` dropped characters of long strings. | ✅ `JSON_Quoted_Length` bound (`aa3b5d1`) |
+| `R12-JS-3` | Medium | `JSON` | `@>` depth ladder fell back to raw-text comparison (arrays deeper than 3 levels). | ✅ Recursive `Value_Contains` at every depth (`ADR-015`, `aa3b5d1`) |
+| `R12-JS-4` | Medium | `JSON` | Ingest accepted documents `@>` could never match. | ✅ Uniform ingest limits (`ADR-015`, `aa3b5d1`) |
+| `R12-JS-5` | Low | `JSON` | Invalid UTF-8 accepted. | ✅ UTF-8 state machine (`aa3b5d1`) |
+| `R12-JS-6` | Low | `JSON` | Number exponents saturated, so distinct numbers compared equal. | ✅ Exact positional canonical form; PostgreSQL `numeric` range (`aa3b5d1`) |
+| `R12-JS-7` | Low | `JSON` | `->>` could not distinguish JSON `null` from the string `"null"`. | ✅ `Is_Null` out parameter (`aa3b5d1`) |
+| `R12-JS-8` | Low | `JSON` | Empty keys rejected without documentation. | ✅ Rejected at every depth, documented (`aa3b5d1`) |
+| `R12-SQL-1` | Critical | `SQL` | Dollar-quoted and `E''` strings smuggled a second statement past the multi-statement guard. | ✅ PostgreSQL-faithful lexer (`ADR-016`, `365eb8d`) |
+| `R12-SQL-2` | High | `SQL` | Multi-word keywords matched only single-space literals. | ✅ Token sequences (`365eb8d`) |
+| `R12-SQL-3` | High | `SQL` | `LIMIT n OFFSET m`, `LIMIT ALL`, `LIMIT $1`, `FOR UPDATE` rejected. | ✅ PostgreSQL tail grammar (`365eb8d`) |
+| `R12-SQL-4` | High | `SQL` | Clause detection ignored parentheses (subqueries, `EXTRACT`, `IS DISTINCT FROM`, windows, `UNION`, CTEs, derived tables). | ✅ Clauses at their own nesting level; nested blocks validated (`365eb8d`) |
+| `R12-SQL-5` | Medium | `SQL` | Commas inside `[]` inflated `Column_Count`. | ✅ (`365eb8d`) |
+| `R12-SQL-6` | Medium | `SQL` | Valid type spellings rejected (`TIMESTAMP WITH TIME ZONE`, `DOUBLE  PRECISION`, `VARCHAR(n)` maximum, `FLOAT(p)`). | ✅ `Resolve_Pg_Type` (`365eb8d`) |
+| `R12-SQL-7` | Medium | `SQL` | Trailing garbage after a `CREATE TABLE` column accepted. | ✅ Column constraint grammar (`365eb8d`) |
+| `R12-SQL-8` | Medium | `SQL` | Quoted identifiers truncated or rejected. | ✅ Delimited identifiers as one token (`365eb8d`) |
+| `R12-SQL-9` | Low | `SQL` | Form feed / vertical tab whitespace and `$01` rejected. | ✅ (`365eb8d`) |
+| `R12-SQL-10` | Low | `docs/` | `R7-HIGH-02` named functions that do not exist. | ✅ Superseded by `ADR-016` |
+| `R12-CA-1` | High | `C_API` / build | Stack frames of about 0.5 MB raised `Storage_Error` across the ABI. | ✅ Library built without `-gnata` (proved), stack need documented (`ADR-013`, `cd1fdf3`) |
+| `R12-CA-2` | High | Python SDK | Not thread-safe: concurrent calls aborted on assertions and lost writes. | ✅ Process-wide lock (`ADR-013`, `cd1fdf3`) |
+| `R12-CA-3` | High | Python SDK | Several Python engines silently shared one global state. | ✅ One open engine per process, `close()` (`ADR-013`, `cd1fdf3`) |
+| `R12-CA-4` | High | `C_API` | `nhe_o_rag_query_nd` reported more parent bytes than it wrote; the header named no buffer capacities. | ✅ (`cd1fdf3`) |
+| `R12-CA-5` | Medium | `C_API` | GNAT signal handlers installed at load time; no exception firewall. | ✅ Documented in `include/nhe_o.h` (`ADR-013`) |
+| `R12-CA-6` | Medium | Tests | The suites missed regressions (no failure count) and `python -O` stripped the SDK's asserts. | ✅ Check counting, `_check` helpers (`cd1fdf3`) |
+| `R12-CA-7` | Low | `C_API` / CLI | Predictable `/tmp` defaults wiped by `nhe_o_init` and the CLI; `O_CREAT` without `O_EXCL`; relative paths; parent chunk NULs. | ✅ Per-process scratch files, absolute paths (`cd1fdf3`, `ed5a53b`; `O_EXCL` by `R13-TX-01`) |
+| `R12-IDX-1` | High | `BTree` | `Delete_Key` rebuild lost keys once the tree held about 47 keys. | ✅ Verified dense rebuild (`ADR-017`, `a939d85`) |
+| `R12-IDX-2` | Medium | `HNSW` | `Search_KNN` missed live nodes. | ✅ Exact top-K (`ADR-017`, `a939d85`) |
+| `R12-IDX-3` | Low | `Vector` | Cosine distance used an absolute cutoff for tiny vectors. | ✅ Scale invariant (`a939d85`) |
+| `R12-IDX-4` | Low | `BTree` | `Range_Scan` truncated silently at 64 results. | ✅ `Truncated` out parameter (`a939d85`) |
+
+Also fixed with Round 12: the RAG executor applies the SQL `OFFSET` window and rejects `LIMIT $n` / `OFFSET $n` (`d9189f2`).
+
+## 15. Round 13 Findings (34)
+
+| ID | Severity | Subsystem | Finding | Remediation |
+|---|---|---|---|---|
+| `R13-TX-01` | High | `C_API` / `IO` | Predictable scratch and checkpoint paths could be planted as symlinks. | ✅ `O_EXCL` creation (`Create_File_Exclusive`) (`fca9d31`) |
+| `R13-TX-02` | High | `Transaction` | `Repair_WAL_Tail` truncated files that were not a WAL (e.g. swapped arguments). | ✅ Classify every frame before truncating; swap detection (`fca9d31`) |
+| `R13-TX-03` | Medium | `C_API` | The database path could equal `"<wal>.ckpt"`. | ✅ Rejected by text and `stat` (`fca9d31`) |
+| `R13-TX-04` | Medium | `IO` | The database file's directory entry was never fsynced. | ✅ Created at open with a directory `fsync`; first write into an empty file fsyncs its directory (`fca9d31`) |
+| `R13-TX-05` | Medium | `IO` / `Transaction` | Contracts promised an append rollback that is only best effort. | ✅ Contracts and `include/nhe_o.h` say "decided by the next recovery" (`fca9d31`) |
+| `R13-TX-06` | Low | `IO` | `Get_File_Size` accepted a directory. | ✅ Opens `O_RDWR` (`fca9d31`) |
+| `R13-TX-07` | Low | `docs/` | Storage doc drift. | ✅ §1 rewritten (`fca9d31`) |
+| `R13-CA-02` | Medium | `C_API` | Deleting an absent document consumed a transaction id; thresholds were not checked on every outcome. | ✅ (`fca9d31`) |
+| `R13-CA-01`, `R13-CA-03` | — | `C_API` | Duplicates of `R13-TX-03` and `R13-TX-01`. | ✅ |
+| `R13-KV-01` | Medium | `KV` | GET and EXPIRE freed expired slots without logging, so replay diverged. | ✅ Reads never reclaim slots (`fca9d31`) |
+| `R13-KV-02` | Medium | Python SDK | `ctypes` silently wrapped out-of-range integers. | ✅ `_i64` / `_i32` range checks (`fca9d31`) |
+| `R13-KV-03` | Low | `KV` | Read recency was not durable. | ✅ Documented; `nhe_o_close` checkpoints (`fca9d31`) |
+| `R13-KV-04` | Low | Python SDK | `now_sec` defaulted to a frozen clock. | ✅ Current time (`fca9d31`) |
+| `R13-KV-05` | Low | `docs/` | `"KVMG"` byte 8 undocumented. | ✅ Slot hint documented (`fca9d31`) |
+| `R13-KV-06` | Low | `C_API` | Buffer comments wrong. | ✅ (`fca9d31`) |
+| `R13-IDX-01` | Medium | `Vector` / `RAG` | `"VTST"` kept about 7 significant digits, so Stage-2 "exact" re-ranking and recovery used a different vector than the one ingested. | ✅ Exact `"VTS2"` binary32 payload (`ADR-018`, `e2578b0`) |
+| `R13-IDX-02` | Low | `Vector` | SQ8 zeroed every vector whose largest component was tiny. | ✅ Scale kept whenever the maximum is positive (`e2578b0`) |
+| `R13-IDX-03` | Low | `docs/` | Lesson 06, `BR-006` and `ADR-006` described Stage 2 and `"VTST"` wrongly. | ✅ (`e2578b0`) |
+| `R13-IDX-04` | Low | `Vector` | `L2_Distance_Squared` labelled as pgvector `<->`. | ✅ (`e2578b0`) |
+| `R13-IDX-05` | Low | `docs/` | README and STATUS stated version `0.3.0`. | ✅ (`e2578b0`, docs pass) |
+| `R13-JS-01` | Low | `JSON` | Invalid JSON returned `Status_Capacity_Exceeded` when a limit violation preceded the syntax error. | ✅ Syntax checked first (`6be7569`) |
+| `R13-JS-02` | Low | `JSON` | `->` / `->>` return numbers and containers as their stored literal, not PostgreSQL's text. | ✅ Documented (jsonb-equal, not text-equal) (`ADR-015`, `6be7569`) |
+| `R13-JS-03` | Low | `C_API` | Ingest without metadata silently stored `{"source":"c_api"}`. | ✅ Empty object (`6be7569`) |
+| `R13-RAG-01` | Critical | `RAG` | Pages of a version superseded inside an active transaction were released while its WAL frames remained; a concurrent commit on the same pages was then overwritten, leaving the database unrecoverable. | ✅ Staged pages stay reserved while their transaction is active (`ADR-019`, `fc9571a`) |
+| `R13-RAG-02` | Medium | `RAG` | Lost updates and deletes of unseen versions were accepted (conflicts only against active writers). | ✅ Writer snapshots; conflict on a version committed after it (`ADR-010`, `fc9571a`) |
+| `R13-RAG-03` | Medium | `RAG` | `Freeze_RAG_Engine` promised id restart without stating that the WAL must be replaced first. | ✅ Documented obligation (`ADR-011`, `fc9571a`) |
+| `R13-RAG-04` | Medium | `RAG` | `Ingest_Document` committed metadata recovery rejects, making the database unopenable. | ✅ `Is_Valid_JSONB_Document` before any write (`fc9571a`) |
+| `R13-RAG-05` | Medium | `RAG` | TOAST pages below the high-water mark were never reused, growing the file without bound. | ✅ First-fit allocation (`ADR-019`, `fc9571a`) |
+| `R13-RAG-06` | Low | `RAG` | A committed delete was lost when the current version belonged to a poisoned transaction. | ✅ Poisoned transactions are rolled back at once (`fc9571a`) |
+| `R13-RAG-07` | Low | `RAG` | The single prior-version slot could hold a version no snapshot sees (own ingest then delete). | ✅ Own-delete collapses to the prior version (`fc9571a`) |
+| `R13-RAG-08` | Low | `RAG` | A snapshot taken before a freeze saw later commits. | ✅ Documented: snapshots do not survive a freeze (`ADR-011`, `fc9571a`) |
+| `R13-RAG-09` | Low | `RAG` | Failure-path comments misstated poisoning. | ✅ (`fc9571a`) |
+| `R13-RAG-10` | Low | `RAG` | `Contains_Keyword` decoded overlong UTF-8 as letters. | ✅ (`fc9571a`) |
+| `R13-RAG-11` | Low | `RAG` | U+1E9B was not case-folded. | ✅ (`fc9571a`) |
+| `R13-RAG-12` | Low | `docs/` | `BR-002` / `BR-006` predated the Round-12 MVCC rules. | ✅ (`fca9d31`, `fc9571a`) |
+
+The SQL reviewer of Round 13 found no defect (PostgreSQL 16, `pglast` and `scan.l` as oracles over more than 500k inputs).
 
