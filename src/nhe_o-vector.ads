@@ -65,7 +65,7 @@ package Nhe_O.Vector is
                     and then Make_Vector_3D'Result.Elements (2) = Y
                     and then Make_Vector_3D'Result.Elements (3) = Z;
 
-   --  pgvector `<->` operator: Squared Euclidean (L2) distance
+   --  Squared Euclidean (L2) distance (the square of pgvector `<->`, see L2_Distance)
    function L2_Distance_Squared
      (A, B : Vector_Value) return Non_Negative_Float
      with Global => null,
@@ -160,7 +160,7 @@ package Nhe_O.Vector is
           Pre    => A.Dim = B.Dim,
           Post   => Hamming_Distance'Result <= A.Dim;
 
-   --  8-byte TOAST Vector header: 4B magic ("VTST") + 4B big-endian dimension
+   --  8-byte TOAST Vector header: 4B magic ("VTS2"; legacy "VTST") + 4B big-endian dimension
    Vector_TOAST_Header_Size : constant := 8;
 
    function Vector_TOAST_Byte_Length
@@ -168,8 +168,10 @@ package Nhe_O.Vector is
      (Vector_TOAST_Header_Size + Dim * 4)
      with Global => null;
 
-   --  Serialize a Float32 Vector_Value (up to 4096-D = 16,392 bytes including
-   --  8B "VTST" header) into a TOAST_Payload_Buffer for TOAST overflow storage (Q-003)
+   --  Serialize a Float32 Vector_Value (up to 4096-D = 16,392 bytes including the 8B
+   --  header) into a TOAST_Payload_Buffer for TOAST overflow storage (Q-003): a "VTS2"
+   --  payload holding each component's exact IEEE 754 binary32 bit pattern (big-endian),
+   --  so Decode_Vector_TOAST returns the identical vector
    procedure Encode_Vector_TOAST
      (V       : in     Vector_Value;
       Payload :    out TOAST_Payload_Buffer;
@@ -178,7 +180,10 @@ package Nhe_O.Vector is
           Always_Terminates,
           Post   => Length = Vector_TOAST_Byte_Length (V.Dim);
 
-   --  Deserialize a Float32 Vector_Value of dimension Dim from a TOAST_Payload_Buffer (Q-003)
+   --  Deserialize a Float32 Vector_Value of dimension Dim from a TOAST_Payload_Buffer (Q-003).
+   --  Accepts "VTS2" (exact; infinities, NaNs and magnitudes above Max_Component are
+   --  rejected) and the legacy scaled-decimal "VTST" payload written before 0.4 (about
+   --  7 significant digits).
    procedure Decode_Vector_TOAST
      (Payload : in     TOAST_Payload_Buffer;
       Length  : in     Valid_TOAST_Length;

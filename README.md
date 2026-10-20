@@ -59,7 +59,7 @@ Following professional Ada Quality & Style Guide (`Mixed_Case_With_Underscores` 
 
 | Package / Unit | File(s) | Mode | Responsibility |
 |---|---|---|---|
-| `Nhe_O` | `src/nhe_o.ads` | `SPARK_Mode (On)` | Root constants, version (`0.3.0`), and engine bounds |
+| `Nhe_O` | `src/nhe_o.ads` | `SPARK_Mode (On)` | Root constants, version (`0.4.0`), and engine bounds |
 | `Nhe_O.Types` | `src/nhe_o-types.ad[sb]` | `SPARK_Mode (On)` | PostgreSQL data types, bounded buffers, and typed values |
 | `Nhe_O.Vector` | `src/nhe_o-vector.ad[sb]` | `SPARK_Mode (On)` | 4096-D `VECTOR(d)`, `Float32`/`Int8`/`Binary` quantization, and `<->`, `<=>`, `<#>` math |
 | `Nhe_O.JSON` | `src/nhe_o-json.ad[sb]` | `SPARK_Mode (On)` | `JSON`/`JSONB` structural validation and `->`, `->>`, `@>`, `?` operators |

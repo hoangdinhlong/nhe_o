@@ -1359,30 +1359,49 @@ begin
    Check (Deq_Vec_Sat.Elements (1) >= Max_Component - 1.0
           and then Deq_Vec_Sat.Elements (2) <= -Max_Component + 1.0);
 
-   --  Verify 4096-D Float32 TOAST serialization round-trip with "VTST" header & 15-tier precision (Q-003)
+   --  Verify the 4096-D Float32 TOAST round trip (Q-003): "VTS2" stores each component's
+   --  exact IEEE 754 binary32 pattern, so decoding returns the identical vector
    Encode_Vector_TOAST (Vec_4096_A, Vec_Toast_Buf, Vec_Toast_Len);
-   Check (Vec_Toast_Len = Vector_TOAST_Byte_Length (4096));
+   Check (Vec_Toast_Len = Vector_TOAST_Byte_Length (4096)
+          and then Vec_Toast_Buf (4) = Character'Pos ('2'));
    Decode_Vector_TOAST (Vec_Toast_Buf, Vec_Toast_Len, 4096, Vec_Dec_4096, Vec_Dec_Ok);
-   Check (Vec_Dec_Ok and then Vec_Dec_4096.Dim = 4096);
-   Check (abs (Vec_Dec_4096.Elements (1) - 1.0) < 0.0001
-          and then abs (Vec_Dec_4096.Elements (2048) - (-1.0)) < 0.0001);
+   Check (Vec_Dec_Ok and then Vec_Dec_4096 = Vec_4096_A);
 
-   Encode_Vector_TOAST (Make_Vector_3D (1.0e-7, 1.234567e-6, -9.876543e-4), Vec_Toast_Buf, Vec_Toast_Len);
+   --  Neighbouring floats, a value below 1e-28 and a subnormal survive bit for bit
+   Encode_Vector_TOAST
+     (Make_Vector_3D (1.0 + 2.0 ** (-22), -3.0e-30, 2.0 ** (-140)), Vec_Toast_Buf, Vec_Toast_Len);
    Check (Vec_Toast_Len = Vector_TOAST_Byte_Length (3));
    Decode_Vector_TOAST (Vec_Toast_Buf, Vec_Toast_Len, 3, Vec_Dec_Small, Vec_Dec_Ok);
-   Check (Vec_Dec_Ok
-          and then abs (Vec_Dec_Small.Elements (1) - 1.0e-7) < 1.0e-9
-          and then abs (Vec_Dec_Small.Elements (2) - 1.234567e-6) < 1.0e-11
-          and then abs (Vec_Dec_Small.Elements (3) - (-9.876543e-4)) < 1.0e-8);
+   Check (Vec_Dec_Ok and then Vec_Dec_Small = Make_Vector_3D (1.0 + 2.0 ** (-22), -3.0e-30, 2.0 ** (-140)));
    Decode_Vector_TOAST (Vec_Toast_Buf, Vec_Toast_Len, 4, Vec_Dec_Small, Vec_Dec_Ok);
    Check (not Vec_Dec_Ok);
+
+   --  An infinity or a magnitude above Max_Component is rejected
+   Vec_Toast_Buf (9 .. 12) := [16#7F#, 16#80#, 16#00#, 16#00#];
+   Decode_Vector_TOAST (Vec_Toast_Buf, Vec_Toast_Len, 3, Vec_Dec_Small, Vec_Dec_Ok);
+   Check (not Vec_Dec_Ok);
+   Vec_Toast_Buf (9 .. 12) := [16#49#, 16#80#, 16#00#, 16#00#];  --  2**20
+   Decode_Vector_TOAST (Vec_Toast_Buf, Vec_Toast_Len, 3, Vec_Dec_Small, Vec_Dec_Ok);
+   Check (not Vec_Dec_Ok);
+
+   --  A legacy "VTST" payload (scaled decimal words, 0.3 and earlier) still decodes:
+   --  code 11, mantissa 10**8 = 1.0, then two zero words
+   Vec_Toast_Buf := [1 => 16#56#, 2 => 16#54#, 3 => 16#53#, 4 => 16#54#, 8 => 3,
+                     9 => 16#5D#, 10 => 16#F5#, 11 => 16#E1#, 12 => 16#00#, others => 0];
+   Decode_Vector_TOAST (Vec_Toast_Buf, Vector_TOAST_Byte_Length (3), 3, Vec_Dec_Small, Vec_Dec_Ok);
+   Check (Vec_Dec_Ok and then Vec_Dec_Small = Make_Vector_3D (1.0, 0.0, 0.0));
+
+   --  SQ8 keeps a per-vector scale for tiny vectors instead of zeroing them
+   Check (Quantize_To_Int8 (Make_Vector_3D (1.0e-13, 0.0, 0.0)).Elements (1) = 127);
+   Check (Int8_L2_Distance (Quantize_To_Int8 (Make_Vector_3D (1.0e-13, 0.0, 0.0)),
+                            Quantize_To_Int8 (Make_Vector_3D (-1.0e-13, 0.0, 0.0))) > 0.0);
 
    Q_Bin_A  := Quantize_To_Binary (Vec_4096_A);
    Q_Bin_B  := Quantize_To_Binary (Vec_4096_B);
    Ham_Dist := Hamming_Distance (Q_Bin_A, Q_Bin_B);
    Check (Ham_Dist = 2);
    Check (Hamming_Distance (Q_Bin_A, Q_Bin_A) = 0);
-   Print_Line ("  => Passed: 4096-D Float32, SQ8 scale-aware L2, Binary Hamming, and 15-tier Vector TOAST verified.");
+   Print_Line ("  => Passed: 4096-D Float32, SQ8 scale-aware L2, Binary Hamming, and exact VTS2 Vector TOAST verified.");
 
    --  3. Verify PostgreSQL JSON / JSONB Engine (`->`, `->>`, `@>`, `?`)
    Print_Line ("[3/11] Verifying PostgreSQL JSON/JSONB Engine (Nhe_O.JSON)...");

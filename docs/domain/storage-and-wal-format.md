@@ -87,24 +87,27 @@ Defined in `src/nhe_o-transaction.ad[sb]` (`Encode_TOAST_Pointer`, `Decode_TOAST
 | `13 .. 16` | 4 B | `Chunk_CRC32` | IEEE 802.3 CRC-32 over payload bytes `17 .. 16 + Chunk_Bytes` |
 | `17 .. 4096` | 4080 B | `Chunk_Data` | Raw slice of oversized parent chunk, `"VTST"` 4096-D `Float32` vector, or `"RMET"` extended summary/JSONB metadata (trailing unused bytes `17 + Chunk_Bytes .. 4096` verified zeroed) |
 
-### 3.3 `"VTST"` Vector TOAST Payload (`Encode_Vector_TOAST`, `ADR-006`)
+### 3.3 Vector TOAST Payload (`"VTS2"`, legacy `"VTST"`; `Encode_Vector_TOAST`, `ADR-018`)
 | Byte Offset | Size | Field | Description |
 |---|---|---|---|
-| `1 .. 4` | 4 B | `Magic` | ASCII `"VTST"` (`16#56#, 16#54#, 16#53#, 16#54#`) |
-| `5 .. 8` | 4 B | `Dim` | Embedding dimension (`1 .. 4096`, 32-bit Big-Endian) |
-| `9 .. 8 + Dim*4` | `Dim * 4` B | `Elements (1..Dim)` | 32-bit Big-Endian scaled-decimal words: `Bit 31 = Sign`, `Bits 27..30 = Exp_Code (0..15)`, `Bits 0..26 = Mantissa M (0 .. 10^8)` (table below) |
+| `1 .. 4` | 4 B | `Magic` | ASCII `"VTS2"` (`16#56#, 16#54#, 16#53#, 16#32#`), written since `0.4`; legacy `"VTST"` (`16#56#, 16#54#, 16#53#, 16#54#`) is still decoded |
+| `5 .. 8` | 4 B | `Dim` | Embedding dimension (`1 .. 4096`, 32-bit Big-Endian), must equal the engine dimension |
+| `9 .. 8 + Dim*4` | `Dim * 4` B | `Elements (1..Dim)` | One 32-bit Big-Endian word per component (layout below) |
 
-The payload length must be exactly `8 + 4 * Dim` and `Dim` must equal the engine dimension; bytes past the length are not inspected. `Exp_Code` selects the magnitude band of `|x|` and the scale of the mantissa, `M = round (|x| * 10^(30 - 2c))` (code 14: `* 10^3`, code 15: `* 10^2`) capped at `10^8`:
+The payload length must be exactly `8 + 4 * Dim`; bytes past the length are not inspected. Every document's full embedding is stored this way at every dimension, and Stage-2 re-ranking reads it for every visible candidate.
+
+- **`"VTS2"` words** are the IEEE 754 binary32 bit pattern of the component (`Bit 31 = Sign`, `Bits 23..30 = biased exponent`, `Bits 0..22 = fraction`), computed arithmetically by `Float_Bits` (zero is written as `+0.0`). Decoding (`Bits_Float`) is exact, subnormals included, and rejects infinities, NaNs and magnitudes above `1.0e6` (`Max_Component`).
+- **Legacy `"VTST"` words** (written before `0.4`) are scaled decimals: `Bit 31 = Sign`, `Bits 27..30 = Exp_Code (0..15)`, `Bits 0..26 = Mantissa M (0 .. 10^8)`; decoding rejects `M > 10^8` and a code-0 word with the sign bit or a mantissa set, and caps magnitudes at `1.0e6`:
 
 | `Exp_Code` | Encoded `|x|` range | Decoded value |
 |---|---|---|
-| `0` | `x = 0.0` (also `-0.0`; sign bit and `M` must be `0`) | `0.0` |
+| `0` | `x = 0.0` | `0.0` |
 | `1` | `(0, 1e-20]` | `M * 1e-28` |
-| `2 .. 13` | `(10^(2c-24), 10^(2c-22)]` (e.g. `11`: `(1e-2, 1]`, `13`: `(1e2, 1e4]`) | `M * 10^(2c-30)` |
+| `2 .. 13` | `(10^(2c-24), 10^(2c-22)]` (e.g. `11`: `(1e-2, 1]`) | `M * 10^(2c-30)` |
 | `14` | `(1e4, 1e5]` | `M * 1e-3` |
 | `15` | `(1e5, 1e6]` | `M * 1e-2` |
 
-The mantissa keeps about 7 significant digits (`M` in `(10^6, 10^8]` for codes `2 .. 13`, `(10^7, 10^8]` for `14 .. 15`): the worst relative error is about `5.9e-7` for `|x|` in `(1e-22, 1e6]`; below `1e-22` precision degrades and values below `5e-29` decode to a signed zero. Decoding rejects `M > 10^8` and a code-0 word with the sign bit or a mantissa set; decoded magnitudes are capped at `1e6` (`Max_Component`).
+A legacy word keeps about 7 significant digits (worst relative error about `5.9e-7` for `|x|` in `(1e-22, 1e6]`, degrading below `1e-22`; values below `5e-29` were stored as zero).
 
 ### 3.4 `"RMET"` Extended Summary & JSONB Metadata TOAST Payload (`Encode_Meta_TOAST`, `ADR-006`)
 | Byte Offset | Size | Field | Description |
