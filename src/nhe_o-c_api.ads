@@ -42,15 +42,33 @@ package Nhe_O.C_API is
    type C_Vec_Buf is array (C_Vec_Index) of C_float
      with Convention => C;
 
-   --  Embedded C runtime state (KV Store, Pub/Sub Broker, Hybrid RAG Engine, and configurable paths)
-   G_Initialized : Boolean       := False;
-   G_Next_Tx     : Valid_Tx_Id   := 1;
-   G_Next_KV_Seq : Valid_Tx_Id   := 1;
-   G_DB_Path     : Bounded_Text  := (Length => 0, Data => [others => ' ']);
-   G_WAL_Path    : Bounded_Text  := (Length => 0, Data => [others => ' ']);
-   G_KV_Store    : KV_Store      := (others => <>);
-   G_Broker      : PubSub_Broker := (others => <>);
-   G_RAG_Engine  : RAG_Engine    := (others => <>);
+   --  Embedded C runtime state (KV Store, Pub/Sub Broker, Hybrid RAG Engine, and configurable
+   --  paths). The C ABI drives ONE process-wide engine and is NOT thread-safe: callers must
+   --  serialize every nhe_o_* call (the Python SDK holds a process-wide lock).
+   G_Initialized    : Boolean       := False;
+   G_Ephemeral      : Boolean       := False; --  scratch paths created by nhe_o_init
+   G_Next_Tx        : Valid_Tx_Id   := 1;
+   G_Next_KV_Seq    : Valid_Tx_Id   := 1;
+   G_DB_Path        : Bounded_Text  := (Length => 0, Data => [others => ' ']);
+   G_WAL_Path       : Bounded_Text  := (Length => 0, Data => [others => ' ']);
+   G_KV_Store       : KV_Store      := (others => <>);
+   G_Broker         : PubSub_Broker := (others => <>);
+   G_RAG_Engine     : RAG_Engine    := (others => <>);
+   --  Static scratch engine used by the checkpoint (keeps a RAG_Engine copy off the
+   --  caller's stack)
+   G_Scratch_Engine : RAG_Engine    := (others => <>);
+   --  Set by an I/O failure on a durable write path (WAL append, commit materialization,
+   --  checkpoint rename). Once set, every write returns C_Status_IO_Error until
+   --  nhe_o_init_with_paths reopens the database and recovery re-derives the durable
+   --  state from disk; reads keep serving the in-memory state.
+   G_Write_Fault    : Boolean       := False;
+
+   --  Automatic checkpoint thresholds (see C_Checkpoint): a checkpoint runs after a
+   --  durable write once the WAL holds Checkpoint_WAL_Frames frames or a transaction /
+   --  KV sequence id reaches Checkpoint_Tx_Id, keeping both far below their hard caps
+   --  (Max_WAL_Frames = 4096, Max_Tx_Id = 8192) and bounding per-commit WAL scans.
+   Checkpoint_WAL_Frames : constant := 512;
+   Checkpoint_Tx_Id      : constant := 4096;
 
    --  Map Engine_Status to C int status code
    function To_C_Status (S : Engine_Status) return int
@@ -63,24 +81,34 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_version_major";
 
-   --  Return Nhe_O minor version (3 = Epic 03/04 Formal Proof & Hardened C FFI SDK)
+   --  Return Nhe_O minor version (4 = Epic 04 crash-safe WAL repair, checkpoint & SI)
    function C_Version_Minor return int
      with Global        => null,
           Export        => True,
           Convention    => C,
           External_Name => "nhe_o_version_minor";
 
-   --  Initialize / reset embedded Nhe_O C runtime state with default paths and Dim = 3
+   --  Initialize / reset the embedded runtime as a scratch database (Dim = 3) on the
+   --  per-process paths /tmp/nhe_o_c_api.<pid>.db / .wal, deleting earlier contents of
+   --  those files only (C_Status_IO_Error if one of them cannot be removed);
+   --  nhe_o_close removes them again
    procedure C_Init (Out_Status : out int)
-     with Global        => (Output => (G_Initialized, G_Next_Tx, G_Next_KV_Seq, G_DB_Path,
-                                       G_WAL_Path, G_KV_Store, G_Broker, G_RAG_Engine)),
+     with Global        => (Output => (G_Initialized, G_Ephemeral, G_Next_Tx, G_Next_KV_Seq, G_DB_Path,
+                                       G_WAL_Path, G_KV_Store, G_Broker, G_RAG_Engine,
+                                       G_Write_Fault)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
           External_Name => "nhe_o_init";
 
    --  Initialize embedded Nhe_O C runtime state with caller-specified DB/WAL paths
-   --  and embedding dimension Dim in 1 .. 4096, recovering existing state when present
+   --  and embedding dimension Dim in 1 .. 4096, recovering existing state when present.
+   --  Relative paths are resolved against the current directory once, here; after that
+   --  resolution the WAL path must leave room for the 5-byte ".ckpt" checkpoint suffix
+   --  (at most Max_Text_Len - 5 bytes) and the two paths must name different files (also
+   --  through links). Recovery first repairs a torn WAL / database tail left by a crash,
+   --  then replays KV and committed RAG work, and finally checkpoints the WAL when it is
+   --  past the automatic thresholds (or its id space was exhausted by an older version).
    procedure C_Init_With_Paths
      (DB_Path_Buf  : in     C_Text_Buf;
       DB_Path_Len  : in     int;
@@ -88,12 +116,44 @@ package Nhe_O.C_API is
       WAL_Path_Len : in     int;
       Dim          : in     int;
       Out_Status   :    out int)
-     with Global        => (Output => (G_Initialized, G_Next_Tx, G_Next_KV_Seq, G_DB_Path,
-                                       G_WAL_Path, G_KV_Store, G_Broker, G_RAG_Engine)),
+     with Global        => (Output => (G_Initialized, G_Ephemeral, G_Next_Tx, G_Next_KV_Seq, G_DB_Path,
+                                       G_WAL_Path, G_KV_Store, G_Broker, G_RAG_Engine,
+                                       G_Write_Fault),
+                            In_Out => G_Scratch_Engine),
           Always_Terminates,
           Export        => True,
           Convention    => C,
           External_Name => "nhe_o_init_with_paths";
+
+   --  Release the runtime: state is cleared, G_Initialized becomes False, and the
+   --  scratch files of an nhe_o_init database are deleted (files given to
+   --  nhe_o_init_with_paths are kept). C_Status_IO_Error reports that a scratch file
+   --  could not be removed; the runtime is released either way.
+   procedure C_Close (Out_Status : out int)
+     with Global        => (In_Out => (G_Ephemeral, G_DB_Path, G_WAL_Path),
+                            Output => (G_Initialized, G_Next_Tx, G_Next_KV_Seq, G_KV_Store,
+                                       G_Broker, G_RAG_Engine, G_Write_Fault)),
+          Always_Terminates,
+          Export        => True,
+          Convention    => C,
+          External_Name => "nhe_o_close";
+
+   --  Checkpoint the WAL: freeze every live RAG version (transaction ids restart at 2),
+   --  write a fresh WAL "<wal>.ckpt" holding one slot-hinted SET frame per KV entry plus
+   --  a commit frame carrying the frozen Page 1, atomically rename it over the old WAL,
+   --  and fsync the directory. The rename is the commit point: a crash before it keeps
+   --  the old WAL, a crash after it recovers from the new one, and both describe the
+   --  same logical database. Refused (C_Status_IO_Error) while G_Write_Fault is set; a
+   --  failed directory fsync after the rename sets it. Runs automatically after durable
+   --  writes once Checkpoint_WAL_Frames / Checkpoint_Tx_Id is reached.
+   procedure C_Checkpoint (Out_Status : out int)
+     with Global        => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path, G_KV_Store),
+                            In_Out => (G_Next_Tx, G_Next_KV_Seq, G_RAG_Engine,
+                                       G_Scratch_Engine, G_Write_Fault)),
+          Always_Terminates,
+          Export        => True,
+          Convention    => C,
+          External_Name => "nhe_o_checkpoint";
 
    --  Analyze a PostgreSQL-dialect SQL query string
    procedure C_Analyze_SQL
@@ -147,8 +207,9 @@ package Nhe_O.C_API is
       Now_Sec    : in     Integer_64;
       TTL_Sec    : in     Integer_64;
       Out_Status :    out int)
-     with Global        => (Input  => (G_Initialized, G_WAL_Path),
-                            In_Out => (G_Next_KV_Seq, G_KV_Store)),
+     with Global        => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path),
+                            In_Out => (G_Next_KV_Seq, G_KV_Store, G_Next_Tx, G_RAG_Engine,
+                                       G_Scratch_Engine, G_Write_Fault)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -169,14 +230,17 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_kv_get";
 
-   --  Redis DEL operation via C ABI (durable WAL append)
+   --  Redis DEL operation at timestamp Now_Sec via C ABI (durable WAL append);
+   --  Out_Removed = 1 iff the key was live (present and not expired) at Now_Sec
    procedure C_KV_Del
      (Key_Buf     : in     C_Ident_Buf;
       Key_Len     : in     int;
+      Now_Sec     : in     Integer_64;
       Out_Removed :    out int;
       Out_Status  :    out int)
-     with Global        => (Input  => (G_Initialized, G_WAL_Path),
-                            In_Out => (G_Next_KV_Seq, G_KV_Store)),
+     with Global        => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path),
+                            In_Out => (G_Next_KV_Seq, G_KV_Store, G_Next_Tx, G_RAG_Engine,
+                                       G_Scratch_Engine, G_Write_Fault)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -203,8 +267,9 @@ package Nhe_O.C_API is
       TTL_Sec     : in     Integer_64;
       Out_Updated :    out int;
       Out_Status  :    out int)
-     with Global        => (Input  => (G_Initialized, G_WAL_Path),
-                            In_Out => (G_Next_KV_Seq, G_KV_Store)),
+     with Global        => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path),
+                            In_Out => (G_Next_KV_Seq, G_KV_Store, G_Next_Tx, G_RAG_Engine,
+                                       G_Scratch_Engine, G_Write_Fault)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -231,8 +296,9 @@ package Nhe_O.C_API is
       Now_Sec     : in     Integer_64;
       Out_New_Val :    out Integer_64;
       Out_Status  :    out int)
-     with Global        => (Input  => (G_Initialized, G_WAL_Path),
-                            In_Out => (G_Next_KV_Seq, G_KV_Store)),
+     with Global        => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path),
+                            In_Out => (G_Next_KV_Seq, G_KV_Store, G_Next_Tx, G_RAG_Engine,
+                                       G_Scratch_Engine, G_Write_Fault)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -293,7 +359,8 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_pubsub_poll";
 
-   --  Hybrid RAG Document Ingestion (3D embedding + TOAST parent chunk + WAL commit) via C ABI
+   --  Hybrid RAG Document Ingestion (3D embedding + TOAST parent chunk + WAL commit) via C ABI;
+   --  the summary doubles as the parent chunk, so Summary_Len must be at least 1
    procedure C_RAG_Ingest_3D
      (Doc_Id         : in     int;
       Summary_Buf    : in     C_Text_Buf;
@@ -301,14 +368,16 @@ package Nhe_O.C_API is
       VX, VY, VZ     : in     C_float;
       Related_Doc_Id : in     int;
       Out_Status     :    out int)
-     with Global        => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path),
-                            In_Out => (G_Next_Tx, G_Broker, G_RAG_Engine)),
+     with Global        => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path, G_KV_Store),
+                            In_Out => (G_Next_Tx, G_Next_KV_Seq, G_Broker, G_RAG_Engine,
+                                       G_Scratch_Engine, G_Write_Fault)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
           External_Name => "nhe_o_rag_ingest_3d";
 
-   --  Hybrid RAG Document Ingestion for N-D vectors (1 .. 4096-D)
+   --  Hybrid RAG Document Ingestion for N-D vectors (1 .. 4096-D); the summary doubles as
+   --  the parent chunk, so Summary_Len must be at least 1
    procedure C_RAG_Ingest_ND
      (Doc_Id         : in     int;
       Summary_Buf    : in     C_Text_Buf;
@@ -317,14 +386,18 @@ package Nhe_O.C_API is
       Dim            : in     int;
       Related_Doc_Id : in     int;
       Out_Status     :    out int)
-     with Global        => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path),
-                            In_Out => (G_Next_Tx, G_Broker, G_RAG_Engine)),
+     with Global        => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path, G_KV_Store),
+                            In_Out => (G_Next_Tx, G_Next_KV_Seq, G_Broker, G_RAG_Engine,
+                                       G_Scratch_Engine, G_Write_Fault)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
           External_Name => "nhe_o_rag_ingest_nd";
 
-   --  Hybrid RAG Document Ingestion with JSONB Metadata + Full 16KB TOAST Parent Payload
+   --  Hybrid RAG Document Ingestion with JSONB Metadata + Full 16KB TOAST Parent Payload.
+   --  Parent_Len = 0 stores the summary as the parent chunk; C_Status_Invalid_Arg when
+   --  both Summary_Len and Parent_Len are 0. Every RAG write is one transaction: a
+   --  C_Status_Ok return means its commit barrier is durable in the WAL.
    procedure C_RAG_Ingest_Full_ND
      (Doc_Id         : in     int;
       Meta_JSON_Buf  : in     C_Text_Buf;
@@ -337,8 +410,9 @@ package Nhe_O.C_API is
       Dim            : in     int;
       Related_Doc_Id : in     int;
       Out_Status     :    out int)
-     with Global        => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path),
-                            In_Out => (G_Next_Tx, G_Broker, G_RAG_Engine)),
+     with Global        => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path, G_KV_Store),
+                            In_Out => (G_Next_Tx, G_Next_KV_Seq, G_Broker, G_RAG_Engine,
+                                       G_Scratch_Engine, G_Write_Fault)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -348,14 +422,16 @@ package Nhe_O.C_API is
    procedure C_RAG_Delete
      (Doc_Id     : in     int;
       Out_Status :    out int)
-     with Global        => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path),
-                            In_Out => (G_Next_Tx, G_RAG_Engine)),
+     with Global        => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path, G_KV_Store),
+                            In_Out => (G_Next_Tx, G_Next_KV_Seq, G_Broker, G_RAG_Engine,
+                                       G_Scratch_Engine, G_Write_Fault)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
           External_Name => "nhe_o_rag_delete";
 
-   --  Hybrid RAG Query (3D) via C ABI
+   --  Hybrid RAG Query (3D) via C ABI; Out_Parent_Bytes is the full byte length of the
+   --  top hit's TOAST parent chunk (no text is returned)
    procedure C_RAG_Query_3D
      (QX, QY, QZ       : in     C_float;
       Encoding_Mode    : in     int;
@@ -368,14 +444,15 @@ package Nhe_O.C_API is
       Out_Parent_Bytes :    out int;
       Out_Graph_Hit    :    out int;
       Out_Status       :    out int)
-     with Global        => (Input => (G_Initialized, G_DB_Path, G_Next_Tx, G_RAG_Engine)),
+     with Global        => (Input => (G_Initialized, G_DB_Path, G_RAG_Engine)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
           External_Name => "nhe_o_rag_query_3d";
 
-   --  Hybrid RAG Query for N-D vectors (1 .. 4096-D) returning retrieved TOAST
-   --  parent text in Out_Parent_Buf
+   --  Hybrid RAG Query for N-D vectors (1 .. 4096-D) returning at most the first 512
+   --  bytes of the retrieved TOAST parent text in Out_Parent_Buf; Out_Parent_Len is the
+   --  number of bytes written (use nhe_o_rag_query_full_nd for the full 16 KB chunk)
    procedure C_RAG_Query_ND
      (Query_Vec_Buf    : in     C_Vec_Buf;
       Dim              : in     int;
@@ -390,7 +467,7 @@ package Nhe_O.C_API is
       Out_Parent_Len   :    out int;
       Out_Graph_Hit    :    out int;
       Out_Status       :    out int)
-     with Global        => (Input => (G_Initialized, G_DB_Path, G_Next_Tx, G_RAG_Engine)),
+     with Global        => (Input => (G_Initialized, G_DB_Path, G_RAG_Engine)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -413,7 +490,7 @@ package Nhe_O.C_API is
       Out_Parent_Len   :    out int;
       Out_Graph_Hit    :    out int;
       Out_Status       :    out int)
-     with Global        => (Input => (G_Initialized, G_DB_Path, G_Next_Tx, G_RAG_Engine)),
+     with Global        => (Input => (G_Initialized, G_DB_Path, G_RAG_Engine)),
           Always_Terminates,
           Export        => True,
           Convention    => C,

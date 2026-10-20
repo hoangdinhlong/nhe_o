@@ -1,6 +1,6 @@
 name = "nhe_o"
 description = "Formally verified SQL, Vector, JSONB, KV & GraphRAG DBMS in SPARK"
-version = "0.3.0"
+version = "0.4.0"
 
 authors = ["Long Hoang"]
 maintainers = ["Long Hoang <hoangdinhlong@users.noreply.github.com>"]

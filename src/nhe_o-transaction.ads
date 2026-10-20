@@ -56,15 +56,6 @@ package Nhe_O.Transaction is
      (if Id in CLOG_Tx_Index then CLOG (Id) = Tx_Committed
       else False);
 
-   --  MVCC Snapshot Visibility Rule (BR-002):
-   --  Visible iff created at or before Snapshot and either un-deleted (Xmax = 0)
-   --  or deleted strictly after Snapshot.
-   function Is_Tuple_Visible
-     (Tuple    : MVCC_Tuple_Header;
-      Snapshot : Valid_Tx_Id) return Boolean
-   is
-     (Tuple.Xmin <= Snapshot and then (Tuple.Xmax = 0 or else Tuple.Xmax > Snapshot));
-
    --  CLOG-Verified MVCC Snapshot Visibility Rule (BR-002):
    --  Visible iff inserting tx (Xmin) is committed and <= Snapshot, and either Xmax = 0,
    --  Xmax aborted/uncommitted in CLOG, or Xmax > Snapshot.
@@ -128,9 +119,38 @@ package Nhe_O.Transaction is
           Pre    => Next_Tx < Max_Tx_Id,
           Post   => Ctx.State = Tx_Active
                     and then Ctx.Id = Next_Tx'Old
+                    and then Ctx.Snapshot = Ctx.Id
                     and then Next_Tx = Next_Tx'Old + 1;
 
-   --  Commit an active transaction: writes WAL commit frame & slotted page via Nhe_O.IO (BR-002)
+   --  Commit an active transaction (BR-002 / ADR-006). The commit point is the durable
+   --  append of the WAL_Frame_Commit barrier frame (carrying Page as its payload):
+   --  * barrier not appended   => Status /= Status_Ok, Ctx.State = Tx_Aborted, and the
+   --    WAL is left exactly as before the call (nothing to replay);
+   --  * barrier appended       => Status = Status_Ok and Ctx.State = Tx_Committed, even if
+   --    materializing the staged WAL_Frame_Data pages (and Page) into DB_Path then fails.
+   --    In that case Flush_Pending is True: the database file is stale until
+   --    Redo_WAL_Recovery replays the committed frames, which callers should run next.
+   procedure Commit_Tx
+     (Ctx           : in out Transaction_Context;
+      DB_Path       : in     Bounded_Text;
+      WAL_Path      : in     Bounded_Text;
+      Page_Id       : in     Valid_Page_Id;
+      Page          : in     Page_Buffer;
+      Status        :    out Engine_Status;
+      Flush_Pending :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Ctx.State = Tx_Active
+                    and then DB_Path.Length > 0
+                    and then WAL_Path.Length > 0,
+          Post   => Ctx.Id = Ctx.Id'Old
+                    and then Ctx.Snapshot = Ctx.Snapshot'Old
+                    and then Ctx.State in Tx_Committed | Tx_Aborted
+                    and then (Status = Status_Ok) = (Ctx.State = Tx_Committed)
+                    and then (if Flush_Pending then Status = Status_Ok);
+
+   --  Commit_Tx for callers that re-run Redo_WAL_Recovery themselves before trusting
+   --  DB_Path; identical outcome without reporting Flush_Pending
    procedure Commit_Tx
      (Ctx      : in out Transaction_Context;
       DB_Path  : in     Bounded_Text;
@@ -143,8 +163,10 @@ package Nhe_O.Transaction is
           Pre    => Ctx.State = Tx_Active
                     and then DB_Path.Length > 0
                     and then WAL_Path.Length > 0,
-          Post   => (if Status = Status_Ok then Ctx.State = Tx_Committed
-                     else Ctx.State = Tx_Aborted);
+          Post   => Ctx.Id = Ctx.Id'Old
+                    and then Ctx.Snapshot = Ctx.Snapshot'Old
+                    and then Ctx.State in Tx_Committed | Tx_Aborted
+                    and then (Status = Status_Ok) = (Ctx.State = Tx_Committed);
 
    --  Rollback an active transaction
    procedure Rollback_Tx
@@ -228,7 +250,8 @@ package Nhe_O.Transaction is
                        and then Ptr.Total_Byte_Length = Length
                        and then Ptr.Chunk_Count =
                          ((Length - 1) / TOAST_Chunk_Max_Bytes) + 1
-                       and then Ptr.Chunk_Count in 1 .. Max_TOAST_Chunks);
+                       and then Ptr.Chunk_Count in 1 .. Max_TOAST_Chunks
+                       and then Ptr.Payload_CRC32 = Compute_Payload_CRC32 (Payload, Length));
 
    --  Read and reassemble a multi-page TOAST payload, verifying every page link and CRC32
    procedure Read_TOAST_Chain
@@ -242,7 +265,10 @@ package Nhe_O.Transaction is
           Pre    => DB_Path.Length > 0
                     and then Ptr.Total_Byte_Length in 1 .. Max_TOAST_Payload_Bytes
                     and then Ptr.Chunk_Count in 1 .. Max_TOAST_Chunks,
-          Post   => (if Status = Status_Ok then Length = Ptr.Total_Byte_Length
+          Post   => (if Status = Status_Ok then
+                       Length = Ptr.Total_Byte_Length
+                       and then Compute_Payload_CRC32 (Payload, Ptr.Total_Byte_Length) =
+                                  Ptr.Payload_CRC32
                      else Length = 0);
 
    -------------------------------------------------------------------------
@@ -277,7 +303,11 @@ package Nhe_O.Transaction is
    end record;
 
    --  Serialize a Slotted_Page (24B header + 16x8B line pointer directory + 16x240B
-   --  MVCC/TOAST/inline tuples + IEEE 802.3 CRC32) into a 4096-byte Page_Buffer
+   --  MVCC/TOAST/inline tuples + IEEE 802.3 CRC32) into a 4096-byte Page_Buffer.
+   --  The header Slot_Count is derived from the Occupied flags (Page_Rec.Slot_Count is
+   --  ignored) and unoccupied slots are always written in their canonical default form,
+   --  so Decode_Slotted_Page accepts the result whenever every occupied tuple carries an
+   --  all-zero or self-consistent TOAST pointer.
    procedure Encode_Slotted_Page
      (Page_Rec : in     Slotted_Page;
       Raw_Page :    out Page_Buffer)
@@ -290,23 +320,62 @@ package Nhe_O.Transaction is
       Page_Rec :    out Slotted_Page;
       Valid    :    out Boolean)
      with Global => null,
-          Always_Terminates;
+          Always_Terminates,
+          Post   => (if not Valid then Page_Rec = Slotted_Page'(others => <>));
 
-   --  Crash-recovery WAL Redo Pass: scan WAL frames, verify CRC32, identify committed
-   --  transactions (WAL_Frame_Commit), and replay only committed frames to DB
+   --  Crash-recovery tail repair for the WAL (run before any recovery scan):
+   --  a crash or failed write during Append_WAL_Frame can only leave an unacknowledged
+   --  frame at the very end of the log, either as a partial trailing frame (file size
+   --  not a multiple of WAL_Frame_Size) or as a final complete frame that fails
+   --  Verify_WAL_Frame. Both are truncated away. Any invalid frame before the last one is
+   --  mid-log corruption and fails closed with Status_IO_Error; so does a WAL holding
+   --  more than Max_WAL_Frames frames. A missing WAL is not an error.
+   procedure Repair_WAL_Tail
+     (WAL_Path : in     Bounded_Text;
+      Status   :    out Engine_Status)
+     with Global => null,
+          Always_Terminates,
+          Pre    => WAL_Path.Length > 0,
+          Post   => Status in Status_Ok | Status_IO_Error;
+
+   --  Crash-recovery tail repair for the database file: a crash while extending DB_Path
+   --  can leave a partial trailing page. Every page of DB_Path is materialized from a
+   --  committed WAL frame (NO-STEAL), so the partial page is truncated away and rebuilt by
+   --  the Redo_WAL_Recovery replay that must follow. A missing file is not an error.
+   procedure Repair_DB_Tail
+     (DB_Path : in     Bounded_Text;
+      Status  :    out Engine_Status)
+     with Global => null,
+          Always_Terminates,
+          Pre    => DB_Path.Length > 0,
+          Post   => Status in Status_Ok | Status_IO_Error;
+
+   --  Crash-recovery WAL Redo: repair torn WAL/DB tails (Repair_WAL_Tail, Repair_DB_Tail),
+   --  then Pass 1 verifies every frame (CRC32) and records the committed transactions
+   --  (WAL_Frame_Commit; a second commit frame for the same transaction is corruption),
+   --  and Pass 2 replays in COMMIT order: for each commit frame, the data frames that
+   --  transaction staged before its barrier, then the barrier's own page. This is exactly
+   --  the order in which Commit_Tx materialized them at run time. Data frames of
+   --  uncommitted transactions, and data frames appearing after their transaction's
+   --  barrier (a reused transaction id), are never replayed.
+   --  Max_Seen_Tx is the largest transaction id carried by any WAL_Frame_Data or
+   --  WAL_Frame_Commit frame (committed or not): Next_Tx must be seeded above it so a
+   --  crashed transaction's staged frames can never be committed by a reused id.
    procedure Redo_WAL_Recovery
      (DB_Path          : in     Bounded_Text;
       WAL_Path         : in     Bounded_Text;
       Max_Frames       : in     Positive;
       Replayed_Count   :    out Natural;
       Max_Recovered_Tx :    out Tx_Id;
+      Max_Seen_Tx      :    out Tx_Id;
       Status           :    out Engine_Status)
      with Global => null,
           Always_Terminates,
           Pre    => DB_Path.Length > 0
                     and then WAL_Path.Length > 0
                     and then Max_Frames <= Max_Page_Id,
-          Post   => Replayed_Count <= Max_Frames;
+          Post   => Replayed_Count <= Max_Frames
+                    and then Max_Recovered_Tx <= Max_Seen_Tx;
 
 end Nhe_O.Transaction;
 

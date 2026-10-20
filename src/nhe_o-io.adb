@@ -1,7 +1,8 @@
 --  Formally Verified Physical I/O Implementation Body (BR-001 / ADR-002)
 --  Operates under pragma SPARK_Mode (On) by binding directly to exception-free
---  POSIX kernel syscalls (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `close`,
---  `unlink`, `access`) with explicit return-code verification and bounded offset arithmetic.
+--  POSIX kernel syscalls (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `ftruncate`,
+--  `close`, `rename`, `stat`, `unlink`, `access`, `getcwd`, `getpid`) with explicit
+--  return-code verification and bounded offset arithmetic.
 pragma SPARK_Mode (On);
 
 with Ada.Command_Line;
@@ -13,12 +14,15 @@ package body Nhe_O.IO is
    subtype Ssize_T is Interfaces.Integer_64;
    subtype Off_T   is Interfaces.Integer_64;
 
-   use type Interfaces.Integer_64;
+   use type Interfaces.Unsigned_8;
 
-   --  POSIX open(2) / lseek(2) flags for x86_64-linux-gnu target (0600 octal = S_IRUSR | S_IWUSR)
+   --  POSIX open(2) / lseek(2) flags for Linux (x86_64 and aarch64 share these values;
+   --  0600 octal = S_IRUSR | S_IWUSR). O_NONBLOCK keeps open(2) on a FIFO from
+   --  blocking forever; the following lseek(2) then fails closed with ESPIPE.
    O_RDONLY       : constant int      := 8#0#;
    O_RDWR         : constant int      := 8#2#;
    O_CREAT        : constant int      := 8#100#;
+   O_NONBLOCK     : constant int      := 8#4000#;
    O_CLOEXEC      : constant int      := 8#2000000#;
    Mode_0600      : constant unsigned := 8#600#;
    SEEK_END       : constant int      := 2;
@@ -103,6 +107,16 @@ package body Nhe_O.IO is
           Convention    => C,
           External_Name => "fsync";
 
+   function Posix_Ftruncate
+     (Fd     : int;
+      Length : Off_T) return int
+     with Side_Effects,
+          Global        => null,
+          Always_Terminates,
+          Import        => True,
+          Convention    => C,
+          External_Name => "ftruncate";
+
    function Posix_Close (Fd : int) return int
      with Side_Effects,
           Global        => null,
@@ -119,6 +133,50 @@ package body Nhe_O.IO is
           Convention    => C,
           External_Name => "unlink";
 
+   function Posix_Rename
+     (Old_Path : C_Path_String;
+      New_Path : C_Path_String) return int
+     with Side_Effects,
+          Global        => null,
+          Always_Terminates,
+          Import        => True,
+          Convention    => C,
+          External_Name => "rename";
+
+   --  Opaque `struct stat` buffer: st_dev occupies bytes 1 .. 8 and st_ino bytes
+   --  9 .. 16 on both x86_64 and aarch64 Linux; 256 bytes covers either layout
+   subtype Stat_Index is Positive range 1 .. 256;
+   type Stat_Buffer is array (Stat_Index) of Byte
+     with Convention => C;
+
+   function Posix_Stat
+     (Path : C_Path_String;
+      Buf  : in out Stat_Buffer) return int
+     with Side_Effects,
+          Global        => null,
+          Always_Terminates,
+          Import        => True,
+          Convention    => C,
+          External_Name => "stat";
+
+   --  getcwd(3) returns a char * (NULL on failure); on LP64 Linux it is bound as a
+   --  pointer-sized unsigned integer and only compared against 0
+   function Posix_Getcwd
+     (Buf  : in out C_Path_String;
+      Size : size_t) return size_t
+     with Side_Effects,
+          Global        => null,
+          Always_Terminates,
+          Import        => True,
+          Convention    => C,
+          External_Name => "getcwd";
+
+   function Posix_Getpid return int
+     with Global        => null,
+          Import        => True,
+          Convention    => C,
+          External_Name => "getpid";
+
    F_OK : constant int := 0;
 
    function Posix_Access
@@ -134,7 +192,9 @@ package body Nhe_O.IO is
    function Has_Embedded_NUL (Path : Bounded_Text) return Boolean is
    begin
       for I in 1 .. Path.Length loop
-         pragma Loop_Invariant (I in 1 .. Path.Length);
+         pragma Loop_Invariant
+           (I in 1 .. Path.Length
+            and then (for all J in 1 .. I - 1 => Path.Data (J) /= ASCII.NUL));
          if Path.Data (I) = ASCII.NUL then
             return True;
          end if;
@@ -174,6 +234,266 @@ package body Nhe_O.IO is
       Exists := (Rc = 0);
    end Check_File_Exists;
 
+   procedure Get_File_Size
+     (File_Path : in     Bounded_Text;
+      Size      :    out File_Size;
+      Success   :    out Boolean)
+   is
+      C_Path  : C_Path_String;
+      Fd      : int;
+      End_Pos : Off_T;
+      Close_R : int;
+   begin
+      Size    := 0;
+      Success := False;
+
+      if Has_Embedded_NUL (File_Path) then
+         return;
+      end if;
+
+      To_C_Path (File_Path, C_Path);
+      Fd := Posix_Open (C_Path, O_RDONLY + O_NONBLOCK + O_CLOEXEC, 0);
+      if Fd < 0 then
+         return;
+      end if;
+
+      End_Pos := Posix_Lseek (Fd, 0, SEEK_END);
+      Close_R := Posix_Close (Fd);
+      if End_Pos >= 0 and then Close_R = 0 then
+         Size    := End_Pos;
+         Success := True;
+      end if;
+   end Get_File_Size;
+
+   procedure Truncate_File
+     (File_Path : in     Bounded_Text;
+      New_Size  : in     File_Size;
+      Success   :    out Boolean)
+   is
+      C_Path  : C_Path_String;
+      Fd      : int;
+      Trunc_R : int;
+      Sync_Rc : int;
+      Close_R : int;
+      pragma Warnings (Off, Close_R);
+   begin
+      if Has_Embedded_NUL (File_Path) then
+         Success := False;
+         return;
+      end if;
+
+      To_C_Path (File_Path, C_Path);
+      Fd := Posix_Open (C_Path, O_RDWR + O_NONBLOCK + O_CLOEXEC, 0);
+      if Fd < 0 then
+         Success := False;
+         return;
+      end if;
+
+      Trunc_R := Posix_Ftruncate (Fd, New_Size);
+      Sync_Rc := Posix_Fsync (Fd);
+      Close_R := Posix_Close (Fd);
+      Success := (Trunc_R = 0) and then (Sync_Rc = 0);
+   end Truncate_File;
+
+   --  fsync the directory containing File_Path so that a rename(2) or file creation
+   --  inside it is durable
+   procedure Sync_Parent_Directory
+     (File_Path : in     Bounded_Text;
+      Success   :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => File_Path.Length > 0
+   is
+      Dir_Path   : Bounded_Text := (Length => 0, Data => [others => ' ']);
+      Last_Slash : Natural      := 0;
+      C_Path     : C_Path_String;
+      Fd         : int;
+      Sync_Rc    : int;
+      Close_R    : int;
+      pragma Warnings (Off, Close_R);
+   begin
+      for I in 1 .. File_Path.Length loop
+         pragma Loop_Invariant (Last_Slash < I);
+         if File_Path.Data (I) = '/' then
+            Last_Slash := I;
+         end if;
+      end loop;
+
+      if Last_Slash = 0 then
+         Dir_Path := Make_Text (".");
+      elsif Last_Slash = 1 then
+         Dir_Path := Make_Text ("/");
+      else
+         Dir_Path.Length := Last_Slash - 1;
+         for I in 1 .. Last_Slash - 1 loop
+            pragma Loop_Invariant (Dir_Path.Length = Last_Slash - 1);
+            Dir_Path.Data (I) := File_Path.Data (I);
+         end loop;
+      end if;
+
+      if Has_Embedded_NUL (Dir_Path) then
+         Success := False;
+         return;
+      end if;
+
+      To_C_Path (Dir_Path, C_Path);
+      Fd := Posix_Open (C_Path, O_RDONLY + O_NONBLOCK + O_CLOEXEC, 0);
+      if Fd < 0 then
+         Success := False;
+         return;
+      end if;
+
+      Sync_Rc := Posix_Fsync (Fd);
+      Close_R := Posix_Close (Fd);
+      Success := (Sync_Rc = 0);
+   end Sync_Parent_Directory;
+
+   procedure Create_File_If_Missing
+     (File_Path : in     Bounded_Text;
+      Success   :    out Boolean)
+   is
+      C_Path  : C_Path_String;
+      Fd      : int;
+      Sync_Rc : int;
+      Close_R : int;
+      Dir_Ok  : Boolean;
+   begin
+      if Has_Embedded_NUL (File_Path) then
+         Success := False;
+         return;
+      end if;
+
+      To_C_Path (File_Path, C_Path);
+      Fd := Posix_Open (C_Path, O_RDWR + O_CREAT + O_NONBLOCK + O_CLOEXEC, Mode_0600);
+      if Fd < 0 then
+         Success := False;
+         return;
+      end if;
+
+      Sync_Rc := Posix_Fsync (Fd);
+      Close_R := Posix_Close (Fd);
+      Sync_Parent_Directory (File_Path, Dir_Ok);
+      Success := Sync_Rc = 0 and then Close_R = 0 and then Dir_Ok;
+   end Create_File_If_Missing;
+
+   procedure Replace_File
+     (Src_Path : in     Bounded_Text;
+      Dst_Path : in     Bounded_Text;
+      Success  :    out Boolean)
+   is
+      C_Src : C_Path_String;
+      C_Dst : C_Path_String;
+      Rc    : int;
+   begin
+      if Has_Embedded_NUL (Src_Path) or else Has_Embedded_NUL (Dst_Path) then
+         Success := False;
+         return;
+      end if;
+
+      To_C_Path (Src_Path, C_Src);
+      To_C_Path (Dst_Path, C_Dst);
+      Rc := Posix_Rename (C_Src, C_Dst);
+      if Rc /= 0 then
+         Success := False;
+         return;
+      end if;
+
+      Sync_Parent_Directory (Dst_Path, Success);
+   end Replace_File;
+
+   procedure Check_Same_File
+     (Path_A : in     Bounded_Text;
+      Path_B : in     Bounded_Text;
+      Same   :    out Boolean)
+   is
+      C_A   : C_Path_String;
+      C_B   : C_Path_String;
+      Buf_A : Stat_Buffer := [others => 0];
+      Buf_B : Stat_Buffer := [others => 0];
+      Rc_A  : int;
+      Rc_B  : int;
+   begin
+      Same := False;
+      if Has_Embedded_NUL (Path_A) or else Has_Embedded_NUL (Path_B) then
+         return;
+      end if;
+
+      To_C_Path (Path_A, C_A);
+      To_C_Path (Path_B, C_B);
+      Rc_A := Posix_Stat (C_A, Buf_A);
+      Rc_B := Posix_Stat (C_B, Buf_B);
+      if Rc_A = 0 and then Rc_B = 0 then
+         Same := (for all I in 1 .. 16 => Buf_A (I) = Buf_B (I));
+      end if;
+   end Check_Same_File;
+
+   function Get_Process_Id return Natural is
+      Pid : constant int := Posix_Getpid;
+   begin
+      if Pid > 0 then
+         return Natural (Pid);
+      else
+         return 0;
+      end if;
+   end Get_Process_Id;
+
+   procedure Make_Absolute_Path
+     (Path     : in     Bounded_Text;
+      Abs_Path :    out Bounded_Text;
+      Success  :    out Boolean)
+   is
+      Cwd     : C_Path_String := [others => ASCII.NUL];
+      Cwd_Ptr : size_t;
+      Cwd_Len : Natural := 0;
+      Sep_Len : Natural;
+   begin
+      if Path.Data (1) = '/' then
+         Abs_Path := Path;
+         Success  := True;
+         return;
+      end if;
+
+      Abs_Path := (Length => 0, Data => [others => ' ']);
+      Success  := False;
+
+      Cwd_Ptr := Posix_Getcwd (Cwd, size_t (Max_C_Path_Length));
+      if Cwd_Ptr = 0 or else Cwd (1) /= '/' then
+         return;
+      end if;
+
+      --  Length of the NUL-terminated working directory string
+      for I in C_Path_Index loop
+         pragma Loop_Invariant (Cwd_Len = I - 1);
+         exit when Cwd (I) = ASCII.NUL;
+         Cwd_Len := I;
+      end loop;
+
+      if Cwd_Len = 0 or else Cwd_Len > Max_Text_Len then
+         return;
+      end if;
+
+      Sep_Len := (if Cwd (Cwd_Len) = '/' then 0 else 1);
+      if Cwd_Len + Sep_Len + Path.Length > Max_Text_Len then
+         return;
+      end if;
+
+      Abs_Path.Length := Cwd_Len + Sep_Len + Path.Length;
+      for I in 1 .. Cwd_Len loop
+         pragma Loop_Invariant (Abs_Path.Length = Cwd_Len + Sep_Len + Path.Length);
+         Abs_Path.Data (I) := Cwd (I);
+      end loop;
+      if Sep_Len = 1 then
+         Abs_Path.Data (Cwd_Len + 1) := '/';
+      end if;
+      for I in 1 .. Path.Length loop
+         pragma Loop_Invariant
+           (Abs_Path.Length = Cwd_Len + Sep_Len + Path.Length
+            and then Abs_Path.Data (1) = '/');
+         Abs_Path.Data (Cwd_Len + Sep_Len + I) := Path.Data (I);
+      end loop;
+      Success := True;
+   end Make_Absolute_Path;
+
    procedure Write_Page
      (File_Path : in     Bounded_Text;
       Page_Id   : in     Valid_Page_Id;
@@ -186,7 +506,9 @@ package body Nhe_O.IO is
       Offset  : constant Off_T := Off_T (Page_Id) * Off_T (Nhe_O.Page_Size);
       Written : Ssize_T;
       Sync_Rc : int;
+      Trunc_R : int;
       Close_R : int;
+      pragma Warnings (Off, Trunc_R);
       pragma Warnings (Off, Close_R);
    begin
       if Has_Embedded_NUL (File_Path) then
@@ -195,7 +517,7 @@ package body Nhe_O.IO is
       end if;
 
       To_C_Path (File_Path, C_Path);
-      Fd := Posix_Open (C_Path, O_RDWR + O_CREAT + O_CLOEXEC, Mode_0600);
+      Fd := Posix_Open (C_Path, O_RDWR + O_CREAT + O_NONBLOCK + O_CLOEXEC, Mode_0600);
       if Fd < 0 then
          Success := False;
          return;
@@ -217,11 +539,15 @@ package body Nhe_O.IO is
       end loop;
 
       Sync_Rc := Posix_Fsync (Fd);
-      Close_R := Posix_Close (Fd);
+      Success := (Written = Ssize_T (Nhe_O.Page_Size)) and then (Sync_Rc = 0);
 
-      Success := (Written = Ssize_T (Nhe_O.Page_Size))
-                 and then (Sync_Rc = 0)
-                 and then (Close_R = 0);
+      --  Undo a failed file extension so the database stays page-aligned
+      if not Success and then Offset >= End_Pos then
+         Trunc_R := Posix_Ftruncate (Fd, End_Pos);
+         Sync_Rc := Posix_Fsync (Fd);
+      end if;
+
+      Close_R := Posix_Close (Fd);
    end Write_Page;
 
    procedure Read_Page
@@ -248,7 +574,7 @@ package body Nhe_O.IO is
       end if;
 
       To_C_Path (File_Path, C_Path);
-      Fd := Posix_Open (C_Path, O_RDONLY + O_CLOEXEC, 0);
+      Fd := Posix_Open (C_Path, O_RDONLY + O_NONBLOCK + O_CLOEXEC, 0);
       if Fd < 0 then
          return;
       end if;
@@ -295,60 +621,6 @@ package body Nhe_O.IO is
       Read_Page (File_Path, Page_Id, Buffer, Success, Ignored_EOF);
    end Read_Page;
 
-   procedure Write_WAL_Frame
-     (WAL_Path  : in     Bounded_Text;
-      Frame_Idx : in     Valid_Page_Id;
-      Frame     : in     WAL_Frame_Buffer;
-      Success   :    out Boolean)
-   is
-      C_Path  : C_Path_String;
-      Fd      : int;
-      End_Pos : Off_T;
-      Offset  : constant Off_T := Off_T (Frame_Idx) * Off_T (WAL_Frame_Size);
-      Written : Ssize_T;
-      Sync_Rc : int;
-      Close_R : int;
-      pragma Warnings (Off, Close_R);
-   begin
-      if Has_Embedded_NUL (WAL_Path) or else Frame_Idx >= Max_WAL_Frames then
-         Success := False;
-         return;
-      end if;
-
-      To_C_Path (WAL_Path, C_Path);
-      Fd := Posix_Open (C_Path, O_RDWR + O_CREAT + O_CLOEXEC, Mode_0600);
-      if Fd < 0 then
-         Success := False;
-         return;
-      end if;
-
-      --  Reject WAL files with torn/unaligned frame tails, > Max_WAL_Frames, or sparse gaps
-      End_Pos := Posix_Lseek (Fd, 0, SEEK_END);
-      if End_Pos < 0
-        or else End_Pos mod Off_T (WAL_Frame_Size) /= 0
-        or else End_Pos / Off_T (WAL_Frame_Size) > Off_T (Max_WAL_Frames)
-        or else Off_T (Frame_Idx) > End_Pos / Off_T (WAL_Frame_Size)
-      then
-         pragma Warnings (GNATprove, Off, "statement has no effect");
-         Close_R := Posix_Close (Fd);
-         pragma Warnings (GNATprove, On, "statement has no effect");
-         Success := False;
-         return;
-      end if;
-
-      for Attempt in 1 .. Max_IO_Retries loop
-         Written := Posix_Pwrite_WAL (Fd, Frame, size_t (WAL_Frame_Size), Offset);
-         exit when Written = Ssize_T (WAL_Frame_Size);
-      end loop;
-
-      Sync_Rc := Posix_Fsync (Fd);
-      Close_R := Posix_Close (Fd);
-
-      Success := (Written = Ssize_T (WAL_Frame_Size))
-                 and then (Sync_Rc = 0)
-                 and then (Close_R = 0);
-   end Write_WAL_Frame;
-
    procedure Append_WAL_Frame
      (WAL_Path : in     Bounded_Text;
       Frame    : in     WAL_Frame_Buffer;
@@ -361,7 +633,9 @@ package body Nhe_O.IO is
       Aligned_Offset : Off_T;
       Written        : Ssize_T;
       Sync_Rc        : int;
+      Trunc_R        : int;
       Close_R        : int;
+      pragma Warnings (Off, Trunc_R);
       pragma Warnings (Off, Close_R);
    begin
       if Has_Embedded_NUL (WAL_Path) then
@@ -370,7 +644,7 @@ package body Nhe_O.IO is
       end if;
 
       To_C_Path (WAL_Path, C_Path);
-      Fd := Posix_Open (C_Path, O_RDWR + O_CREAT + O_CLOEXEC, Mode_0600);
+      Fd := Posix_Open (C_Path, O_RDWR + O_CREAT + O_NONBLOCK + O_CLOEXEC, Mode_0600);
       if Fd < 0 then
          Success := False;
          return;
@@ -402,11 +676,16 @@ package body Nhe_O.IO is
       end loop;
 
       Sync_Rc := Posix_Fsync (Fd);
-      Close_R := Posix_Close (Fd);
+      Success := (Written = Ssize_T (WAL_Frame_Size)) and then (Sync_Rc = 0);
 
-      Success := (Written = Ssize_T (WAL_Frame_Size))
-                 and then (Sync_Rc = 0)
-                 and then (Close_R = 0);
+      --  A frame that was not durably appended must not survive in the WAL: drop any
+      --  partial or unsynced bytes so recovery can never replay a failed append
+      if not Success then
+         Trunc_R := Posix_Ftruncate (Fd, Aligned_Offset);
+         Sync_Rc := Posix_Fsync (Fd);
+      end if;
+
+      Close_R := Posix_Close (Fd);
    end Append_WAL_Frame;
 
    procedure Read_WAL_Frame
@@ -433,20 +712,24 @@ package body Nhe_O.IO is
       end if;
 
       To_C_Path (WAL_Path, C_Path);
-      Fd := Posix_Open (C_Path, O_RDONLY + O_CLOEXEC, 0);
+      Fd := Posix_Open (C_Path, O_RDONLY + O_NONBLOCK + O_CLOEXEC, 0);
       if Fd < 0 then
          return;
       end if;
 
-      --  Reject WAL files with torn/unaligned frame tails
+      --  Reject WAL files with torn/unaligned frame tails or more than Max_WAL_Frames frames
       End_Pos := Posix_Lseek (Fd, 0, SEEK_END);
-      if End_Pos < 0 or else End_Pos mod Off_T (WAL_Frame_Size) /= 0 then
+      if End_Pos < 0
+        or else End_Pos mod Off_T (WAL_Frame_Size) /= 0
+        or else End_Pos / Off_T (WAL_Frame_Size) > Off_T (Max_WAL_Frames)
+      then
          pragma Warnings (GNATprove, Off, "statement has no effect");
          Close_R := Posix_Close (Fd);
          pragma Warnings (GNATprove, On, "statement has no effect");
          return;
       end if;
 
+      --  No frame can exist at or beyond the Max_WAL_Frames cap of a bounded WAL
       if Frame_Idx >= Max_WAL_Frames then
          Close_R := Posix_Close (Fd);
          Is_EOF  := (Close_R = 0);
@@ -499,6 +782,26 @@ package body Nhe_O.IO is
 
       To_C_Path (File_Path, C_Path);
       Rc := Posix_Unlink (C_Path);
+   end Delete_File_If_Exists;
+
+   procedure Delete_File_If_Exists
+     (File_Path : in     Bounded_Text;
+      Removed   :    out Boolean)
+   is
+      C_Path : C_Path_String;
+      Rc     : int;
+      Still  : Boolean;
+      pragma Unreferenced (Rc);
+   begin
+      if Has_Embedded_NUL (File_Path) then
+         Removed := False;
+         return;
+      end if;
+
+      To_C_Path (File_Path, C_Path);
+      Rc := Posix_Unlink (C_Path);
+      Check_File_Exists (File_Path, Still);
+      Removed := not Still;
    end Delete_File_If_Exists;
 
    procedure Print_Line (Msg : in String) is

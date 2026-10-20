@@ -243,12 +243,13 @@ package body Nhe_O.Transaction is
    end Begin_Tx;
 
    procedure Commit_Tx
-     (Ctx      : in out Transaction_Context;
-      DB_Path  : in     Bounded_Text;
-      WAL_Path : in     Bounded_Text;
-      Page_Id  : in     Valid_Page_Id;
-      Page     : in     Page_Buffer;
-      Status   :    out Engine_Status)
+     (Ctx           : in out Transaction_Context;
+      DB_Path       : in     Bounded_Text;
+      WAL_Path      : in     Bounded_Text;
+      Page_Id       : in     Valid_Page_Id;
+      Page          : in     Page_Buffer;
+      Status        :    out Engine_Status;
+      Flush_Pending :    out Boolean)
    is
       Checksum     : Unsigned_32;
       pragma Warnings (Off, Checksum);
@@ -267,6 +268,8 @@ package body Nhe_O.Transaction is
       Seen_Commits : Commit_Log := [others => Tx_Idle];
       Scan_Kind    : WAL_Frame_Kind;
    begin
+      Flush_Pending := False;
+
       if Equal_Text (DB_Path, WAL_Path) then
          Ctx.State := Tx_Aborted;
          Status    := Status_IO_Error;
@@ -312,28 +315,25 @@ package body Nhe_O.Transaction is
             end if;
 
             Scan_Kind := Get_WAL_Frame_Kind (Scan_Frame);
-            if Scan_Kind in WAL_Frame_Data | WAL_Frame_Commit then
+            if Scan_Kind = WAL_Frame_Commit then
                pragma Warnings (GNATprove, Off, "is set by");
                Decode_WAL_Frame (Scan_Frame, Scan_Tx, Scan_Pg, Scan_Page);
                pragma Warnings (GNATprove, On, "is set by");
-               if Scan_Kind = WAL_Frame_Commit then
-                  if Scan_Tx = Ctx.Id then
-                     Ctx.State := Tx_Aborted;
-                     Status    := Status_Tx_Aborted;
-                     return;
-                  elsif Is_Tx_Committed (Seen_Commits, Scan_Tx) then
-                     Ctx.State := Tx_Aborted;
-                     Status    := Status_IO_Error;
-                     return;
-                  end if;
-                  Set_CLOG_State (Seen_Commits, Scan_Tx, Tx_Committed);
+               if Scan_Tx = Ctx.Id then
+                  --  Ctx.Id already committed: a reused transaction id is rejected
+                  Ctx.State := Tx_Aborted;
+                  Status    := Status_Tx_Aborted;
+                  return;
                elsif Is_Tx_Committed (Seen_Commits, Scan_Tx) then
-                  --  Data frame appearing after its transaction's commit barrier is corrupt
+                  --  Two commit barriers for one transaction id is corruption
                   Ctx.State := Tx_Aborted;
                   Status    := Status_IO_Error;
                   return;
                end if;
+               Set_CLOG_State (Seen_Commits, Scan_Tx, Tx_Committed);
             end if;
+            --  A data frame staged after its transaction's barrier (reused id) is
+            --  ignored: recovery never replays it, so it cannot affect this commit
 
             Total_Frames := Step;
          end loop;
@@ -358,7 +358,8 @@ package body Nhe_O.Transaction is
          end if;
       end if;
 
-      --  1. Write-Ahead Log commit barrier frame first (WAL protocol)
+      --  1. Write-Ahead Log commit barrier frame first (WAL protocol). A failed append
+      --     leaves the WAL unchanged (Append_WAL_Frame truncates any partial frame).
       Append_WAL_Frame (WAL_Path, Frame, WAL_Ok);
       if not WAL_Ok then
          Ctx.State := Tx_Aborted;
@@ -366,15 +367,23 @@ package body Nhe_O.Transaction is
          return;
       end if;
 
+      --  Commit point: the barrier is durable, so recovery will replay this transaction.
+      --  Nothing below may report an abort.
+      Ctx.State := Tx_Committed;
+      Status    := Status_Ok;
+
       --  2. NO-STEAL materialization: flush all WAL_Frame_Data pages staged by Ctx.Id
-      --     to DB_Path only after the commit barrier frame is durable on disk
+      --     to DB_Path now that the commit barrier frame is durable on disk
       for Step in 1 .. Total_Frames loop
-         pragma Loop_Invariant (Total_Frames < Max_WAL_Scan_Frames);
+         pragma Loop_Invariant
+           (Total_Frames < Max_WAL_Scan_Frames
+            and then Ctx.State = Tx_Committed
+            and then Status = Status_Ok
+            and then not Flush_Pending);
          Read_WAL_Frame
            (WAL_Path, Valid_Page_Id (Step - 1), Scan_Frame, Scan_Ok);
          if not Scan_Ok or else not Verify_WAL_Frame (Scan_Frame) then
-            Ctx.State := Tx_Aborted;
-            Status    := Status_IO_Error;
+            Flush_Pending := True;
             return;
          end if;
 
@@ -383,8 +392,7 @@ package body Nhe_O.Transaction is
             if Scan_Tx = Ctx.Id then
                Write_Page (DB_Path, Scan_Pg, Scan_Page, Page_Ok);
                if not Page_Ok then
-                  Ctx.State := Tx_Aborted;
-                  Status    := Status_IO_Error;
+                  Flush_Pending := True;
                   return;
                end if;
             end if;
@@ -394,13 +402,22 @@ package body Nhe_O.Transaction is
       --  3. Persist the final commit slotted/data page to database file
       Write_Page (DB_Path, Page_Id, Page, Page_Ok);
       if not Page_Ok then
-         Ctx.State := Tx_Aborted;
-         Status    := Status_IO_Error;
-         return;
+         Flush_Pending := True;
       end if;
+   end Commit_Tx;
 
-      Ctx.State := Tx_Committed;
-      Status    := Status_Ok;
+   procedure Commit_Tx
+     (Ctx      : in out Transaction_Context;
+      DB_Path  : in     Bounded_Text;
+      WAL_Path : in     Bounded_Text;
+      Page_Id  : in     Valid_Page_Id;
+      Page     : in     Page_Buffer;
+      Status   :    out Engine_Status)
+   is
+      Ignored_Flush : Boolean;
+      pragma Warnings (Off, Ignored_Flush);
+   begin
+      Commit_Tx (Ctx, DB_Path, WAL_Path, Page_Id, Page, Status, Ignored_Flush);
    end Commit_Tx;
 
    procedure Rollback_Tx
@@ -772,15 +789,25 @@ package body Nhe_O.Transaction is
      (Page_Rec : in     Slotted_Page;
       Raw_Page :    out Page_Buffer)
    is
-      Dir_Base  : Page_Offset;
-      Tup_Base  : Page_Offset;
-      Toast_B   : TOAST_Pointer_Bytes;
-      Page_CRC  : Unsigned_32;
-      Free_Low  : constant Unsigned_32 := 24 + Unsigned_32 (Max_Page_Slots * 8);
-      Free_High : constant Unsigned_32 :=
-        153 + Unsigned_32 (Page_Rec.Slot_Count) * 240;
+      Dir_Base     : Page_Offset;
+      Tup_Base     : Page_Offset;
+      Toast_B      : TOAST_Pointer_Bytes;
+      Page_CRC     : Unsigned_32;
+      Occupied_Cnt : Page_Slot_Count := 0;
+      Free_Low     : constant Unsigned_32 := 24 + Unsigned_32 (Max_Page_Slots * 8);
+      Free_High    : Unsigned_32;
+      Tup          : Slotted_Tuple;
    begin
       Raw_Page := [others => 0];
+
+      --  The header Slot_Count always equals the number of occupied slots
+      for Slot in Page_Slot_Index loop
+         pragma Loop_Invariant (Occupied_Cnt < Slot);
+         if Page_Rec.Tuples (Slot).Occupied then
+            Occupied_Cnt := Occupied_Cnt + 1;
+         end if;
+      end loop;
+      Free_High := 153 + Unsigned_32 (Occupied_Cnt) * 240;
 
       --  24-Byte Slotted Page Header
       Raw_Page (1) := Slot_Magic_0;
@@ -788,7 +815,7 @@ package body Nhe_O.Transaction is
       Raw_Page (3) := Slot_Magic_2;
       Raw_Page (4) := Slot_Magic_3;
       Put_Page_U32_BE (Raw_Page, 5, Unsigned_32 (Page_Rec.Page_Id));
-      Put_Page_U32_BE (Raw_Page, 9, Unsigned_32 (Page_Rec.Slot_Count));
+      Put_Page_U32_BE (Raw_Page, 9, Unsigned_32 (Occupied_Cnt));
       Put_Page_U32_BE (Raw_Page, 13, Shift_Left (Free_Low, 16) or Free_High);
       Put_Page_U32_BE (Raw_Page, 17, Unsigned_32 (Page_Rec.Page_LSN_Tx));
 
@@ -800,24 +827,29 @@ package body Nhe_O.Transaction is
            (Dir_Base = 25 + (Slot - 1) * 8
             and then Tup_Base = 153 + (Slot - 1) * 240);
 
+         --  Unoccupied slots are always written in their canonical default form
+         Tup := (if Page_Rec.Tuples (Slot).Occupied
+                 then Page_Rec.Tuples (Slot)
+                 else Slotted_Tuple'(others => <>));
+
          Put_Page_U32_BE (Raw_Page, Dir_Base, Unsigned_32 (Tup_Base));
-         Raw_Page (Dir_Base + 4) := (if Page_Rec.Tuples (Slot).Occupied then 1 else 0);
-         Raw_Page (Dir_Base + 5) := Byte (Page_Rec.Tuples (Slot).Inline_Len);
+         Raw_Page (Dir_Base + 4) := (if Tup.Occupied then 1 else 0);
+         Raw_Page (Dir_Base + 5) := Byte (Tup.Inline_Len);
          Raw_Page (Dir_Base + 6) := 0;
          Raw_Page (Dir_Base + 7) := 0;
 
-         Put_Page_U32_BE (Raw_Page, Tup_Base, Unsigned_32 (Page_Rec.Tuples (Slot).Row_Id));
-         Put_Page_U32_BE (Raw_Page, Tup_Base + 4, Unsigned_32 (Page_Rec.Tuples (Slot).Tuple_Hdr.Xmin));
-         Put_Page_U32_BE (Raw_Page, Tup_Base + 8, Unsigned_32 (Page_Rec.Tuples (Slot).Tuple_Hdr.Xmax));
-         Put_Page_U32_BE (Raw_Page, Tup_Base + 12, Unsigned_32 (Page_Rec.Tuples (Slot).Related_Id));
+         Put_Page_U32_BE (Raw_Page, Tup_Base, Unsigned_32 (Tup.Row_Id));
+         Put_Page_U32_BE (Raw_Page, Tup_Base + 4, Unsigned_32 (Tup.Tuple_Hdr.Xmin));
+         Put_Page_U32_BE (Raw_Page, Tup_Base + 8, Unsigned_32 (Tup.Tuple_Hdr.Xmax));
+         Put_Page_U32_BE (Raw_Page, Tup_Base + 12, Unsigned_32 (Tup.Related_Id));
 
-         Encode_TOAST_Pointer (Page_Rec.Tuples (Slot).Toast_Ptr, Toast_B);
+         Encode_TOAST_Pointer (Tup.Toast_Ptr, Toast_B);
          for B in TOAST_Pointer_Index loop
             Raw_Page (Tup_Base + 15 + B) := Toast_B (B);
          end loop;
 
          for B in Inline_Tuple_Index loop
-            Raw_Page (Tup_Base + 31 + B) := Page_Rec.Tuples (Slot).Inline_Data (B);
+            Raw_Page (Tup_Base + 31 + B) := Tup.Inline_Data (B);
          end loop;
       end loop;
 
@@ -983,14 +1015,121 @@ package body Nhe_O.Transaction is
       Valid := True;
    end Decode_Slotted_Page;
 
+   procedure Repair_WAL_Tail
+     (WAL_Path : in     Bounded_Text;
+      Status   :    out Engine_Status)
+   is
+      Exists    : Boolean;
+      Size      : File_Size;
+      Size_Ok   : Boolean;
+      Full      : Integer_64;
+      Rem_Bytes : Integer_64;
+      Frame     : WAL_Frame_Buffer;
+      Read_Ok   : Boolean;
+      Trunc_Ok  : Boolean;
+   begin
+      Status := Status_Ok;
+
+      Check_File_Exists (WAL_Path, Exists);
+      if not Exists then
+         return;
+      end if;
+
+      Get_File_Size (WAL_Path, Size, Size_Ok);
+      if not Size_Ok then
+         Status := Status_IO_Error;
+         return;
+      end if;
+
+      Full      := Size / Integer_64 (WAL_Frame_Size);
+      Rem_Bytes := Size mod Integer_64 (WAL_Frame_Size);
+
+      --  The engine never appends past Max_WAL_Frames: an over-full WAL is foreign
+      if Full > Integer_64 (Max_WAL_Frames) then
+         Status := Status_IO_Error;
+         return;
+      end if;
+
+      --  1. Drop a partial trailing frame (an append interrupted mid-write)
+      if Rem_Bytes /= 0 then
+         Truncate_File (WAL_Path, Full * Integer_64 (WAL_Frame_Size), Trunc_Ok);
+         if not Trunc_Ok then
+            Status := Status_IO_Error;
+            return;
+         end if;
+      end if;
+
+      --  2. Drop a final complete frame whose contents never became durable; any
+      --     earlier invalid frame is mid-log corruption and fails closed
+      for Idx in 0 .. Natural (Full) - 1 loop
+         pragma Loop_Invariant (Status = Status_Ok);
+         Read_WAL_Frame (WAL_Path, Idx, Frame, Read_Ok);
+         if not Read_Ok then
+            Status := Status_IO_Error;
+            return;
+         elsif not Verify_WAL_Frame (Frame) then
+            if Idx = Natural (Full) - 1 then
+               Truncate_File
+                 (WAL_Path, Integer_64 (Idx) * Integer_64 (WAL_Frame_Size), Trunc_Ok);
+               if not Trunc_Ok then
+                  Status := Status_IO_Error;
+               end if;
+            else
+               Status := Status_IO_Error;
+            end if;
+            return;
+         end if;
+      end loop;
+   end Repair_WAL_Tail;
+
+   procedure Repair_DB_Tail
+     (DB_Path : in     Bounded_Text;
+      Status  :    out Engine_Status)
+   is
+      Exists    : Boolean;
+      Size      : File_Size;
+      Size_Ok   : Boolean;
+      Rem_Bytes : Integer_64;
+      Trunc_Ok  : Boolean;
+   begin
+      Status := Status_Ok;
+
+      Check_File_Exists (DB_Path, Exists);
+      if not Exists then
+         return;
+      end if;
+
+      Get_File_Size (DB_Path, Size, Size_Ok);
+      if not Size_Ok then
+         Status := Status_IO_Error;
+         return;
+      end if;
+
+      Rem_Bytes := Size mod Integer_64 (Nhe_O.Page_Size);
+      if Rem_Bytes /= 0 then
+         Truncate_File (DB_Path, Size - Rem_Bytes, Trunc_Ok);
+         if not Trunc_Ok then
+            Status := Status_IO_Error;
+         end if;
+      end if;
+   end Repair_DB_Tail;
+
    procedure Redo_WAL_Recovery
      (DB_Path          : in     Bounded_Text;
       WAL_Path         : in     Bounded_Text;
       Max_Frames       : in     Positive;
       Replayed_Count   :    out Natural;
       Max_Recovered_Tx :    out Tx_Id;
+      Max_Seen_Tx      :    out Tx_Id;
       Status           :    out Engine_Status)
    is
+      subtype Scan_Index is Natural range 0 .. Max_WAL_Frames - 1;
+      type Frame_Kind_Map is array (Scan_Index) of WAL_Frame_Kind;
+      type Frame_Tx_Map is array (Scan_Index) of Valid_Tx_Id;
+
+      Scan_Limit   : constant Positive := Positive'Min (Max_Frames, Max_WAL_Frames);
+      Kinds        : Frame_Kind_Map := [others => WAL_Frame_KV];
+      Txs          : Frame_Tx_Map   := [others => 1];
       Frame        : WAL_Frame_Buffer;
       Page         : Page_Buffer;
       Frame_Tx     : Valid_Tx_Id;
@@ -998,18 +1137,41 @@ package body Nhe_O.Transaction is
       Kind         : WAL_Frame_Kind;
       Read_Ok      : Boolean;
       Is_EOF       : Boolean;
-      Write_Ok     : Boolean;
-      Frame_Idx    : Valid_Page_Id;
+      Replay_Ok    : Boolean;
       Total_Frames : Natural := 0;
       Hit_EOF      : Boolean := False;
       CLOG         : Commit_Log := [others => Tx_Idle];
-      pragma Warnings (Off, Frame);
-      pragma Warnings (Off, Page);
+      Commit_Id    : Valid_Tx_Id;
+      Sub_Stat     : Engine_Status;
       pragma Warnings (Off, Frame_Pg);
-      pragma Warnings (Off, Is_EOF);
+      pragma Warnings (Off, Page);
+
+      --  Re-read, re-verify and materialize WAL frame Idx into DB_Path
+      procedure Replay_Frame
+        (Idx : in     Scan_Index;
+         Ok  :    out Boolean)
+        with Pre => DB_Path.Length > 0 and then WAL_Path.Length > 0
+      is
+         Fr     : WAL_Frame_Buffer;
+         Pg_Buf : Page_Buffer;
+         Fr_Tx  : Valid_Tx_Id;
+         Pg_Id  : Valid_Page_Id;
+         R_Ok   : Boolean;
+         pragma Warnings (Off, Fr_Tx);
+      begin
+         Read_WAL_Frame (WAL_Path, Idx, Fr, R_Ok);
+         if not R_Ok or else not Verify_WAL_Frame (Fr) then
+            Ok := False;
+            return;
+         end if;
+         Decode_WAL_Frame (Fr, Fr_Tx, Pg_Id, Pg_Buf);
+         Write_Page (DB_Path, Pg_Id, Pg_Buf, Ok);
+      end Replay_Frame;
+
    begin
       Replayed_Count   := 0;
       Max_Recovered_Tx := 0;
+      Max_Seen_Tx      := 0;
       Status           := Status_Ok;
 
       if Equal_Text (DB_Path, WAL_Path) then
@@ -1017,11 +1179,27 @@ package body Nhe_O.Transaction is
          return;
       end if;
 
+      --  0. Repair torn tails left by a crash during an append or a page write
+      Repair_WAL_Tail (WAL_Path, Sub_Stat);
+      if Sub_Stat /= Status_Ok then
+         Status := Sub_Stat;
+         return;
+      end if;
+      Repair_DB_Tail (DB_Path, Sub_Stat);
+      if Sub_Stat /= Status_Ok then
+         Status := Sub_Stat;
+         return;
+      end if;
+
       --  Pass 1: Analysis & Commit-Marker Discovery (identify all WAL_Frame_Commit transactions)
-      for Step in 1 .. Max_Frames loop
-         pragma Loop_Invariant (Total_Frames = Step - 1);
-         Frame_Idx := Valid_Page_Id (Step - 1);
-         Read_WAL_Frame (WAL_Path, Frame_Idx, Frame, Read_Ok, Is_EOF);
+      for Step in 1 .. Scan_Limit loop
+         pragma Loop_Invariant
+           (Total_Frames = Step - 1
+            and then Max_Recovered_Tx = 0
+            and then Replayed_Count = 0
+            and then (for all I in 0 .. Step - 2 =>
+                        (if Kinds (I) /= WAL_Frame_KV then Txs (I) <= Max_Seen_Tx)));
+         Read_WAL_Frame (WAL_Path, Step - 1, Frame, Read_Ok, Is_EOF);
          if not Read_Ok then
             if Is_EOF then
                Hit_EOF := True;
@@ -1038,24 +1216,27 @@ package body Nhe_O.Transaction is
          end if;
 
          Decode_WAL_Frame (Frame, Frame_Tx, Frame_Pg, Page);
-         Kind := Get_WAL_Frame_Kind (Frame);
+         Kind              := Get_WAL_Frame_Kind (Frame);
+         Kinds (Step - 1)  := Kind;
+         Txs (Step - 1)    := Frame_Tx;
+         if Kind /= WAL_Frame_KV and then Frame_Tx > Max_Seen_Tx then
+            Max_Seen_Tx := Frame_Tx;
+         end if;
+
          if Kind = WAL_Frame_Commit then
             if Is_Tx_Committed (CLOG, Frame_Tx) then
+               --  Two commit barriers for one transaction id is corruption
                Status := Status_IO_Error;
                return;
             end if;
             Set_CLOG_State (CLOG, Frame_Tx, Tx_Committed);
-         elsif Kind = WAL_Frame_Data and then Is_Tx_Committed (CLOG, Frame_Tx) then
-            --  Data frame appearing after its transaction's commit barrier is invalid
-            Status := Status_IO_Error;
-            return;
          end if;
          Total_Frames := Step;
       end loop;
 
       --  Detect WAL overflow or torn/corrupted frame if Max_Frames was reached before EOF
-      if not Hit_EOF and then Max_Frames < Max_Page_Id then
-         Read_WAL_Frame (WAL_Path, Valid_Page_Id (Max_Frames), Frame, Read_Ok, Is_EOF);
+      if not Hit_EOF and then Scan_Limit < Max_WAL_Frames then
+         Read_WAL_Frame (WAL_Path, Scan_Limit, Frame, Read_Ok, Is_EOF);
          if Read_Ok then
             Status := (if Verify_WAL_Frame (Frame)
                        then Status_Capacity_Exceeded
@@ -1067,32 +1248,43 @@ package body Nhe_O.Transaction is
          end if;
       end if;
 
-      --  Pass 2: Redo Pass (replay only frames belonging to committed transactions)
-      for Step in 1 .. Total_Frames loop
+      --  Pass 2: Redo in commit order. For each commit barrier (in WAL order), replay the
+      --  data frames its transaction staged before the barrier, then the barrier page.
+      for C in 0 .. Total_Frames - 1 loop
          pragma Loop_Invariant
-           (Total_Frames <= Max_Frames and then Replayed_Count < Step);
-         Frame_Idx := Valid_Page_Id (Step - 1);
-         Read_WAL_Frame (WAL_Path, Frame_Idx, Frame, Read_Ok);
-         if not Read_Ok or else not Verify_WAL_Frame (Frame) then
-            Status := Status_IO_Error;
-            return;
-         end if;
+           (Total_Frames <= Scan_Limit
+            and then Replayed_Count <= Total_Frames
+            and then Max_Recovered_Tx <= Max_Seen_Tx
+            and then (for all I in 0 .. Total_Frames - 1 =>
+                        (if Kinds (I) /= WAL_Frame_KV then Txs (I) <= Max_Seen_Tx)));
+         if Kinds (C) = WAL_Frame_Commit then
+            Commit_Id := Txs (C);
+            for F in 0 .. C - 1 loop
+               pragma Loop_Invariant
+                 (Replayed_Count <= Total_Frames
+                  and then Max_Recovered_Tx <= Max_Seen_Tx);
+               if Kinds (F) = WAL_Frame_Data and then Txs (F) = Commit_Id then
+                  Replay_Frame (F, Replay_Ok);
+                  if not Replay_Ok then
+                     Status := Status_IO_Error;
+                     return;
+                  end if;
+                  if Replayed_Count < Total_Frames then
+                     Replayed_Count := Replayed_Count + 1;
+                  end if;
+               end if;
+            end loop;
 
-         Decode_WAL_Frame (Frame, Frame_Tx, Frame_Pg, Page);
-         Kind := Get_WAL_Frame_Kind (Frame);
-
-         if Kind in WAL_Frame_Data | WAL_Frame_Commit
-           and then Is_Tx_Committed (CLOG, Frame_Tx)
-         then
-            Write_Page (DB_Path, Frame_Pg, Page, Write_Ok);
-            if not Write_Ok then
+            Replay_Frame (C, Replay_Ok);
+            if not Replay_Ok then
                Status := Status_IO_Error;
                return;
             end if;
-
-            Replayed_Count := Replayed_Count + 1;
-            if Frame_Tx > Max_Recovered_Tx then
-               Max_Recovered_Tx := Frame_Tx;
+            if Replayed_Count < Total_Frames then
+               Replayed_Count := Replayed_Count + 1;
+            end if;
+            if Commit_Id > Max_Recovered_Tx then
+               Max_Recovered_Tx := Commit_Id;
             end if;
          end if;
       end loop;

@@ -22,14 +22,22 @@ procedure Nhe_O_Main is
    pragma Warnings (GNATprove, Off, "is set by");
    pragma Warnings (GNATprove, Off, "statement has no effect");
 
-   All_Passed : Boolean := True;
+   All_Passed   : Boolean := True;
+   Check_Count  : Natural := 0;
+   First_Failed : Natural := 0; --  ordinal of the first failing Check, reported at exit
 
    procedure Check (Cond : in Boolean)
-     with Global => (In_Out => All_Passed),
+     with Global => (In_Out => (All_Passed, Check_Count, First_Failed)),
           Always_Terminates
    is
    begin
+      if Check_Count < Natural'Last then
+         Check_Count := Check_Count + 1;
+      end if;
       if not Cond then
+         if All_Passed then
+            First_Failed := Check_Count;
+         end if;
          All_Passed := False;
          Set_Exit_Failure;
       end if;
@@ -308,6 +316,7 @@ procedure Nhe_O_Main is
    Tx_1          : Transaction_Context;
    Tx_Uncomm     : Transaction_Context;
    Tx_Toast      : Transaction_Context;
+   Tx_Crashed    : Transaction_Context;
    Tuple_1       : MVCC_Tuple_Header;
    Tuple_Uncomm  : MVCC_Tuple_Header;
    CLOG_Test     : Commit_Log := Default_CLOG;
@@ -347,6 +356,16 @@ procedure Nhe_O_Main is
    Toast_Ptr_Ok  : Boolean;
    Replayed_Cnt  : Natural;
    Max_Rec_Tx    : Tx_Id;
+   Max_Seen_Tx_Id : Tx_Id;
+   Tx_Ord_A      : Transaction_Context;
+   Tx_Ord_B      : Transaction_Context;
+   Page_A        : constant Page_Buffer := [others => 16#AA#];
+   Page_B        : constant Page_Buffer := [others => 16#BB#];
+   WAL_Bad       : WAL_Frame_Buffer;
+   Tail_Size     : File_Size;
+   DB_Size       : File_Size;
+   Size_Ok       : Boolean;
+   Trunc_Ok      : Boolean;
 
    --  6. Multi-Page B+Tree Index variables
    Tree_Idx      : BTree_Index;
@@ -375,10 +394,13 @@ procedure Nhe_O_Main is
    KV_Removed : Boolean;
    Counter_V  : Integer_64;
    KV_Rec_Cnt : Natural;
+   KV_Evict   : KV_Store;
+   KV_Evict_R : KV_Store;
+   Evict_Same : Boolean;
 
    --  9 & 10. Dual-Mode Pub/Sub & Universal Local LLM RAG verification helper
    procedure Verify_RAG_And_PubSub (Next_Tx_Id : in out Valid_Tx_Id)
-     with Pre => Next_Tx_Id <= Max_Tx_Id - 16,
+     with Pre => Next_Tx_Id <= Max_Tx_Id - 32,
           Always_Terminates
    is
       Broker         : PubSub_Broker;
@@ -410,9 +432,21 @@ procedure Nhe_O_Main is
       Fetched_Chunk  : TOAST_Payload_Buffer;
       RAG_Res        : RAG_Query_Result;
       RAG_Status     : Engine_Status;
-      Local_Slot_Buf : Page_Buffer;
       Local_Tx_Stat  : Engine_Status;
       Local_JSON_St  : Engine_Status;
+      Flush_Pend     : Boolean;
+      Snap_Before    : Commit_Seq_Number;
+      Tx_Lo          : Transaction_Context;
+      Tx_Hi          : Transaction_Context;
+      Tie_Tx         : Transaction_Context;
+      Empty_Meta     : constant JSONB_Document := (others => <>);
+      --  UTF-8 "hướng" / "HƯỚNG" (U+01B0 / U+01AF, U+1EDB / U+1EDA)
+      Viet_Lower     : constant String :=
+        "h" & Character'Val (16#C6#) & Character'Val (16#B0#)
+        & Character'Val (16#E1#) & Character'Val (16#BB#) & Character'Val (16#9B#) & "ng";
+      Viet_Upper     : constant String :=
+        "H" & Character'Val (16#C6#) & Character'Val (16#AF#)
+        & Character'Val (16#E1#) & Character'Val (16#BB#) & Character'Val (16#9A#) & "NG";
    begin
       --  9. Verify Dual-Mode Pub/Sub & WAL Commit Barrier (`ADR-004` / `BR-005`)
       Print_Line ("[9/11] Verifying Dual-Mode Pub/Sub & WAL Commit Barrier (Nhe_O.PubSub)...");
@@ -516,15 +550,12 @@ procedure Nhe_O_Main is
          Check (False);
       end if;
 
-      Build_RAG_Slotted_Page (RAG_Store, Tx_RAG.Id, Local_Slot_Buf);
-      Commit_Tx (Tx_RAG, DB_File, WAL_File, 1, Local_Slot_Buf, Local_Tx_Stat);
-      if Local_Tx_Stat = Status_Ok and then Tx_RAG.State = Tx_Committed then
-         Set_CLOG_State (RAG_Store.CLOG, Tx_RAG.Id, Tx_Committed);
-         Flush_Committed_Notifications (Tx_RAG, RAG_Staging, Broker, Total_Deliv);
-         Check (Total_Deliv = 2);
-      else
-         Check (False);
-      end if;
+      Commit_RAG_Tx
+        (RAG_Store, Tx_RAG, DB_File, WAL_File, RAG_Staging, Broker,
+         Total_Deliv, Local_Tx_Stat, Flush_Pend);
+      Check (Local_Tx_Stat = Status_Ok and then Tx_RAG.State = Tx_Committed
+             and then not Flush_Pend and then Total_Deliv = 2
+             and then Take_Snapshot (RAG_Store) = 1);
 
       --  Ingest an aborted update to Doc_Id = 1 and verify MVCC prior-version + Rollback_RAG_Tx
       Begin_Tx (Next_Tx_Id, Tx_RAG_Aborted);
@@ -554,7 +585,7 @@ procedure Nhe_O_Main is
       --  Query with Encoding_Int8_SQ8 to exercise Stage-2 TOAST Exact Re-Ranking (Q-003) and MVCC fallback
       Execute_Hybrid_RAG_Query
         (Engine            => RAG_Store,
-         Snapshot          => Tx_RAG_Aborted.Id,
+         Snapshot          => Take_Snapshot (RAG_Store),
          DB_Path           => DB_File,
          SQL_Query         => SQL_Query,
          Query_Vec         => Make_Vector_3D (0.95, 0.05, 0.0),
@@ -578,7 +609,7 @@ procedure Nhe_O_Main is
       --  Verify SQL LIMIT 1 and LIMIT 0 enforcement in Execute_Hybrid_RAG_Query
       Execute_Hybrid_RAG_Query
         (Engine            => RAG_Store,
-         Snapshot          => Tx_RAG_Aborted.Id,
+         Snapshot          => Take_Snapshot (RAG_Store),
          DB_Path           => DB_File,
          SQL_Query         => SQL_No_Space_1,
          Query_Vec         => Make_Vector_3D (0.95, 0.05, 0.0),
@@ -595,7 +626,7 @@ procedure Nhe_O_Main is
 
       Execute_Hybrid_RAG_Query
         (Engine            => RAG_Store,
-         Snapshot          => Tx_RAG_Aborted.Id,
+         Snapshot          => Take_Snapshot (RAG_Store),
          DB_Path           => DB_File,
          SQL_Query         => SQL_No_Space_2,
          Query_Vec         => Make_Vector_3D (0.95, 0.05, 0.0),
@@ -615,7 +646,7 @@ procedure Nhe_O_Main is
       Check (RAG_Status = Status_Ok and then RAG_Recovered.Doc_Count = 2);
       Execute_Hybrid_RAG_Query
         (Engine            => RAG_Recovered,
-         Snapshot          => Tx_RAG_Aborted.Id,
+         Snapshot          => Take_Snapshot (RAG_Recovered),
          DB_Path           => DB_File,
          SQL_Query         => SQL_Query,
          Query_Vec         => Make_Vector_3D (0.95, 0.05, 0.0),
@@ -632,18 +663,20 @@ procedure Nhe_O_Main is
              and then RAG_Res.Hits (1).Doc_Id = 1 and then RAG_Res.Hits (1).Keyword_Match);
 
       --  Verify durable Delete_Document removes Doc_Id = 2 from HNSW/PK_Tree + crash recovery,
-      --  while historical snapshots (Tx_RAG.Id < Tx_RAG_Del.Id) still recall and rank Doc_Id = 2 even when Top_K = 1
+      --  while a snapshot taken before the delete committed still recalls and ranks
+      --  Doc_Id = 2 even when Top_K = 1
+      Snap_Before := Take_Snapshot (RAG_Store);
       Begin_Tx (Next_Tx_Id, Tx_RAG_Del);
       Delete_Document (RAG_Store, Tx_RAG_Del, DB_File, WAL_File, Doc_Id => 2, Status => RAG_Status);
       Check (RAG_Status = Status_Ok and then RAG_Store.Doc_Count = 1);
-      Build_RAG_Slotted_Page (RAG_Store, Tx_RAG_Del.Id, Local_Slot_Buf);
-      Commit_Tx (Tx_RAG_Del, DB_File, WAL_File, 1, Local_Slot_Buf, Local_Tx_Stat);
-      Check (Local_Tx_Stat = Status_Ok);
-      Set_CLOG_State (RAG_Store.CLOG, Tx_RAG_Del.Id, Tx_Committed);
+      Commit_RAG_Tx
+        (RAG_Store, Tx_RAG_Del, DB_File, WAL_File, RAG_Staging, Broker,
+         Total_Deliv, Local_Tx_Stat, Flush_Pend);
+      Check (Local_Tx_Stat = Status_Ok and then not Flush_Pend);
 
       Execute_Hybrid_RAG_Query
         (Engine            => RAG_Store,
-         Snapshot          => Tx_RAG.Id,
+         Snapshot          => Snap_Before,
          DB_Path           => DB_File,
          SQL_Query         => SQL_No_Space_1,
          Query_Vec         => Make_Vector_3D (0.7, 0.7, 0.0),
@@ -661,6 +694,162 @@ procedure Nhe_O_Main is
       Recover_RAG_Engine (RAG_Recovered, 3, DB_File, WAL_File, RAG_Status);
       Check (RAG_Status = Status_Ok and then RAG_Recovered.Doc_Count = 1);
 
+      --  Snapshot isolation by commit order, first-updater-wins write conflicts, and a
+      --  commit's Page 1 never carrying another transaction's uncommitted version
+      Begin_Tx (Next_Tx_Id, Tx_Lo);
+      Begin_Tx (Next_Tx_Id, Tx_Hi);
+      if RAG_Store.Next_TOAST_Pg <= Max_Safe_TOAST_Page then
+         Ingest_Document
+           (Engine         => RAG_Store,
+            Ctx            => Tx_Lo,
+            DB_Path        => DB_File,
+            WAL_Path       => WAL_File,
+            Staging        => RAG_Staging,
+            Doc_Id         => 3,
+            Metadata       => Meta_Doc_2,
+            Summary_Text   => Make_Text ("lower id, commits last"),
+            Embedding      => Make_Vector_3D (0.0, 0.0, 1.0),
+            Parent_Payload => Parent_Chunk_2,
+            Parent_Length  => 100,
+            Related_Doc_Id => 0,
+            Layer_Hint     => 1,
+            Status         => RAG_Status);
+         Check (RAG_Status = Status_Ok);
+      end if;
+      if RAG_Store.Next_TOAST_Pg <= Max_Safe_TOAST_Page then
+         Ingest_Document
+           (Engine         => RAG_Store,
+            Ctx            => Tx_Hi,
+            DB_Path        => DB_File,
+            WAL_Path       => WAL_File,
+            Staging        => Staging_Buf,
+            Doc_Id         => 3,
+            Metadata       => Meta_Doc_2,
+            Summary_Text   => Make_Text ("conflicting writer"),
+            Embedding      => Make_Vector_3D (0.0, 0.0, 1.0),
+            Parent_Payload => Parent_Chunk_2,
+            Parent_Length  => 100,
+            Related_Doc_Id => 0,
+            Layer_Hint     => 1,
+            Status         => RAG_Status);
+         Check (RAG_Status = Status_Tx_Aborted);
+      end if;
+      if RAG_Store.Next_TOAST_Pg <= Max_Safe_TOAST_Page then
+         Ingest_Document
+           (Engine         => RAG_Store,
+            Ctx            => Tx_Hi,
+            DB_Path        => DB_File,
+            WAL_Path       => WAL_File,
+            Staging        => Staging_Buf,
+            Doc_Id         => 4,
+            Metadata       => Meta_Doc_2,
+            Summary_Text   => Make_Text ("higher id, commits first"),
+            Embedding      => Make_Vector_3D (0.0, 1.0, 0.0),
+            Parent_Payload => Parent_Chunk_2,
+            Parent_Length  => 100,
+            Related_Doc_Id => 0,
+            Layer_Hint     => 1,
+            Status         => RAG_Status);
+         Check (RAG_Status = Status_Ok);
+      end if;
+      if RAG_Store.Next_TOAST_Pg <= Max_Safe_TOAST_Page then
+         Commit_RAG_Tx
+           (RAG_Store, Tx_Hi, DB_File, WAL_File, Staging_Buf, Broker,
+            Total_Deliv, Local_Tx_Stat, Flush_Pend);
+         Check (Local_Tx_Stat = Status_Ok and then not Flush_Pend);
+      end if;
+      Snap_Before := Take_Snapshot (RAG_Store);
+      Recover_RAG_Engine (RAG_Recovered, 3, DB_File, WAL_File, RAG_Status);
+      Check (RAG_Status = Status_Ok
+             and then not RAG_Recovered.Docs (3).Active
+             and then RAG_Recovered.Docs (4).Active);
+      if RAG_Store.Next_TOAST_Pg <= Max_Safe_TOAST_Page then
+         Commit_RAG_Tx
+           (RAG_Store, Tx_Lo, DB_File, WAL_File, RAG_Staging, Broker,
+            Total_Deliv, Local_Tx_Stat, Flush_Pend);
+         Check (Local_Tx_Stat = Status_Ok and then not Flush_Pend);
+      end if;
+      Check (Is_Version_Visible (RAG_Store, RAG_Store.Docs (4).Tuple_Hdr, Snap_Before));
+      Check (not Is_Version_Visible (RAG_Store, RAG_Store.Docs (3).Tuple_Hdr, Snap_Before));
+      Check (Is_Version_Visible (RAG_Store, RAG_Store.Docs (3).Tuple_Hdr, Take_Snapshot (RAG_Store)));
+
+      --  Equal-distance hits are ordered by Doc_Id, before and after recovery
+      Begin_Tx (Next_Tx_Id, Tie_Tx);
+      for Tie_Doc in RAG_Doc_Slot range 6 .. 7 loop
+         if RAG_Store.Next_TOAST_Pg <= Max_Safe_TOAST_Page then
+            Ingest_Document
+              (Engine         => RAG_Store,
+               Ctx            => Tie_Tx,
+               DB_Path        => DB_File,
+               WAL_Path       => WAL_File,
+               Staging        => RAG_Staging,
+               Doc_Id         => 13 - Tie_Doc,
+               Metadata       => Empty_Meta,
+               Summary_Text   => Make_Text ("tie"),
+               Embedding      => Make_Vector_3D (-0.5, -0.5, -0.5),
+               Parent_Payload => Parent_Chunk_2,
+               Parent_Length  => 10,
+               Related_Doc_Id => 0,
+               Layer_Hint     => 1,
+               Status         => RAG_Status);
+            Check (RAG_Status = Status_Ok);
+         end if;
+      end loop;
+      if RAG_Store.Next_TOAST_Pg <= Max_Safe_TOAST_Page then
+         Commit_RAG_Tx
+           (RAG_Store, Tie_Tx, DB_File, WAL_File, RAG_Staging, Broker,
+            Total_Deliv, Local_Tx_Stat, Flush_Pend);
+         Check (Local_Tx_Stat = Status_Ok);
+      end if;
+      Execute_Hybrid_RAG_Query
+        (Engine            => RAG_Store,
+         Snapshot          => Take_Snapshot (RAG_Store),
+         DB_Path           => DB_File,
+         SQL_Query         => SQL_Query,
+         Query_Vec         => Make_Vector_3D (-0.5, -0.5, -0.5),
+         Encoding          => Encoding_Float32,
+         Use_Meta_Filter   => False,
+         Filter_Meta       => Meta_RAG_Query,
+         Use_Keyword_Boost => False,
+         Keyword           => Make_Text (""),
+         Top_K             => 2,
+         Result            => RAG_Res,
+         Top_Parent_Chunk  => Fetched_Chunk,
+         Status            => RAG_Status);
+      Check (RAG_Status = Status_Ok and then RAG_Res.Count = 2
+             and then RAG_Res.Hits (1).Doc_Id = 6 and then RAG_Res.Hits (2).Doc_Id = 7);
+      Recover_RAG_Engine (RAG_Recovered, 3, DB_File, WAL_File, RAG_Status);
+      Check (RAG_Status = Status_Ok);
+      Execute_Hybrid_RAG_Query
+        (Engine            => RAG_Recovered,
+         Snapshot          => Take_Snapshot (RAG_Recovered),
+         DB_Path           => DB_File,
+         SQL_Query         => SQL_Query,
+         Query_Vec         => Make_Vector_3D (-0.5, -0.5, -0.5),
+         Encoding          => Encoding_Float32,
+         Use_Meta_Filter   => False,
+         Filter_Meta       => Meta_RAG_Query,
+         Use_Keyword_Boost => False,
+         Keyword           => Make_Text (""),
+         Top_K             => 2,
+         Result            => RAG_Res,
+         Top_Parent_Chunk  => Fetched_Chunk,
+         Status            => RAG_Status);
+      Check (RAG_Status = Status_Ok and then RAG_Res.Count = 2
+             and then RAG_Res.Hits (1).Doc_Id = 6 and then RAG_Res.Hits (2).Doc_Id = 7);
+
+      --  UTF-8 Latin case folding (Vietnamese) in the lexical keyword boost
+      Check (Contains_Keyword (Make_Text ("SPARK " & Viet_Lower & " RAG"), Make_Text (Viet_Upper)));
+      Check (not Contains_Keyword (Make_Text (Viet_Lower), Make_Text ("")));
+
+      --  A missing database recovers an empty engine instead of failing
+      Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_missing.db"));
+      Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_missing.wal"));
+      Recover_RAG_Engine
+        (RAG_Recovered, 3, Make_Text ("/tmp/nhe_o_missing.db"), Make_Text ("/tmp/nhe_o_missing.wal"),
+         RAG_Status);
+      Check (RAG_Status = Status_Ok and then RAG_Recovered.Doc_Count = 0);
+
       Unsubscribe (Broker, Sub_Exact);
       Unsubscribe (Broker, Sub_Wild);
       Unsubscribe (Broker, Sub_Durable);
@@ -668,6 +857,19 @@ procedure Nhe_O_Main is
       Delete_File_If_Exists (WAL_File);
       Print_Line ("  => Passed: Hybrid SQL + JSONB + RMET TOAST + Stage-2 Re-Rank + Durable Delete + Recovery verified.");
    end Verify_RAG_And_PubSub;
+
+   --  Copy S into a NUL-padded C text buffer
+   function To_C_Text (S : String) return C_Text_Buf
+     with Global => null,
+          Pre    => S'Length <= Max_Text_Len
+   is
+      Res : C_Text_Buf := [others => nul];
+   begin
+      for I in 1 .. S'Length loop
+         Res (size_t (I)) := To_C (S (S'First + (I - 1)));
+      end loop;
+      return Res;
+   end To_C_Text;
 
    --  11. C ABI / FFI SDK (`Nhe_O.C_API`) verification variables
    C_Rc          : int;
@@ -692,6 +894,22 @@ procedure Nhe_O_Main is
    C_Vec_ND_B    : constant C_Vec_Buf := [1 => 0.0, 2 => 3.0, 3 => 4.0, 4 => 0.0, others => 0.0];
    C_Top_Par_Buf : C_Text_Buf         := [others => nul];
    C_Top_Par_Len : int;
+   C_Removed     : int;
+   C_Par_Bytes   : int;
+   C_Vec_ND_C    : constant C_Vec_Buf   := [1 => -1.0, 2 => -1.0, 3 => 0.0, others => 0.0];
+   C_Big_Parent  : constant C_Toast_Buf := [others => To_C ('x')];
+   C_Empty_Text  : constant C_Text_Buf  := [others => nul];
+   C_DB_Buf      : constant C_Text_Buf  := To_C_Text ("/tmp/nhe_o_capi_persist.db");
+   C_WAL_Buf     : constant C_Text_Buf  := To_C_Text ("/tmp/nhe_o_capi_persist.wal");
+   C_Alias_A     : constant C_Text_Buf  := To_C_Text ("/tmp/nhe_o_capi_alias.db");
+   C_Alias_B     : constant C_Text_Buf  := To_C_Text ("/tmp/./nhe_o_capi_alias.db");
+   C_Saved_DB    : Bounded_Text;
+   C_Saved_WAL   : Bounded_Text;
+   C_WAL_Size    : File_Size;
+   C_Size_Ok     : Boolean;
+   C_File_Found  : Boolean;
+   C_Abs_Path    : Bounded_Text;
+   C_Abs_Ok      : Boolean;
 
 begin
    Read_CLI_Arg (1, CLI_Arg1, Has_CLI_Arg1, Long_Arg1);
@@ -980,7 +1198,8 @@ begin
 
    Begin_Tx (Next_Tx, Tx_1);
    Tuple_1 := (Xmin => Tx_1.Id, Xmax => 0);
-   Check (Is_Tuple_Visible (Tuple_1, Tx_1.Snapshot));
+   --  NO-STEAL: a tuple is invisible until its creating transaction is committed in CLOG
+   Check (not Is_Tuple_Visible (Tuple_1, Tx_1.Snapshot, CLOG_Test));
 
    --  Verify CLOG rejects uncommitted/aborted tuple and supports Tx_Id > 1024 up to 8192
    Check (not Is_Tx_Committed (CLOG_Test, 2000));
@@ -1089,15 +1308,25 @@ begin
    Check (WAL_App_Ok);
    Rollback_Tx (Tx_Uncomm);
 
+   --  A crashed transaction with the highest id stages page 7 but never commits
+   Begin_Tx (Next_Tx, Tx_Crashed);
+   Encode_WAL_Frame (Tx_Crashed.Id, 7, Page_Uncomm, WAL_Crc, WAL_Uncomm, WAL_Frame_Data);
+   Append_WAL_Frame (WAL_File, WAL_Uncomm, WAL_App_Ok);
+   Check (WAL_App_Ok);
+
    --  Verify Redo_WAL_Recovery rejects identical DB_Path and WAL_Path
-   Redo_WAL_Recovery (DB_File, DB_File, 16, Replayed_Cnt, Max_Rec_Tx, Tx_Status);
+   Redo_WAL_Recovery (DB_File, DB_File, 16, Replayed_Cnt, Max_Rec_Tx, Max_Seen_Tx_Id, Tx_Status);
    Check (Tx_Status = Status_IO_Error);
 
    --  Simulate crash recovery by deleting DB_File and replaying only committed WAL frames
    Delete_File_If_Exists (DB_File);
-   Redo_WAL_Recovery (DB_File, WAL_File, 16, Replayed_Cnt, Max_Rec_Tx, Tx_Status);
+   Redo_WAL_Recovery (DB_File, WAL_File, 16, Replayed_Cnt, Max_Rec_Tx, Max_Seen_Tx_Id, Tx_Status);
    Check (Tx_Status = Status_Ok and then Replayed_Cnt = 5);
    Check (Max_Rec_Tx = Tx_Toast.Id);
+   --  Max_Seen_Tx also covers the crashed transaction's frame (its id must never be reused)
+   Check (Max_Seen_Tx_Id = Tx_Crashed.Id and then Max_Seen_Tx_Id > Max_Rec_Tx);
+   Read_Page (DB_File, 7, Page_In, Read_Ok);
+   Check (not Read_Ok);
 
    --  Verify Page 0 has committed Page_Out, NOT uncommitted Page_Uncomm
    Read_Page (DB_File, 0, Page_In, Read_Ok);
@@ -1112,6 +1341,79 @@ begin
    else
       Check (False);
    end if;
+
+   --  Redo replays in COMMIT order: two transactions stage page 9, and the one that
+   --  staged last commits first, so the surviving page is the last committed version
+   Begin_Tx (Next_Tx, Tx_Ord_A);
+   Begin_Tx (Next_Tx, Tx_Ord_B);
+   Encode_WAL_Frame (Tx_Ord_A.Id, 9, Page_A, WAL_Crc, WAL_Uncomm, WAL_Frame_Data);
+   Append_WAL_Frame (WAL_File, WAL_Uncomm, WAL_App_Ok);
+   Check (WAL_App_Ok);
+   Encode_WAL_Frame (Tx_Ord_B.Id, 9, Page_B, WAL_Crc, WAL_Uncomm, WAL_Frame_Data);
+   Append_WAL_Frame (WAL_File, WAL_Uncomm, WAL_App_Ok);
+   Check (WAL_App_Ok);
+   Commit_Tx (Tx_Ord_B, DB_File, WAL_File, 8, Page_B, Tx_Status);
+   Check (Tx_Status = Status_Ok);
+   Commit_Tx (Tx_Ord_A, DB_File, WAL_File, 8, Page_A, Tx_Status);
+   Check (Tx_Status = Status_Ok);
+   Read_Page (DB_File, 9, Page_In, Read_Ok);
+   Check (Read_Ok and then Page_In = Page_A);
+   Delete_File_If_Exists (DB_File);
+   Redo_WAL_Recovery (DB_File, WAL_File, 64, Replayed_Cnt, Max_Rec_Tx, Max_Seen_Tx_Id, Tx_Status);
+   Check (Tx_Status = Status_Ok);
+   Read_Page (DB_File, 9, Page_In, Read_Ok);
+   Check (Read_Ok and then Page_In = Page_A);
+   Read_Page (DB_File, 8, Page_In, Read_Ok);
+   Check (Read_Ok and then Page_In = Page_A);
+
+   --  Crash leftovers at the end of the WAL / database are repaired by recovery: a torn
+   --  partial frame, a complete final frame with a bad CRC, and a torn final page.
+   --  An invalid frame in the middle of the log still fails closed.
+   Get_File_Size (WAL_File, Tail_Size, Size_Ok);
+   Check (Size_Ok and then Tail_Size mod WAL_Frame_Size = 0);
+   Append_WAL_Frame (WAL_File, WAL_Uncomm, WAL_App_Ok);
+   Check (WAL_App_Ok);
+   if Size_Ok and then Tail_Size <= File_Size'Last - 100 then
+      Truncate_File (WAL_File, Tail_Size + 100, Trunc_Ok);
+      Check (Trunc_Ok);
+   end if;
+   Redo_WAL_Recovery (DB_File, WAL_File, 64, Replayed_Cnt, Max_Rec_Tx, Max_Seen_Tx_Id, Tx_Status);
+   Check (Tx_Status = Status_Ok);
+   Get_File_Size (WAL_File, DB_Size, Size_Ok);
+   Check (Size_Ok and then DB_Size = Tail_Size);
+
+   WAL_Bad := WAL_Uncomm;
+   WAL_Bad (WAL_Header_Size + 1) := WAL_Bad (WAL_Header_Size + 1) xor 16#01#;
+   Append_WAL_Frame (WAL_File, WAL_Bad, WAL_App_Ok);
+   Check (WAL_App_Ok);
+   Redo_WAL_Recovery (DB_File, WAL_File, 64, Replayed_Cnt, Max_Rec_Tx, Max_Seen_Tx_Id, Tx_Status);
+   Check (Tx_Status = Status_Ok);
+   Get_File_Size (WAL_File, DB_Size, Size_Ok);
+   Check (Size_Ok and then DB_Size = Tail_Size);
+
+   Append_WAL_Frame (WAL_File, WAL_Bad, WAL_App_Ok);
+   Check (WAL_App_Ok);
+   Append_WAL_Frame (WAL_File, WAL_Uncomm, WAL_App_Ok);
+   Check (WAL_App_Ok);
+   Redo_WAL_Recovery (DB_File, WAL_File, 64, Replayed_Cnt, Max_Rec_Tx, Max_Seen_Tx_Id, Tx_Status);
+   Check (Tx_Status = Status_IO_Error);
+   if Size_Ok then
+      Truncate_File (WAL_File, Tail_Size, Trunc_Ok);
+      Check (Trunc_Ok);
+   end if;
+
+   Get_File_Size (DB_File, DB_Size, Size_Ok);
+   Check (Size_Ok and then DB_Size > 100 and then DB_Size mod 4096 = 0);
+   if Size_Ok and then DB_Size > 100 then
+      Truncate_File (DB_File, DB_Size - 100, Trunc_Ok);
+      Check (Trunc_Ok);
+   end if;
+   Redo_WAL_Recovery (DB_File, WAL_File, 64, Replayed_Cnt, Max_Rec_Tx, Max_Seen_Tx_Id, Tx_Status);
+   Check (Tx_Status = Status_Ok);
+   Get_File_Size (DB_File, Tail_Size, Size_Ok);
+   Check (Size_Ok and then Tail_Size = DB_Size);
+   Read_Page (DB_File, 9, Page_In, Read_Ok);
+   Check (Read_Ok and then Page_In = Page_A);
    Print_Line ("  => Passed: 16-byte TOAST pointer, NO-STEAL 3-page chain, and 2-pass committed-only WAL Redo verified.");
 
    --  6. Verify Multi-Page B+Tree Index with Multi-Level Splitting & Deletion (`Nhe_O.BTree`)
@@ -1270,6 +1572,54 @@ begin
    Get (Cache_Rec, Make_Ident ("durable:k1"), Now => 2100, Val => KV_Val, Status => KV_Status);
    Check (KV_Status = Status_Ok and then Equal_Text (KV_Val, Make_Text ("v1")));
    Check (not Exists (Cache_Rec, Make_Ident ("durable:k2"), Now => 2100));
+
+   --  Replay reproduces silent LRU evictions slot for slot: key 1 is touched by an
+   --  unlogged GET, so the 65th SET evicts key 2 at run time and during replay
+   Delete_File_If_Exists (KV_WAL_File);
+   for K in 1 .. Max_KV_Capacity loop
+      Set_Durable (KV_Evict, KV_WAL_File, Valid_Tx_Id (K), Make_Ident ("evict:" & Natural'Image (K)),
+                   Make_Text ("v"), Integer_64 (3000 + K), False, 0, KV_Status);
+      Check (KV_Status = Status_Ok);
+   end loop;
+   Get (KV_Evict, Make_Ident ("evict:" & Natural'Image (1)), 4000, KV_Val, KV_Status);
+   Check (KV_Status = Status_Ok);
+   Set_Durable (KV_Evict, KV_WAL_File, 65, Make_Ident ("evict:new"), Make_Text ("w"), 4001, False, 0, KV_Status);
+   Check (KV_Status = Status_Ok);
+   Check (Exists (KV_Evict, Make_Ident ("evict:" & Natural'Image (1)), 4002)
+          and then not Exists (KV_Evict, Make_Ident ("evict:" & Natural'Image (2)), 4002));
+   Recover_KV_From_WAL (KV_Evict_R, KV_WAL_File, 5000, 256, KV_Rec_Cnt, KV_Status);
+   Check (KV_Status = Status_Ok and then KV_Rec_Cnt = 65);
+   Evict_Same := True;
+   for I in KV_Slot_Index loop
+      if KV_Evict.Slots (I).Occupied /= KV_Evict_R.Slots (I).Occupied
+        or else not Equal_Ident (KV_Evict.Slots (I).Key, KV_Evict_R.Slots (I).Key)
+        or else not Equal_Text (KV_Evict.Slots (I).Val, KV_Evict_R.Slots (I).Val)
+      then
+         Evict_Same := False;
+      end if;
+   end loop;
+   Check (Evict_Same);
+
+   --  DEL at timestamp Now frees an expired entry without reporting a removal
+   Set_Durable (KV_Evict, KV_WAL_File, 66, Make_Ident ("ttl:short"), Make_Text ("x"), 6000, True, 5, KV_Status);
+   Check (KV_Status = Status_Ok);
+   Del_Durable (KV_Evict, KV_WAL_File, 67, Make_Ident ("ttl:short"), 7000, KV_Removed, KV_Status);
+   Check (KV_Status = Status_Ok and then not KV_Removed
+          and then not Exists (KV_Evict, Make_Ident ("ttl:short"), 0));
+
+   --  INCRBY follows Redis string2ll: no sign prefix "+", no leading zeros, no "-0"
+   Set (Cache, Make_Ident ("num:plus"), Make_Text ("+5"), 3000);
+   Incr_By (Cache, Make_Ident ("num:plus"), 1, 3000, Counter_V, KV_Status);
+   Check (KV_Status = Status_Type_Mismatch);
+   Set (Cache, Make_Ident ("num:zero"), Make_Text ("007"), 3000);
+   Incr_By (Cache, Make_Ident ("num:zero"), 1, 3000, Counter_V, KV_Status);
+   Check (KV_Status = Status_Type_Mismatch);
+   Set (Cache, Make_Ident ("num:negz"), Make_Text ("-0"), 3000);
+   Incr_By (Cache, Make_Ident ("num:negz"), 1, 3000, Counter_V, KV_Status);
+   Check (KV_Status = Status_Type_Mismatch);
+   Set (Cache, Make_Ident ("num:neg"), Make_Text ("-12"), 3000);
+   Incr_By (Cache, Make_Ident ("num:neg"), 2, 3000, Counter_V, KV_Status);
+   Check (KV_Status = Status_Ok and then Counter_V = -10);
    Delete_File_If_Exists (KV_WAL_File);
    Print_Line ("  => Passed: Redis SETEX, GET, DEL, TTL, INCRBY, WAL-before-Data rollback, and KV WAL recovery verified.");
 
@@ -1278,7 +1628,7 @@ begin
 
    --  11. Verify Formally Proven C ABI / FFI SDK (`Nhe_O.C_API`)
    Print_Line ("[11/11] Verifying C ABI / FFI SDK & Defensive Boundary Contracts (Nhe_O.C_API)...");
-   Check (C_Version_Major = 0 and then C_Version_Minor = 3);
+   Check (C_Version_Major = 0 and then C_Version_Minor = 4);
    C_Init (C_Rc);
    Check (C_Rc = C_Status_Ok);
 
@@ -1331,13 +1681,131 @@ begin
      (C_Vec_ND_A, 3, 0, C_Val_Buf, 2, 2,
       C_Hit_Cnt, C_Top_Doc, C_Top_Dist, C_Top_Par_Buf, C_Top_Par_Len, C_Graph_Hit, C_Rc);
    Check (C_Rc = C_Status_Ok and then C_Hit_Cnt = 1 and then C_Top_Doc = 1);
-   Print_Line ("  => Passed: C ABI / FFI exports, N-D vector/RAG/Delete FFI, and defensive boundary guards verified.");
+
+   --  query_nd reports the bytes written to its 512-byte buffer; query_3d the chunk size
+   C_RAG_Ingest_Full_ND (3, C_Empty_Text, 0, C_Val_Buf, 2, C_Big_Parent, 6_000, C_Vec_ND_C, 3, 0, C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   C_RAG_Query_ND
+     (C_Vec_ND_C, 3, 0, C_Empty_Text, 0, 1,
+      C_Hit_Cnt, C_Top_Doc, C_Top_Dist, C_Top_Par_Buf, C_Top_Par_Len, C_Graph_Hit, C_Rc);
+   Check (C_Rc = C_Status_Ok and then C_Top_Doc = 3 and then C_Top_Par_Len = Max_Text_Len);
+   C_RAG_Query_3D
+     (-1.0, -1.0, 0.0, 0, C_Empty_Text, 0, 1,
+      C_Hit_Cnt, C_Top_Doc, C_Top_Dist, C_Par_Bytes, C_Graph_Hit, C_Rc);
+   Check (C_Rc = C_Status_Ok and then C_Top_Doc = 3 and then C_Par_Bytes = 6_000);
+
+   --  An empty summary with an empty parent chunk is rejected
+   C_RAG_Ingest_Full_ND (4, C_Empty_Text, 0, C_Empty_Text, 0, C_Big_Parent, 0, C_Vec_ND_A, 3, 0, C_Rc);
+   Check (C_Rc = C_Status_Invalid_Arg);
+
+   --  DEL at timestamp Now: freeing an expired key does not count as a removal
+   C_KV_Set (C_Key_Buf, 3, C_Val_Buf, 2, 1000, 5, C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   C_KV_Del (C_Key_Buf, 3, 2000, C_Removed, C_Rc);
+   Check (C_Rc = C_Status_Ok and then C_Removed = 0);
+   C_KV_Set (C_Key_Buf, 3, C_Val_Buf, 2, 1000, 0, C_Rc);
+   C_KV_Del (C_Key_Buf, 3, 2000, C_Removed, C_Rc);
+   Check (C_Rc = C_Status_Ok and then C_Removed = 1);
+
+   --  nhe_o_close removes the per-process scratch files of nhe_o_init
+   C_Saved_DB  := G_DB_Path;
+   C_Saved_WAL := G_WAL_Path;
+   C_Close (C_Rc);
+   Check (C_Rc = C_Status_Ok and then not G_Initialized);
+   if C_Saved_DB.Length > 0 and then C_Saved_WAL.Length > 0 then
+      Check_File_Exists (C_Saved_DB, C_File_Found);
+      Check (not C_File_Found);
+      Check_File_Exists (C_Saved_WAL, C_File_Found);
+      Check (not C_File_Found);
+   else
+      Check (False);
+   end if;
+   C_KV_Set (C_Key_Buf, 3, C_Val_Buf, 2, 1000, 0, C_Rc);
+   Check (C_Rc = C_Status_Not_Initialized);
+
+   --  Relative paths are resolved once; DB and WAL may not alias one file
+   Make_Absolute_Path (Make_Text ("rel.db"), C_Abs_Path, C_Abs_Ok);
+   Check (C_Abs_Ok and then C_Abs_Path.Length > 7 and then C_Abs_Path.Data (1) = '/'
+          and then C_Abs_Path.Data (C_Abs_Path.Length - 6) = '/');
+   Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_capi_alias.db"));
+   C_Init_With_Paths (C_Alias_A, 24, C_Alias_B, 26, 3, C_Rc);
+   Check (C_Rc = C_Status_Invalid_Arg and then not G_Initialized);
+   Check_File_Exists (Make_Text ("/tmp/nhe_o_capi_alias.db"), C_File_Found);
+   Check (not C_File_Found);
+
+   --  Persistent database: checkpoint compacts the WAL, reopening recovers the same state
+   Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_capi_persist.db"));
+   Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_capi_persist.wal"));
+   C_Init_With_Paths (C_DB_Buf, 26, C_WAL_Buf, 27, 3, C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   C_KV_Set (C_Key_Buf, 3, C_Val_Buf, 2, 1000, 0, C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   C_RAG_Ingest_ND (1, C_Val_Buf, 2, C_Vec_ND_A, 3, 2, C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   C_RAG_Ingest_ND (2, C_Val_Buf, 2, C_Vec_ND_B, 3, 1, C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   C_RAG_Delete (2, C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   C_Checkpoint (C_Rc);
+   Check (C_Rc = C_Status_Ok and then G_Next_Tx = 2 and then G_Next_KV_Seq = 2);
+   Get_File_Size (Make_Text ("/tmp/nhe_o_capi_persist.wal"), C_WAL_Size, C_Size_Ok);
+   Check (C_Size_Ok and then C_WAL_Size = 2 * WAL_Frame_Size);
+   C_RAG_Ingest_ND (3, C_Val_Buf, 2, C_Vec_ND_C, 3, 0, C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   C_Close (C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   C_Init_With_Paths (C_DB_Buf, 26, C_WAL_Buf, 27, 3, C_Rc);
+   Check (C_Rc = C_Status_Ok and then G_Next_Tx = 3);
+   C_KV_Get (C_Key_Buf, 3, 1020, C_Out_Val_Buf, C_Out_Val_Len, C_Rc);
+   Check (C_Rc = C_Status_Ok and then C_Out_Val_Len = 2);
+   C_RAG_Query_ND
+     (C_Vec_ND_A, 3, 0, C_Empty_Text, 0, 8,
+      C_Hit_Cnt, C_Top_Doc, C_Top_Dist, C_Top_Par_Buf, C_Top_Par_Len, C_Graph_Hit, C_Rc);
+   Check (C_Rc = C_Status_Ok and then C_Hit_Cnt = 2 and then C_Top_Doc = 1);
+
+   --  The automatic checkpoint keeps the WAL far below its 4096-frame cap
+   for Round in 1 .. 600 loop
+      C_KV_Set (C_Key_Buf, 3, C_Val_Buf, 2, Integer_64 (Round), 0, C_Rc);
+      Check (C_Rc = C_Status_Ok);
+   end loop;
+   Get_File_Size (Make_Text ("/tmp/nhe_o_capi_persist.wal"), C_WAL_Size, C_Size_Ok);
+   Check (C_Size_Ok and then C_WAL_Size < Checkpoint_WAL_Frames * WAL_Frame_Size
+          and then G_Next_KV_Seq < 600);
+
+   --  An I/O failure on a durable write latches the write fault until the next reopen,
+   --  whose recovery drops the torn WAL tail
+   Get_File_Size (Make_Text ("/tmp/nhe_o_capi_persist.wal"), C_WAL_Size, C_Size_Ok);
+   if C_Size_Ok and then C_WAL_Size > 0 then
+      Truncate_File (Make_Text ("/tmp/nhe_o_capi_persist.wal"), C_WAL_Size - 1, C_Size_Ok);
+      Check (C_Size_Ok);
+   else
+      Check (False);
+   end if;
+   C_KV_Set (C_Key_Buf, 3, C_Val_Buf, 2, 5000, 0, C_Rc);
+   Check (C_Rc = C_Status_IO_Error and then G_Write_Fault);
+   C_KV_Del (C_Key_Buf, 3, 5000, C_Removed, C_Rc);
+   Check (C_Rc = C_Status_IO_Error);
+   C_RAG_Delete (1, C_Rc);
+   Check (C_Rc = C_Status_IO_Error);
+   C_Init_With_Paths (C_DB_Buf, 26, C_WAL_Buf, 27, 3, C_Rc);
+   Check (C_Rc = C_Status_Ok and then not G_Write_Fault);
+   C_KV_Set (C_Key_Buf, 3, C_Val_Buf, 2, 5000, 0, C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   C_RAG_Query_ND
+     (C_Vec_ND_A, 3, 0, C_Empty_Text, 0, 8,
+      C_Hit_Cnt, C_Top_Doc, C_Top_Dist, C_Top_Par_Buf, C_Top_Par_Len, C_Graph_Hit, C_Rc);
+   Check (C_Rc = C_Status_Ok and then C_Hit_Cnt = 2);
+   C_Close (C_Rc);
+   Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_capi_persist.db"));
+   Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_capi_persist.wal"));
+   Print_Line ("  => Passed: C ABI / FFI exports, N-D vector/RAG/Delete FFI, checkpoint, recovery, and defensive boundary guards verified.");
 
    Print_Blank_Line;
    if All_Passed then
       Print_Line ("ALL 11 Nhe_O SPARK/Ada Verification Suites (Epics 01..04) Passed Successfully.");
    else
-      Print_Line ("[ERROR] One or more Nhe_O verification checks failed.");
+      Print_Line ("[ERROR] One or more Nhe_O verification checks failed (first failing check #"
+                  & Natural'Image (First_Failed) & " of" & Natural'Image (Check_Count) & ").");
    end if;
    pragma Warnings (GNATprove, On, "statement has no effect");
    pragma Warnings (GNATprove, On, "is set by");

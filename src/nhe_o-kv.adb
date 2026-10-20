@@ -109,6 +109,9 @@ package body Nhe_O.KV is
       return Res;
    end Format_Int64;
 
+   --  Redis `string2ll` integer syntax: an optional '-' followed by a non-empty run of
+   --  decimal digits with no leading zero (the single digit "0" excepted), no '+',
+   --  no "-0", no surrounding blanks, and a value inside the Integer_64 range
    procedure Try_Parse_Int64
      (Text   : in     Bounded_Text;
       Parsed :    out Integer_64;
@@ -116,6 +119,7 @@ package body Nhe_O.KV is
      with Global => null,
           Always_Terminates,
           Post   => (if not Is_Int then Parsed = 0)
+                    and then (if Is_Int then Text.Length in 1 .. 20)
    is
       Start_Idx : Positive := 1;
       Neg       : Boolean  := False;
@@ -133,11 +137,14 @@ package body Nhe_O.KV is
       if Text.Data (1) = '-' then
          Neg       := True;
          Start_Idx := 2;
-      elsif Text.Data (1) = '+' then
-         Start_Idx := 2;
       end if;
 
       if Start_Idx > Text.Length then
+         return;
+      end if;
+
+      --  "0" is the only spelling of zero; any other leading zero (or "-0") is rejected
+      if Text.Data (Start_Idx) = '0' and then (Neg or else Text.Length > 1) then
          return;
       end if;
 
@@ -250,11 +257,33 @@ package body Nhe_O.KV is
            (for all J in 1 .. I - 1 =>
               not (Store.Slots (J).Occupied
                    and then Equal_Ident (Store.Slots (J).Key, Key)));
+         pragma Loop_Invariant
+           (for all J in I .. Max_KV_Capacity =>
+              Store.Slots (J) = Store'Loop_Entry.Slots (J));
+         pragma Loop_Invariant
+           (Removed =
+              (for some J in 1 .. I - 1 =>
+                 Store'Loop_Entry.Slots (J).Occupied
+                 and then Equal_Ident (Store'Loop_Entry.Slots (J).Key, Key)));
          if Store.Slots (I).Occupied and then Equal_Ident (Store.Slots (I).Key, Key) then
             Store.Slots (I).Occupied := False;
             Removed := True;
          end if;
       end loop;
+   end Del;
+
+   procedure Del
+     (Store   : in out KV_Store;
+      Key     : in     Bounded_Ident;
+      Now     : in     Epoch_Seconds;
+      Removed :    out Boolean)
+   is
+      Was_Live : constant Boolean := Exists (Store, Key, Now);
+      Freed    : Boolean;
+      pragma Warnings (Off, Freed);
+   begin
+      Del (Store, Key, Freed);
+      Removed := Was_Live;
    end Del;
 
    procedure Expire
@@ -399,9 +428,10 @@ package body Nhe_O.KV is
    end Get_U32_BE;
 
    procedure Encode_KV_Wal_Page
-     (Op   : in     KV_Wal_Op;
-      Slot : in     KV_Entry;
-      Page :    out Page_Buffer)
+     (Op     : in     KV_Wal_Op;
+      Slot   : in     KV_Entry;
+      Page   :    out Page_Buffer;
+      Target : in     KV_Slot_Count := 0)
    is
       Exp_U64  : constant Unsigned_64 := Unsigned_64 (Slot.Expires_At);
       Acc_U64  : constant Unsigned_64 := Unsigned_64 (Slot.Last_Access);
@@ -415,7 +445,7 @@ package body Nhe_O.KV is
       Page (5) := (if Op = KV_Op_Set then 1 else 2);
       Page (6) := (if Slot.Has_TTL then 1 else 0);
       Page (7) := Byte (Slot.Key.Length);
-      Page (8) := 0;
+      Page (8) := (if Op = KV_Op_Set then Byte (Target) else 0);
 
       Put_U32_BE (Page, 9,  Unsigned_32 (Slot.Val.Length));
       Put_U32_BE (Page, 13, Unsigned_32 (Shift_Right (Exp_U64, 32)));
@@ -439,10 +469,11 @@ package body Nhe_O.KV is
    end Encode_KV_Wal_Page;
 
    procedure Decode_KV_Wal_Page
-     (Page  : in     Page_Buffer;
-      Op    :    out KV_Wal_Op;
-      Slot  :    out KV_Entry;
-      Valid :    out Boolean)
+     (Page   : in     Page_Buffer;
+      Op     :    out KV_Wal_Op;
+      Slot   :    out KV_Entry;
+      Target :    out KV_Slot_Count;
+      Valid  :    out Boolean)
    is
       Zeroed_Page : Page_Buffer := Page;
       Stored_CRC  : Unsigned_32;
@@ -459,9 +490,10 @@ package body Nhe_O.KV is
       Parsed_Int  : Integer_64;
       Numeric_Ok  : Boolean;
    begin
-      Op    := KV_Op_Set;
-      Slot  := (others => <>);
-      Valid := False;
+      Op     := KV_Op_Set;
+      Slot   := (others => <>);
+      Target := 0;
+      Valid  := False;
 
       if Page (1) /= KV_Magic_0
         or else Page (2) /= KV_Magic_1
@@ -489,7 +521,8 @@ package body Nhe_O.KV is
         or else Raw_TTL > 1
         or else Raw_Key_Len = 0
         or else Raw_Key_Len > Max_Ident_Len
-        or else Page (8) /= 0
+        or else Natural (Page (8)) > Max_KV_Capacity
+        or else (Raw_Op = 2 and then Page (8) /= 0)
         or else Raw_Val_Len > Unsigned_32 (Max_Text_Len)
         or else (for some B in 609 .. Nhe_O.Page_Size => Page (B) /= 0)
       then
@@ -534,8 +567,39 @@ package body Nhe_O.KV is
       Slot.Expires_At  := Epoch_Seconds (Exp_U64);
       Slot.Last_Access := Epoch_Seconds (Acc_U64);
       Slot.Occupied    := (Op = KV_Op_Set);
+      Target           := (if Op = KV_Op_Set then KV_Slot_Count (Page (8)) else 0);
       Valid            := True;
    end Decode_KV_Wal_Page;
+
+   procedure Decode_KV_Wal_Page
+     (Page  : in     Page_Buffer;
+      Op    :    out KV_Wal_Op;
+      Slot  :    out KV_Entry;
+      Valid :    out Boolean)
+   is
+      Ignored_Target : KV_Slot_Count;
+      pragma Warnings (Off, Ignored_Target);
+   begin
+      Decode_KV_Wal_Page (Page, Op, Slot, Ignored_Target, Valid);
+   end Decode_KV_Wal_Page;
+
+   --  Slot currently holding Key (0 when Key is not stored)
+   function Key_Slot
+     (Store : KV_Store;
+      Key   : Bounded_Ident) return KV_Slot_Count
+     with Global => null,
+          Post   => (if Key_Slot'Result > 0 then
+                       Store.Slots (Key_Slot'Result).Occupied
+                       and then Equal_Ident (Store.Slots (Key_Slot'Result).Key, Key))
+   is
+   begin
+      for I in KV_Slot_Index loop
+         if Store.Slots (I).Occupied and then Equal_Ident (Store.Slots (I).Key, Key) then
+            return I;
+         end if;
+      end loop;
+      return 0;
+   end Key_Slot;
 
    procedure Set_Durable
      (Store    : in out KV_Store;
@@ -550,6 +614,7 @@ package body Nhe_O.KV is
    is
       Saved_Store : constant KV_Store := Store;
       Entry_Rec   : KV_Entry;
+      Target      : KV_Slot_Count;
       Page        : Page_Buffer;
       Frame       : WAL_Frame_Buffer;
       CRC         : Unsigned_32;
@@ -558,17 +623,23 @@ package body Nhe_O.KV is
    begin
       Set (Store, Key, Val, Now, Has_TTL, TTL_Sec);
 
-      Entry_Rec := (
-         Key         => Key,
-         Val         => Val,
-         Int_Val     => 0,
-         Is_Numeric  => False,
-         Has_TTL     => Has_TTL,
-         Expires_At  => (if Has_TTL then Now + TTL_Sec else 0),
-         Last_Access => Now,
-         Occupied    => True
-      );
-      Encode_KV_Wal_Page (KV_Op_Set, Entry_Rec, Page);
+      --  Log the exact slot the value landed in: replay then evicts the same victim
+      Target := Key_Slot (Store, Key);
+      if Target > 0 then
+         Entry_Rec := Store.Slots (Target);
+      else
+         Entry_Rec := (
+            Key         => Key,
+            Val         => Val,
+            Int_Val     => 0,
+            Is_Numeric  => False,
+            Has_TTL     => Has_TTL,
+            Expires_At  => (if Has_TTL then Now + TTL_Sec else 0),
+            Last_Access => Now,
+            Occupied    => True
+         );
+      end if;
+      Encode_KV_Wal_Page (KV_Op_Set, Entry_Rec, Page, Target);
       Encode_WAL_Frame (Tx, 0, Page, CRC, Frame, WAL_Frame_KV);
       Append_WAL_Frame (WAL_Path, Frame, WAL_Ok);
 
@@ -580,29 +651,16 @@ package body Nhe_O.KV is
       end if;
    end Set_Durable;
 
-   procedure Del_Durable
-     (Store    : in out KV_Store;
-      WAL_Path : in     Bounded_Text;
+   procedure Append_Del_Frame
+     (WAL_Path : in     Bounded_Text;
       Tx       : in     Valid_Tx_Id;
       Key      : in     Bounded_Ident;
-      Removed  :    out Boolean;
-      Status   :    out Engine_Status)
+      WAL_Ok   :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => WAL_Path.Length > 0
    is
-      Saved_Store : constant KV_Store := Store;
-      Entry_Rec   : KV_Entry;
-      Page        : Page_Buffer;
-      Frame       : WAL_Frame_Buffer;
-      CRC         : Unsigned_32;
-      pragma Warnings (Off, CRC);
-      WAL_Ok      : Boolean;
-   begin
-      Del (Store, Key, Removed);
-      if not Removed then
-         Status := Status_Ok;
-         return;
-      end if;
-
-      Entry_Rec := (
+      Entry_Rec : constant KV_Entry := (
          Key         => Key,
          Val         => (Length => 0, Data => [others => ' ']),
          Int_Val     => 0,
@@ -612,12 +670,69 @@ package body Nhe_O.KV is
          Last_Access => 0,
          Occupied    => False
       );
+      Page      : Page_Buffer;
+      Frame     : WAL_Frame_Buffer;
+      CRC       : Unsigned_32;
+      pragma Warnings (Off, CRC);
+   begin
       Encode_KV_Wal_Page (KV_Op_Del, Entry_Rec, Page);
       Encode_WAL_Frame (Tx, 0, Page, CRC, Frame, WAL_Frame_KV);
       Append_WAL_Frame (WAL_Path, Frame, WAL_Ok);
+   end Append_Del_Frame;
 
+   procedure Del_Durable
+     (Store    : in out KV_Store;
+      WAL_Path : in     Bounded_Text;
+      Tx       : in     Valid_Tx_Id;
+      Key      : in     Bounded_Ident;
+      Removed  :    out Boolean;
+      Status   :    out Engine_Status)
+   is
+      Saved_Store : constant KV_Store := Store;
+      WAL_Ok      : Boolean;
+   begin
+      Del (Store, Key, Removed);
+      if not Removed then
+         Status := Status_Ok;
+         return;
+      end if;
+
+      Append_Del_Frame (WAL_Path, Tx, Key, WAL_Ok);
       if WAL_Ok then
          Status := Status_Ok;
+      else
+         Store   := Saved_Store;
+         Removed := False;
+         Status  := Status_IO_Error;
+      end if;
+   end Del_Durable;
+
+   procedure Del_Durable
+     (Store    : in out KV_Store;
+      WAL_Path : in     Bounded_Text;
+      Tx       : in     Valid_Tx_Id;
+      Key      : in     Bounded_Ident;
+      Now      : in     Epoch_Seconds;
+      Removed  :    out Boolean;
+      Status   :    out Engine_Status)
+   is
+      Saved_Store : constant KV_Store := Store;
+      Was_Live    : constant Boolean  := Exists (Store, Key, Now);
+      Freed       : Boolean;
+      WAL_Ok      : Boolean;
+   begin
+      Del (Store, Key, Freed);
+      if not Freed then
+         Removed := False;
+         Status  := Status_Ok;
+         return;
+      end if;
+
+      --  Log every freed slot (live or expired) so replay reproduces the slot layout
+      Append_Del_Frame (WAL_Path, Tx, Key, WAL_Ok);
+      if WAL_Ok then
+         Removed := Was_Live;
+         Status  := Status_Ok;
       else
          Store   := Saved_Store;
          Removed := False;
@@ -637,6 +752,7 @@ package body Nhe_O.KV is
    is
       Saved_Store : constant KV_Store := Store;
       Entry_Rec   : KV_Entry          := (others => <>);
+      Target      : KV_Slot_Count;
       Page        : Page_Buffer;
       Frame       : WAL_Frame_Buffer;
       CRC         : Unsigned_32;
@@ -649,14 +765,12 @@ package body Nhe_O.KV is
          return;
       end if;
 
-      for I in KV_Slot_Index loop
-         if Store.Slots (I).Occupied and then Equal_Ident (Store.Slots (I).Key, Key) then
-            Entry_Rec := Store.Slots (I);
-            exit;
-         end if;
-      end loop;
+      Target := Key_Slot (Store, Key);
+      if Target > 0 then
+         Entry_Rec := Store.Slots (Target);
+      end if;
 
-      Encode_KV_Wal_Page (KV_Op_Set, Entry_Rec, Page);
+      Encode_KV_Wal_Page (KV_Op_Set, Entry_Rec, Page, Target);
       Encode_WAL_Frame (Tx, 0, Page, CRC, Frame, WAL_Frame_KV);
       Append_WAL_Frame (WAL_Path, Frame, WAL_Ok);
 
@@ -681,6 +795,7 @@ package body Nhe_O.KV is
    is
       Saved_Store : constant KV_Store := Store;
       Entry_Rec   : KV_Entry          := (others => <>);
+      Target      : KV_Slot_Count;
       Page        : Page_Buffer;
       Frame       : WAL_Frame_Buffer;
       CRC         : Unsigned_32;
@@ -693,14 +808,12 @@ package body Nhe_O.KV is
          return;
       end if;
 
-      for I in KV_Slot_Index loop
-         if Store.Slots (I).Occupied and then Equal_Ident (Store.Slots (I).Key, Key) then
-            Entry_Rec := Store.Slots (I);
-            exit;
-         end if;
-      end loop;
+      Target := Key_Slot (Store, Key);
+      if Target > 0 then
+         Entry_Rec := Store.Slots (Target);
+      end if;
 
-      Encode_KV_Wal_Page (KV_Op_Set, Entry_Rec, Page);
+      Encode_KV_Wal_Page (KV_Op_Set, Entry_Rec, Page, Target);
       Encode_WAL_Frame (Tx, 0, Page, CRC, Frame, WAL_Frame_KV);
       Append_WAL_Frame (WAL_Path, Frame, WAL_Ok);
 
@@ -731,14 +844,23 @@ package body Nhe_O.KV is
       Is_EOF        : Boolean;
       Op            : KV_Wal_Op;
       Slot          : KV_Entry;
+      Target        : KV_Slot_Count;
       Valid         : Boolean;
       Removed       : Boolean;
       pragma Warnings (Off, Removed);
-      Target        : KV_Slot_Index;
+      Legacy_Target : KV_Slot_Index;
       Effective_Now : Epoch_Seconds := Now;
+      Repair_Stat   : Engine_Status;
    begin
       Replayed_Ops := 0;
       Status       := Status_Ok;
+
+      --  Drop a torn trailing frame left by a crash during Append_WAL_Frame
+      Repair_WAL_Tail (WAL_Path, Repair_Stat);
+      if Repair_Stat /= Status_Ok then
+         Status := Repair_Stat;
+         return;
+      end if;
 
       for Idx in 0 .. Max_Frames - 1 loop
          pragma Loop_Invariant (Replayed_Ops <= Idx);
@@ -763,7 +885,7 @@ package body Nhe_O.KV is
 
          if Get_WAL_Frame_Kind (Frame) = WAL_Frame_KV then
             Decode_WAL_Frame (Frame, Frame_Tx, Page_Id, Page);
-            Decode_KV_Wal_Page (Page, Op, Slot, Valid);
+            Decode_KV_Wal_Page (Page, Op, Slot, Target, Valid);
             if not Valid then
                Store        := Saved_Store;
                Replayed_Ops := 0;
@@ -773,13 +895,24 @@ package body Nhe_O.KV is
 
             if Op = KV_Op_Del then
                Del (Store, Slot.Key, Removed);
-               Replayed_Ops := Replayed_Ops + 1;
+            elsif Target in KV_Slot_Index then
+               --  Exact slot replay: whatever occupied Target at run time was overwritten
+               --  (an LRU / expired-slot eviction), and Key lives in no other slot
+               for I in KV_Slot_Index loop
+                  if I /= Target
+                    and then Store.Slots (I).Occupied
+                    and then Equal_Ident (Store.Slots (I).Key, Slot.Key)
+                  then
+                     Store.Slots (I).Occupied := False;
+                  end if;
+               end loop;
+               Store.Slots (Target) := Slot;
             else
+               --  Legacy frame without a slot hint: re-select a slot at the frame's time
                if Slot.Last_Access > Effective_Now then
                   Effective_Now := Slot.Last_Access;
                end if;
 
-               --  Reclaim any earlier replayed slots that have expired by Effective_Now
                for I in KV_Slot_Index loop
                   if Is_Slot_Expired (Store.Slots (I), Effective_Now) then
                      Store.Slots (I).Occupied := False;
@@ -796,11 +929,11 @@ package body Nhe_O.KV is
                         Store.Slots (I).Occupied := False;
                      end if;
                   end loop;
-                  Target := Select_Target_Slot (Store, Slot.Key, Effective_Now);
-                  Store.Slots (Target) := Slot;
+                  Legacy_Target := Select_Target_Slot (Store, Slot.Key, Effective_Now);
+                  Store.Slots (Legacy_Target) := Slot;
                end if;
-               Replayed_Ops := Replayed_Ops + 1;
             end if;
+            Replayed_Ops := Replayed_Ops + 1;
          end if;
       end loop;
 
@@ -822,5 +955,48 @@ package body Nhe_O.KV is
          end if;
       end if;
    end Recover_KV_From_WAL;
+
+   function Occupied_Count (Store : KV_Store) return KV_Slot_Count is
+      Count : KV_Slot_Count := 0;
+   begin
+      for I in KV_Slot_Index loop
+         pragma Loop_Invariant (Count < I);
+         if Store.Slots (I).Occupied then
+            Count := Count + 1;
+         end if;
+      end loop;
+      return Count;
+   end Occupied_Count;
+
+   procedure Write_KV_Snapshot
+     (Store     : in     KV_Store;
+      WAL_Path  : in     Bounded_Text;
+      First_Seq : in     Valid_Tx_Id;
+      Next_Seq  :    out Valid_Tx_Id;
+      Status    :    out Engine_Status)
+   is
+      Page   : Page_Buffer;
+      Frame  : WAL_Frame_Buffer;
+      CRC    : Unsigned_32;
+      pragma Warnings (Off, CRC);
+      WAL_Ok : Boolean;
+   begin
+      Next_Seq := First_Seq;
+      Status   := Status_Ok;
+
+      for I in KV_Slot_Index loop
+         pragma Loop_Invariant (Next_Seq in First_Seq .. First_Seq + Tx_Id (I - 1));
+         if Store.Slots (I).Occupied and then Store.Slots (I).Key.Length > 0 then
+            Encode_KV_Wal_Page (KV_Op_Set, Store.Slots (I), Page, I);
+            Encode_WAL_Frame (Next_Seq, 0, Page, CRC, Frame, WAL_Frame_KV);
+            Append_WAL_Frame (WAL_Path, Frame, WAL_Ok);
+            if not WAL_Ok then
+               Status := Status_IO_Error;
+               return;
+            end if;
+            Next_Seq := Next_Seq + 1;
+         end if;
+      end loop;
+   end Write_KV_Snapshot;
 
 end Nhe_O.KV;

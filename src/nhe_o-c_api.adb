@@ -96,22 +96,267 @@ package body Nhe_O.C_API is
 
    function C_Version_Major return int is (0);
 
-   function C_Version_Minor return int is (3);
+   function C_Version_Minor return int is (4);
 
-   procedure C_Init (Out_Status : out int) is
+   Empty_Text : constant Bounded_Text := (Length => 0, Data => [others => ' ']);
+
+   --  Library-level defaults, so resetting the runtime copies static data instead of
+   --  building large aggregates on the caller's stack
+   Empty_KV_Store : constant KV_Store      := (others => <>);
+   Empty_Broker   : constant PubSub_Broker := (others => <>);
+
+   --  Suffix of the temporary WAL written by C_Checkpoint next to the live WAL
+   Checkpoint_Suffix : constant String   := ".ckpt";
+   Max_WAL_Path_Len  : constant Positive := Max_Text_Len - Checkpoint_Suffix'Length;
+
+   --  "/tmp/nhe_o_c_api.<Pid><Suffix>": per-process scratch file used by C_Init
+   function Scratch_Path
+     (Pid    : Natural;
+      Suffix : String) return Bounded_Text
+     with Global => null,
+          Pre    => Suffix'Length <= 16,
+          Post   => Scratch_Path'Result.Length > 0
+   is
+      Prefix : constant String := "/tmp/nhe_o_c_api.";
+      subtype Digit_Index is Positive range 1 .. 10; --  Natural'Last has 10 digits
+      Dec    : String (Digit_Index) := [others => '0'];
+      V      : Natural              := Pid;
+      First  : Digit_Index          := Digit_Index'Last;
+      Res    : Bounded_Text         := Make_Text (Prefix);
    begin
-      G_DB_Path  := Make_Text ("/tmp/nhe_o_c_api.db");
-      G_WAL_Path := Make_Text ("/tmp/nhe_o_c_api.wal");
-      Delete_File_If_Exists (G_DB_Path);
-      Delete_File_If_Exists (G_WAL_Path);
+      for I in reverse Digit_Index loop
+         Dec (I) := Character'Val (Character'Pos ('0') + V mod 10);
+         V := V / 10;
+      end loop;
+
+      for I in Digit_Index loop
+         if Dec (I) /= '0' then
+            First := I;
+            exit;
+         end if;
+      end loop;
+
+      for I in First .. Digit_Index'Last loop
+         pragma Loop_Invariant (Res.Length = Prefix'Length + (I - First));
+         Res.Length := Res.Length + 1;
+         Res.Data (Res.Length) := Dec (I);
+      end loop;
+
+      for I in Suffix'Range loop
+         pragma Loop_Invariant
+           (Res.Length = Prefix'Length + (Digit_Index'Last - First + 1) + (I - Suffix'First));
+         Res.Length := Res.Length + 1;
+         Res.Data (Res.Length) := Suffix (I);
+      end loop;
+      return Res;
+   end Scratch_Path;
+
+   --  WAL_Path & ".ckpt"
+   function Checkpoint_Path (WAL_Path : Bounded_Text) return Bounded_Text
+     with Global => null,
+          Pre    => WAL_Path.Length in 1 .. Max_WAL_Path_Len,
+          Post   => Checkpoint_Path'Result.Length = WAL_Path.Length + Checkpoint_Suffix'Length
+   is
+      Res : Bounded_Text := WAL_Path;
+   begin
+      for I in Checkpoint_Suffix'Range loop
+         pragma Loop_Invariant
+           (Res.Length = WAL_Path.Length + (I - Checkpoint_Suffix'First));
+         Res.Length := Res.Length + 1;
+         Res.Data (Res.Length) := Checkpoint_Suffix (I);
+      end loop;
+      return Res;
+   end Checkpoint_Path;
+
+   --  Return every runtime global except G_Scratch_Engine to its uninitialized state
+   procedure Reset_Runtime
+     with Global => (Output => (G_Initialized, G_Ephemeral, G_Next_Tx, G_Next_KV_Seq,
+                                G_DB_Path, G_WAL_Path, G_KV_Store, G_Broker,
+                                G_RAG_Engine, G_Write_Fault)),
+          Always_Terminates
+   is
+   begin
+      G_Initialized := False;
+      G_Ephemeral   := False;
       G_Next_Tx     := 1;
       G_Next_KV_Seq := 1;
-      G_KV_Store    := (others => <>);
-      G_Broker      := (others => <>);
+      G_DB_Path     := Empty_Text;
+      G_WAL_Path    := Empty_Text;
+      G_KV_Store    := Empty_KV_Store;
+      G_Broker      := Empty_Broker;
       Init_RAG_Engine (G_RAG_Engine, 3);
+      G_Write_Fault := False;
+   end Reset_Runtime;
+
+   procedure C_Init (Out_Status : out int) is
+      Pid       : constant Natural := Get_Process_Id;
+      DB_Gone   : Boolean;
+      WAL_Gone  : Boolean;
+      Ckpt_Gone : Boolean;
+   begin
+      Reset_Runtime;
+      G_DB_Path  := Scratch_Path (Pid, ".db");
+      G_WAL_Path := Scratch_Path (Pid, ".wal");
+      Delete_File_If_Exists (G_DB_Path, DB_Gone);
+      Delete_File_If_Exists (G_WAL_Path, WAL_Gone);
+      Delete_File_If_Exists (Scratch_Path (Pid, ".wal" & Checkpoint_Suffix), Ckpt_Gone);
+      if not (DB_Gone and then WAL_Gone and then Ckpt_Gone) then
+         --  Never adopt a scratch file this process cannot remove (e.g. another user's)
+         G_DB_Path  := Empty_Text;
+         G_WAL_Path := Empty_Text;
+         Out_Status := C_Status_IO_Error;
+         return;
+      end if;
+      G_Ephemeral   := True;
       G_Initialized := True;
       Out_Status    := C_Status_Ok;
    end C_Init;
+
+   procedure C_Close (Out_Status : out int) is
+      DB_Gone   : Boolean := True;
+      WAL_Gone  : Boolean := True;
+      Ckpt_Gone : Boolean := True;
+   begin
+      if G_Ephemeral and then G_DB_Path.Length > 0 then
+         Delete_File_If_Exists (G_DB_Path, DB_Gone);
+      end if;
+      if G_Ephemeral and then G_WAL_Path.Length in 1 .. Max_WAL_Path_Len then
+         Delete_File_If_Exists (G_WAL_Path, WAL_Gone);
+         Delete_File_If_Exists (Checkpoint_Path (G_WAL_Path), Ckpt_Gone);
+      end if;
+      Reset_Runtime;
+      Out_Status :=
+        (if DB_Gone and then WAL_Gone and then Ckpt_Gone then C_Status_Ok
+         else C_Status_IO_Error);
+   end C_Close;
+
+   procedure C_Checkpoint (Out_Status : out int) is
+      Tmp_Path    : Bounded_Text;
+      Tmp_Gone    : Boolean;
+      Tmp_Exists  : Boolean;
+      Append_Ok   : Boolean;
+      Renamed_Ok  : Boolean;
+      Next_Seq    : Valid_Tx_Id;
+      Status      : Engine_Status;
+      Frozen_Page : Page_Buffer;
+      Frame       : WAL_Frame_Buffer;
+      Frame_CRC   : Unsigned_32;
+      pragma Warnings (Off, Frame_CRC);
+   begin
+      if not G_Initialized
+        or else G_DB_Path.Length = 0
+        or else G_WAL_Path.Length = 0
+      then
+         Out_Status := C_Status_Not_Initialized;
+         return;
+      end if;
+
+      if G_Write_Fault or else G_WAL_Path.Length > Max_WAL_Path_Len then
+         Out_Status := C_Status_IO_Error;
+         return;
+      end if;
+
+      if not Is_Valid_RAG_Engine (G_RAG_Engine) then
+         Out_Status := C_Status_Capacity_Exceeded;
+         return;
+      end if;
+
+      --  1. Freeze a copy of the engine (refused while a transaction is in flight).
+      --     Every committed page is already materialized in G_DB_Path: a commit whose
+      --     materialization failed set G_Write_Fault, which refuses this checkpoint.
+      G_Scratch_Engine := G_RAG_Engine;
+      Freeze_RAG_Engine (G_Scratch_Engine, Status);
+      if Status /= Status_Ok then
+         Out_Status := To_C_Status (Status);
+         return;
+      end if;
+
+      --  2. Write the replacement WAL next to the live one: the KV snapshot, then the
+      --     commit frame of the frozen transaction 1 carrying the frozen Page 1
+      Tmp_Path := Checkpoint_Path (G_WAL_Path);
+      Delete_File_If_Exists (Tmp_Path, Tmp_Gone);
+      if not Tmp_Gone then
+         Out_Status := C_Status_IO_Error;
+         return;
+      end if;
+
+      Write_KV_Snapshot (G_KV_Store, Tmp_Path, 1, Next_Seq, Status);
+      if Status = Status_Ok then
+         Build_RAG_Slotted_Page (G_Scratch_Engine, 1, Frozen_Page);
+         Encode_WAL_Frame (1, 1, Frozen_Page, Frame_CRC, Frame, WAL_Frame_Commit);
+         Append_WAL_Frame (Tmp_Path, Frame, Append_Ok);
+      else
+         Append_Ok := False;
+      end if;
+      if not Append_Ok then
+         Delete_File_If_Exists (Tmp_Path);
+         Out_Status := C_Status_IO_Error;
+         return;
+      end if;
+
+      --  3. Commit point: rename(2) the new WAL over the live one, then fsync the directory
+      Replace_File (Tmp_Path, G_WAL_Path, Renamed_Ok);
+      if not Renamed_Ok then
+         Check_File_Exists (Tmp_Path, Tmp_Exists);
+         if Tmp_Exists then
+            --  The rename did not happen: the live WAL is untouched
+            Delete_File_If_Exists (Tmp_Path);
+            Out_Status := C_Status_IO_Error;
+            return;
+         end if;
+         --  The new WAL is live but its directory entry may not be durable: refuse
+         --  writes until a reopen re-derives the durable state from disk
+         G_Write_Fault := True;
+      end if;
+
+      --  4. The live WAL now describes the frozen engine; Page 1 of G_DB_Path is
+      --     rewritten by the next commit, or by the redo of a recovery
+      G_RAG_Engine  := G_Scratch_Engine;
+      G_Next_Tx     := 2;
+      G_Next_KV_Seq := Next_Seq;
+      Out_Status    := (if Renamed_Ok then C_Status_Ok else C_Status_IO_Error);
+   end C_Checkpoint;
+
+   --  Run C_Checkpoint once the WAL or an id space is past its automatic threshold
+   procedure Maybe_Checkpoint
+     with Global => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path, G_KV_Store),
+                     In_Out => (G_Next_Tx, G_Next_KV_Seq, G_RAG_Engine, G_Scratch_Engine,
+                                G_Write_Fault)),
+          Always_Terminates
+   is
+      WAL_Size    : File_Size;
+      Size_Ok     : Boolean;
+      Ckpt_Status : int;
+      pragma Warnings (Off, Ckpt_Status);
+   begin
+      if not G_Initialized or else G_Write_Fault or else G_WAL_Path.Length = 0 then
+         return;
+      end if;
+
+      Get_File_Size (G_WAL_Path, WAL_Size, Size_Ok);
+      if G_Next_Tx >= Checkpoint_Tx_Id
+        or else G_Next_KV_Seq >= Checkpoint_Tx_Id
+        or else (Size_Ok and then WAL_Size >= Checkpoint_WAL_Frames * WAL_Frame_Size)
+      then
+         C_Checkpoint (Ckpt_Status);
+      end if;
+   end Maybe_Checkpoint;
+
+   --  Bookkeeping after a durable write returned Status: checkpoint after a success,
+   --  enter the write-fault state after an I/O error
+   procedure After_Durable_Write (Status : in Engine_Status)
+     with Global => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path, G_KV_Store),
+                     In_Out => (G_Next_Tx, G_Next_KV_Seq, G_RAG_Engine, G_Scratch_Engine,
+                                G_Write_Fault)),
+          Always_Terminates
+   is
+   begin
+      if Status = Status_Ok then
+         Maybe_Checkpoint;
+      elsif Status = Status_IO_Error then
+         G_Write_Fault := True;
+      end if;
+   end After_Durable_Write;
 
    procedure C_Init_With_Paths
      (DB_Path_Buf  : in     C_Text_Buf;
@@ -121,45 +366,30 @@ package body Nhe_O.C_API is
       Dim          : in     int;
       Out_Status   :    out int)
    is
-      DB_P          : Bounded_Text;
-      WAL_P         : Bounded_Text;
-      WAL_Exists    : Boolean;
-      DB_Exists     : Boolean;
-      Probe_Frame   : WAL_Frame_Buffer;
-      Probe_WAL_Ok  : Boolean;
-      Probe_EOF     : Boolean;
-      Probe_Page    : Page_Buffer;
-      Probe_DB_Ok   : Boolean;
-      Probe_DB_EOF  : Boolean;
-      Probe_P0_Ok   : Boolean;
-      Probe_P0_EOF  : Boolean;
-      Frame_Tx      : Valid_Tx_Id;
-      Frame_Pg      : Valid_Page_Id;
-      KV_Replayed   : Natural;
-      KV_Stat       : Engine_Status;
-      WAL_Replayed   : Natural;
-      Max_Rec_Tx     : Tx_Id;
-      Max_Seen_Tx    : Tx_Id := 0;
-      Max_Seen_KV_Tx : Tx_Id := 0;
-      Probe_Slot_Pg  : Slotted_Page;
-      Probe_Slot_Ok  : Boolean;
-      WAL_Stat       : Engine_Status;
-      RAG_Stat       : Engine_Status;
-      pragma Warnings (Off, Probe_Frame);
-      pragma Warnings (Off, Probe_Page);
-      pragma Warnings (Off, Probe_P0_Ok);
-      pragma Warnings (Off, Frame_Pg);
+      Raw_DB      : Bounded_Text;
+      Raw_WAL     : Bounded_Text;
+      DB_P        : Bounded_Text;
+      WAL_P       : Bounded_Text;
+      Abs_Ok      : Boolean;
+      WAL_Existed : Boolean;
+      WAL_Ok      : Boolean;
+      DB_Exists   : Boolean;
+      Same        : Boolean;
+      KV_Replayed : Natural;
+      Status      : Engine_Status;
+      Max_Seen_Tx : Tx_Id;
+      Max_KV_Seq  : Tx_Id := 0;
+      Frame       : WAL_Frame_Buffer;
+      Frame_Ok    : Boolean;
+      Frame_EOF   : Boolean;
+      Frame_Tx    : Valid_Tx_Id;
+      Frame_Pg    : Valid_Page_Id;
+      Frame_Page  : Page_Buffer;
       pragma Warnings (Off, KV_Replayed);
-      pragma Warnings (Off, WAL_Replayed);
+      pragma Warnings (Off, Frame_Pg);
+      pragma Warnings (Off, Frame_Page);
    begin
-      G_Initialized := False;
-      G_Next_Tx     := 1;
-      G_Next_KV_Seq := 1;
-      G_DB_Path     := Make_Text ("/tmp/nhe_o_c_api.db");
-      G_WAL_Path    := Make_Text ("/tmp/nhe_o_c_api.wal");
-      G_KV_Store    := (others => <>);
-      G_Broker      := (others => <>);
-      Init_RAG_Engine (G_RAG_Engine, 3);
+      Reset_Runtime;
 
       if DB_Path_Len <= 0 or else DB_Path_Len > int (Max_Text_Len)
         or else WAL_Path_Len <= 0 or else WAL_Path_Len > int (Max_Text_Len)
@@ -169,10 +399,27 @@ package body Nhe_O.C_API is
          return;
       end if;
 
-      DB_P  := To_Bounded_Text (DB_Path_Buf, Text_Length (DB_Path_Len));
-      WAL_P := To_Bounded_Text (WAL_Path_Buf, Text_Length (WAL_Path_Len));
+      Raw_DB  := To_Bounded_Text (DB_Path_Buf, Text_Length (DB_Path_Len));
+      Raw_WAL := To_Bounded_Text (WAL_Path_Buf, Text_Length (WAL_Path_Len));
+      if Has_Embedded_NUL (Raw_DB) or else Has_Embedded_NUL (Raw_WAL) then
+         Out_Status := C_Status_Invalid_Arg;
+         return;
+      end if;
 
-      if Has_Embedded_NUL (DB_P)
+      --  Resolve relative paths once, so a later chdir(2) cannot redirect the database
+      Make_Absolute_Path (Raw_DB, DB_P, Abs_Ok);
+      if not Abs_Ok then
+         Out_Status := C_Status_Invalid_Arg;
+         return;
+      end if;
+      Make_Absolute_Path (Raw_WAL, WAL_P, Abs_Ok);
+      if not Abs_Ok then
+         Out_Status := C_Status_Invalid_Arg;
+         return;
+      end if;
+
+      if WAL_P.Length > Max_WAL_Path_Len
+        or else Has_Embedded_NUL (DB_P)
         or else Has_Embedded_NUL (WAL_P)
         or else Equal_Text (DB_P, WAL_P)
       then
@@ -180,130 +427,94 @@ package body Nhe_O.C_API is
          return;
       end if;
 
-      G_DB_Path  := DB_P;
-      G_WAL_Path := WAL_P;
-      Init_RAG_Engine (G_RAG_Engine, Vector_Dim (Dim));
-
-      --  Recover existing WAL / DB state when files already exist on disk
-      --  and propagate any torn frame/page or CRC32 failure
-      Check_File_Exists (G_WAL_Path, WAL_Exists);
-      if WAL_Exists then
-         Read_WAL_Frame (G_WAL_Path, 0, Probe_Frame, Probe_WAL_Ok, Probe_EOF);
-         if not Probe_WAL_Ok and then not Probe_EOF then
-            Out_Status := C_Status_IO_Error;
-            return;
-         elsif Probe_WAL_Ok then
-            Recover_KV_From_WAL
-              (Store        => G_KV_Store,
-               WAL_Path     => G_WAL_Path,
-               Now          => 0,
-               Max_Frames   => Max_WAL_Scan_Frames,
-               Replayed_Ops => KV_Replayed,
-               Status       => KV_Stat);
-            if KV_Stat /= Status_Ok then
-               G_KV_Store := (others => <>);
-               Out_Status := To_C_Status (KV_Stat);
-               return;
-            end if;
-
-            Redo_WAL_Recovery
-              (DB_Path          => G_DB_Path,
-               WAL_Path         => G_WAL_Path,
-               Max_Frames       => Max_WAL_Scan_Frames,
-               Replayed_Count   => WAL_Replayed,
-               Max_Recovered_Tx => Max_Rec_Tx,
-               Status           => WAL_Stat);
-            if WAL_Stat /= Status_Ok then
-               G_KV_Store := (others => <>);
-               Out_Status := To_C_Status (WAL_Stat);
-               return;
-            end if;
-
-            if Max_Rec_Tx > Max_Seen_Tx then
-               Max_Seen_Tx := Max_Rec_Tx;
-            end if;
-
-            --  Scan all valid WAL frames for max transaction and KV sequence IDs
-            for Idx in 0 .. Max_WAL_Scan_Frames - 1 loop
-               pragma Loop_Invariant (G_WAL_Path.Length > 0);
-               Read_WAL_Frame (G_WAL_Path, Idx, Probe_Frame, Probe_WAL_Ok);
-               exit when not Probe_WAL_Ok;
-               if Verify_WAL_Frame (Probe_Frame) then
-                  Decode_WAL_Frame (Probe_Frame, Frame_Tx, Frame_Pg, Probe_Page);
-                  if Get_WAL_Frame_Kind (Probe_Frame) = WAL_Frame_KV then
-                     if Frame_Tx > Max_Seen_KV_Tx then
-                        Max_Seen_KV_Tx := Frame_Tx;
-                     end if;
-                  else
-                     if Frame_Tx > Max_Seen_Tx then
-                        Max_Seen_Tx := Frame_Tx;
-                     end if;
-                  end if;
-               end if;
-            end loop;
-         end if;
+      --  The two paths must not reach one file through links or aliases ("x" vs
+      --  "./x"). The WAL is created when missing so that stat(2) can compare them.
+      Check_File_Exists (WAL_P, WAL_Existed);
+      Create_File_If_Missing (WAL_P, WAL_Ok);
+      if not WAL_Ok then
+         Out_Status := C_Status_IO_Error;
+         return;
       end if;
-
-      Check_File_Exists (G_DB_Path, DB_Exists);
+      Check_File_Exists (DB_P, DB_Exists);
       if DB_Exists then
-         Read_Page (G_DB_Path, 1, Probe_Page, Probe_DB_Ok, Probe_DB_EOF);
-         if not Probe_DB_Ok and then not Probe_DB_EOF then
-            G_KV_Store := (others => <>);
-            Out_Status := C_Status_IO_Error;
+         Check_Same_File (DB_P, WAL_P, Same);
+         if Same then
+            if not WAL_Existed then
+               Delete_File_If_Exists (WAL_P);
+            end if;
+            Out_Status := C_Status_Invalid_Arg;
             return;
-         elsif not Probe_DB_Ok and then Probe_DB_EOF then
-            --  Allow a 0-byte empty placeholder .db file, but reject a truncated 1-page (4096 B) .db file
-            Read_Page (G_DB_Path, 0, Probe_Page, Probe_P0_Ok, Probe_P0_EOF);
-            if not Probe_P0_EOF then
-               G_KV_Store := (others => <>);
-               Out_Status := C_Status_IO_Error;
-               return;
-            end if;
-         elsif Probe_DB_Ok then
-            Decode_Slotted_Page (Probe_Page, Probe_Slot_Pg, Probe_Slot_Ok);
-            if Probe_Slot_Ok and then Probe_Slot_Pg.Page_LSN_Tx > Max_Seen_Tx then
-               Max_Seen_Tx := Probe_Slot_Pg.Page_LSN_Tx;
-            end if;
-
-            Recover_RAG_Engine
-              (Engine   => G_RAG_Engine,
-               Dim      => Vector_Dim (Dim),
-               DB_Path  => G_DB_Path,
-               WAL_Path => G_WAL_Path,
-               Status   => RAG_Stat);
-            if RAG_Stat /= Status_Ok then
-               G_KV_Store := (others => <>);
-               Init_RAG_Engine (G_RAG_Engine, 3);
-               Out_Status := To_C_Status (RAG_Stat);
-               return;
-            end if;
-
-            for Slot in RAG_Doc_Slot loop
-               pragma Loop_Invariant (Max_Seen_Tx <= Max_Tx_Id);
-               if G_RAG_Engine.Docs (Slot).Active then
-                  if G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmin > Max_Seen_Tx then
-                     Max_Seen_Tx := G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmin;
-                  end if;
-                  if G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmax > Max_Seen_Tx then
-                     Max_Seen_Tx := G_RAG_Engine.Docs (Slot).Tuple_Hdr.Xmax;
-                  end if;
-               end if;
-            end loop;
          end if;
       end if;
 
-      if Max_Seen_Tx = Max_Tx_Id or else Max_Seen_KV_Tx = Max_Tx_Id then
-         G_KV_Store := (others => <>);
-         Init_RAG_Engine (G_RAG_Engine, 3);
-         Out_Status := C_Status_Capacity_Exceeded;
+      --  A checkpoint interrupted before its rename leaves a stale "<wal>.ckpt"
+      Delete_File_If_Exists (Checkpoint_Path (WAL_P));
+
+      --  KV replay (repairs a torn WAL tail first)
+      Recover_KV_From_WAL
+        (Store        => G_KV_Store,
+         WAL_Path     => WAL_P,
+         Now          => 0,
+         Max_Frames   => Max_WAL_Scan_Frames,
+         Replayed_Ops => KV_Replayed,
+         Status       => Status);
+      if Status /= Status_Ok then
+         G_KV_Store := Empty_KV_Store;
+         Out_Status := To_C_Status (Status);
          return;
       end if;
 
-      pragma Assert (Max_Seen_Tx < Max_Tx_Id and then Max_Seen_KV_Tx < Max_Tx_Id);
-      G_Next_Tx     := Valid_Tx_Id (Max_Seen_Tx + 1);
-      G_Next_KV_Seq := Valid_Tx_Id (Max_Seen_KV_Tx + 1);
+      --  RAG recovery: torn-tail repair, commit-order redo, Page 1 reconstruction
+      Recover_RAG_Engine
+        (Engine      => G_RAG_Engine,
+         Dim         => Vector_Dim (Dim),
+         DB_Path     => DB_P,
+         WAL_Path    => WAL_P,
+         Max_Seen_Tx => Max_Seen_Tx,
+         Status      => Status);
+      if Status /= Status_Ok then
+         G_KV_Store := Empty_KV_Store;
+         Init_RAG_Engine (G_RAG_Engine, 3);
+         Out_Status := To_C_Status (Status);
+         return;
+      end if;
+
+      --  Highest KV sequence number in the repaired WAL
+      for Idx in 0 .. Max_WAL_Scan_Frames - 1 loop
+         pragma Loop_Invariant (WAL_P.Length > 0);
+         Read_WAL_Frame (WAL_P, Idx, Frame, Frame_Ok, Frame_EOF);
+         exit when Frame_EOF;
+         if not Frame_Ok or else not Verify_WAL_Frame (Frame) then
+            G_KV_Store := Empty_KV_Store;
+            Init_RAG_Engine (G_RAG_Engine, 3);
+            Out_Status := C_Status_IO_Error;
+            return;
+         end if;
+         if Get_WAL_Frame_Kind (Frame) = WAL_Frame_KV then
+            Decode_WAL_Frame (Frame, Frame_Tx, Frame_Pg, Frame_Page);
+            if Frame_Tx > Max_KV_Seq then
+               Max_KV_Seq := Frame_Tx;
+            end if;
+         end if;
+      end loop;
+
+      --  Seed both id spaces above every id on disk, so a crashed transaction's staged
+      --  frames can never be committed by a reused id. A space exhausted by an older
+      --  version (no checkpoints) stays exhausted until the checkpoint below.
+      G_Next_Tx     := (if Max_Seen_Tx = Max_Tx_Id then Max_Tx_Id else Max_Seen_Tx + 1);
+      G_Next_KV_Seq := (if Max_KV_Seq = Max_Tx_Id then Max_Tx_Id else Max_KV_Seq + 1);
+      G_DB_Path     := DB_P;
+      G_WAL_Path    := WAL_P;
       G_Initialized := True;
-      Out_Status    := C_Status_Ok;
+
+      Maybe_Checkpoint;
+      if G_Write_Fault then
+         --  The checkpoint renamed the WAL but could not make the rename durable
+         Reset_Runtime;
+         Out_Status := C_Status_IO_Error;
+         return;
+      end if;
+      Out_Status := C_Status_Ok;
    end C_Init_With_Paths;
 
    procedure C_Analyze_SQL
@@ -481,6 +692,10 @@ package body Nhe_O.C_API is
       Val := To_Bounded_Text (Val_Buf, Text_Length (Val_Len));
 
       if G_WAL_Path.Length > 0 then
+         if G_Write_Fault then
+            Out_Status := C_Status_IO_Error;
+            return;
+         end if;
          if G_Next_KV_Seq = Max_Tx_Id then
             Out_Status := C_Status_Capacity_Exceeded;
             return;
@@ -501,6 +716,7 @@ package body Nhe_O.C_API is
             if WAL_Stat = Status_Ok and then G_Next_KV_Seq < Max_Tx_Id then
                G_Next_KV_Seq := G_Next_KV_Seq + 1;
             end if;
+            After_Durable_Write (WAL_Stat);
             Out_Status := To_C_Status (WAL_Stat);
          end;
       else
@@ -547,6 +763,7 @@ package body Nhe_O.C_API is
    procedure C_KV_Del
      (Key_Buf     : in     C_Ident_Buf;
       Key_Len     : in     int;
+      Now_Sec     : in     Integer_64;
       Out_Removed :    out int;
       Out_Status  :    out int)
    is
@@ -560,13 +777,19 @@ package body Nhe_O.C_API is
          return;
       end if;
 
-      if Key_Len <= 0 or else Key_Len > int (Max_Ident_Len) then
+      if Key_Len <= 0 or else Key_Len > int (Max_Ident_Len)
+        or else Now_Sec < 0
+      then
          Out_Status := C_Status_Invalid_Arg;
          return;
       end if;
 
       Key := To_Bounded_Ident (Key_Buf, Ident_Length (Key_Len));
       if G_WAL_Path.Length > 0 then
+         if G_Write_Fault then
+            Out_Status := C_Status_IO_Error;
+            return;
+         end if;
          if G_Next_KV_Seq = Max_Tx_Id then
             Out_Status := C_Status_Capacity_Exceeded;
             return;
@@ -574,21 +797,25 @@ package body Nhe_O.C_API is
          declare
             WAL_Stat : Engine_Status;
          begin
+            --  A frame is logged whenever a slot is freed, even for an expired key
+            --  (Removed = False), so the sequence number advances on every success
             Del_Durable
               (Store    => G_KV_Store,
                WAL_Path => G_WAL_Path,
                Tx       => G_Next_KV_Seq,
                Key      => Key,
+               Now      => Now_Sec,
                Removed  => Removed,
                Status   => WAL_Stat);
-            if Removed and then WAL_Stat = Status_Ok and then G_Next_KV_Seq < Max_Tx_Id then
+            if WAL_Stat = Status_Ok and then G_Next_KV_Seq < Max_Tx_Id then
                G_Next_KV_Seq := G_Next_KV_Seq + 1;
             end if;
+            After_Durable_Write (WAL_Stat);
             Out_Removed := (if Removed then 1 else 0);
             Out_Status  := To_C_Status (WAL_Stat);
          end;
       else
-         Del (G_KV_Store, Key, Removed);
+         Del (G_KV_Store, Key, Now_Sec, Removed);
          Out_Removed := (if Removed then 1 else 0);
          Out_Status  := C_Status_Ok;
       end if;
@@ -653,6 +880,10 @@ package body Nhe_O.C_API is
 
       Key := To_Bounded_Ident (Key_Buf, Ident_Length (Key_Len));
       if G_WAL_Path.Length > 0 then
+         if G_Write_Fault then
+            Out_Status := C_Status_IO_Error;
+            return;
+         end if;
          if G_Next_KV_Seq = Max_Tx_Id then
             Out_Status := C_Status_Capacity_Exceeded;
             return;
@@ -667,9 +898,10 @@ package body Nhe_O.C_API is
             TTL_Sec  => TTL_Sec,
             Updated  => Updated,
             Status   => Status);
-         if Updated and then Status = Status_Ok and then Tx < Max_Tx_Id then
+         if Status = Status_Ok and then Tx < Max_Tx_Id then
             G_Next_KV_Seq := Tx + 1;
          end if;
+         After_Durable_Write (Status);
          Out_Updated := (if Updated then 1 else 0);
          Out_Status  := To_C_Status (Status);
       else
@@ -735,6 +967,10 @@ package body Nhe_O.C_API is
 
       Key := To_Bounded_Ident (Key_Buf, Ident_Length (Key_Len));
       if G_WAL_Path.Length > 0 then
+         if G_Write_Fault then
+            Out_Status := C_Status_IO_Error;
+            return;
+         end if;
          if G_Next_KV_Seq = Max_Tx_Id then
             Out_Status := C_Status_Capacity_Exceeded;
             return;
@@ -752,6 +988,7 @@ package body Nhe_O.C_API is
          if Status = Status_Ok and then Tx < Max_Tx_Id then
             G_Next_KV_Seq := Tx + 1;
          end if;
+         After_Durable_Write (Status);
          Out_Status := To_C_Status (Status);
       else
          Incr_By (G_KV_Store, Key, Delta_Val, Now_Sec, Out_New_Val, Status);
@@ -923,16 +1160,11 @@ package body Nhe_O.C_API is
       Vec            : Vector_Value;
       D              : Vector_Dim;
       Parent_Payload : TOAST_Payload_Buffer   := [others => 0];
-      Eff_Parent_Len : Valid_TOAST_Length     := 128;
-      Commit_Page    : Page_Buffer;
-      Saved_Engine   : constant RAG_Engine    := G_RAG_Engine;
+      Eff_Parent_Len : Valid_TOAST_Length     := 1;
       Status         : Engine_Status;
-      Commit_Status  : Engine_Status;
-      Flushed_Count  : Natural;
-      pragma Warnings (Off, Flushed_Count);
-      pragma Warnings (Off, Status);
-      pragma Warnings (Off, Tx);
-      pragma Warnings (Off, Staging);
+      Delivered      : Natural;
+      Flush_Pending  : Boolean;
+      pragma Warnings (Off, Delivered);
    begin
       if not G_Initialized
         or else G_DB_Path.Length = 0
@@ -942,10 +1174,16 @@ package body Nhe_O.C_API is
          return;
       end if;
 
+      if G_Write_Fault then
+         Out_Status := C_Status_IO_Error;
+         return;
+      end if;
+
       if Doc_Id not in int (RAG_Doc_Slot'First) .. int (RAG_Doc_Slot'Last)
         or else Meta_JSON_Len < 0 or else Meta_JSON_Len > int (Max_Text_Len)
         or else Summary_Len < 0 or else Summary_Len > int (Max_Text_Len)
         or else Parent_Len < 0 or else Parent_Len > int (Max_TOAST_Payload_Bytes)
+        or else (Summary_Len = 0 and then Parent_Len = 0)
         or else Dim not in 1 .. int (Max_Vector_Dim)
         or else Related_Doc_Id not in int (Optional_Doc_Id'First) .. int (Optional_Doc_Id'Last)
       then
@@ -969,11 +1207,7 @@ package body Nhe_O.C_API is
          Vec.Elements (I) := Float (Vec_Buf (size_t (I)));
       end loop;
 
-      if G_Next_Tx = Max_Tx_Id
-        or else G_RAG_Engine.PK_Tree.Node_Count not in 1 .. Max_BTree_Nodes
-        or else G_RAG_Engine.PK_Tree.Root_Node not in 1 .. G_RAG_Engine.PK_Tree.Node_Count
-        or else G_RAG_Engine.Next_TOAST_Pg > Max_Safe_TOAST_Page
-      then
+      if G_Next_Tx = Max_Tx_Id or else not Is_Valid_RAG_Engine (G_RAG_Engine) then
          Out_Status := C_Status_Capacity_Exceeded;
          return;
       end if;
@@ -997,7 +1231,8 @@ package body Nhe_O.C_API is
             pragma Loop_Invariant (I in 1 .. Eff_Parent_Len);
             Parent_Payload (I) := Byte (Character'Pos (To_Ada (Parent_Buf (size_t (I)))));
          end loop;
-      elsif Summary.Length > 0 then
+      else
+         --  Summary_Len > 0 here: the summary doubles as the parent chunk
          Eff_Parent_Len := Summary.Length;
          for I in 1 .. Summary.Length loop
             pragma Loop_Invariant (I in 1 .. Summary.Length);
@@ -1024,30 +1259,36 @@ package body Nhe_O.C_API is
          Status         => Status);
 
       if Status /= Status_Ok then
-         G_RAG_Engine := Saved_Engine;
-         Set_CLOG_State (G_RAG_Engine.CLOG, Tx.Id, Tx_Aborted);
+         --  Ingest_Document already restored the engine; retire the transaction id
+         if G_RAG_Engine.CLOG (Tx.Id) /= Tx_Committed then
+            Rollback_RAG_Tx (G_RAG_Engine, Tx.Id);
+         end if;
          pragma Warnings (GNATprove, Off, "statement has no effect");
          Rollback_Tx (Tx);
          Discard_Staged_Notifications (Tx, Staging);
          pragma Warnings (GNATprove, On, "statement has no effect");
+         After_Durable_Write (Status);
          Out_Status := To_C_Status (Status);
          return;
       end if;
 
-      Build_RAG_Slotted_Page (G_RAG_Engine, Tx.Id, Commit_Page);
-      Commit_Tx (Tx, G_DB_Path, G_WAL_Path, 1, Commit_Page, Commit_Status);
-      if Commit_Status = Status_Ok then
-         Set_CLOG_State (G_RAG_Engine.CLOG, Tx.Id, Tx_Committed);
-         Flush_Committed_Notifications (Tx, Staging, G_Broker, Flushed_Count);
+      Commit_RAG_Tx
+        (Engine        => G_RAG_Engine,
+         Ctx           => Tx,
+         DB_Path       => G_DB_Path,
+         WAL_Path      => G_WAL_Path,
+         Staging       => Staging,
+         Broker        => G_Broker,
+         Delivered     => Delivered,
+         Status        => Status,
+         Flush_Pending => Flush_Pending);
+      if Flush_Pending then
+         --  Durably committed, but G_DB_Path could not be brought up to date
+         G_Write_Fault := True;
       else
-         G_RAG_Engine := Saved_Engine;
-         Set_CLOG_State (G_RAG_Engine.CLOG, Tx.Id, Tx_Aborted);
-         pragma Warnings (GNATprove, Off, "statement has no effect");
-         Discard_Staged_Notifications (Tx, Staging);
-         pragma Warnings (GNATprove, On, "statement has no effect");
+         After_Durable_Write (Status);
       end if;
-
-      Out_Status := To_C_Status (Commit_Status);
+      Out_Status := To_C_Status (Status);
    end C_RAG_Ingest_Full_ND;
 
    procedure C_RAG_Ingest_ND
@@ -1059,27 +1300,18 @@ package body Nhe_O.C_API is
       Related_Doc_Id : in     int;
       Out_Status     :    out int)
    is
-      Empty_Meta : constant C_Text_Buf := [others => nul];
-      Parent_Buf : C_Toast_Buf         := [others => nul];
-      Copy_Len   : Natural;
+      Empty_Meta   : constant C_Text_Buf  := [others => nul];
+      Empty_Parent : constant C_Toast_Buf := [others => nul];
    begin
-      if Summary_Len > 0 and then Summary_Len <= int (Max_Text_Len) then
-         Copy_Len := Natural (Summary_Len);
-         for I in 1 .. Copy_Len loop
-            Parent_Buf (size_t (I)) := Summary_Buf (size_t (I));
-         end loop;
-      else
-         Copy_Len := 0;
-      end if;
-
+      --  Parent_Len = 0: the summary itself is stored as the TOAST parent chunk
       C_RAG_Ingest_Full_ND
         (Doc_Id         => Doc_Id,
          Meta_JSON_Buf  => Empty_Meta,
          Meta_JSON_Len  => 0,
          Summary_Buf    => Summary_Buf,
          Summary_Len    => Summary_Len,
-         Parent_Buf     => Parent_Buf,
-         Parent_Len     => int (Copy_Len),
+         Parent_Buf     => Empty_Parent,
+         Parent_Len     => 0,
          Vec_Buf        => Vec_Buf,
          Dim            => Dim,
          Related_Doc_Id => Related_Doc_Id,
@@ -1091,11 +1323,11 @@ package body Nhe_O.C_API is
       Out_Status :    out int)
    is
       Tx            : Transaction_Context;
-      Commit_Page   : Page_Buffer;
-      Saved_Engine  : constant RAG_Engine := G_RAG_Engine;
+      Staging       : Tx_Notification_Buffer := (others => <>);
       Status        : Engine_Status;
-      Commit_Status : Engine_Status;
-      pragma Warnings (Off, Tx);
+      Delivered     : Natural;
+      Flush_Pending : Boolean;
+      pragma Warnings (Off, Delivered);
    begin
       if not G_Initialized
         or else G_DB_Path.Length = 0
@@ -1105,14 +1337,17 @@ package body Nhe_O.C_API is
          return;
       end if;
 
+      if G_Write_Fault then
+         Out_Status := C_Status_IO_Error;
+         return;
+      end if;
+
       if Doc_Id not in int (RAG_Doc_Slot'First) .. int (RAG_Doc_Slot'Last) then
          Out_Status := C_Status_Invalid_Arg;
          return;
       end if;
 
-      if G_Next_Tx = Max_Tx_Id
-        or else not Is_Valid_RAG_Engine (G_RAG_Engine)
-      then
+      if G_Next_Tx = Max_Tx_Id or else not Is_Valid_RAG_Engine (G_RAG_Engine) then
          Out_Status := C_Status_Capacity_Exceeded;
          return;
       end if;
@@ -1127,25 +1362,33 @@ package body Nhe_O.C_API is
          Status   => Status);
 
       if Status /= Status_Ok then
-         G_RAG_Engine := Saved_Engine;
-         Set_CLOG_State (G_RAG_Engine.CLOG, Tx.Id, Tx_Aborted);
+         if G_RAG_Engine.CLOG (Tx.Id) /= Tx_Committed then
+            Rollback_RAG_Tx (G_RAG_Engine, Tx.Id);
+         end if;
          pragma Warnings (GNATprove, Off, "statement has no effect");
          Rollback_Tx (Tx);
          pragma Warnings (GNATprove, On, "statement has no effect");
+         After_Durable_Write (Status);
          Out_Status := To_C_Status (Status);
          return;
       end if;
 
-      Build_RAG_Slotted_Page (G_RAG_Engine, Tx.Id, Commit_Page);
-      Commit_Tx (Tx, G_DB_Path, G_WAL_Path, 1, Commit_Page, Commit_Status);
-      if Commit_Status = Status_Ok then
-         Set_CLOG_State (G_RAG_Engine.CLOG, Tx.Id, Tx_Committed);
+      Commit_RAG_Tx
+        (Engine        => G_RAG_Engine,
+         Ctx           => Tx,
+         DB_Path       => G_DB_Path,
+         WAL_Path      => G_WAL_Path,
+         Staging       => Staging,
+         Broker        => G_Broker,
+         Delivered     => Delivered,
+         Status        => Status,
+         Flush_Pending => Flush_Pending);
+      if Flush_Pending then
+         G_Write_Fault := True;
       else
-         G_RAG_Engine := Saved_Engine;
-         Set_CLOG_State (G_RAG_Engine.CLOG, Tx.Id, Tx_Aborted);
+         After_Durable_Write (Status);
       end if;
-
-      Out_Status := To_C_Status (Commit_Status);
+      Out_Status := To_C_Status (Status);
    end C_RAG_Delete;
 
    procedure C_RAG_Query_3D
@@ -1161,17 +1404,20 @@ package body Nhe_O.C_API is
       Out_Graph_Hit    :    out int;
       Out_Status       :    out int)
    is
-      Q_Buf      : C_Vec_Buf  := [others => 0.0];
-      Parent_Buf : C_Text_Buf := [others => nul];
+      Q_Buf        : C_Vec_Buf           := [others => 0.0];
+      Empty_Filter : constant C_Text_Buf := [others => nul];
+      Parent_Buf   : C_Toast_Buf         := [others => nul];
       pragma Warnings (Off, Parent_Buf);
    begin
       Q_Buf (1) := QX;
       Q_Buf (2) := QY;
       Q_Buf (3) := QZ;
-      C_RAG_Query_ND
+      C_RAG_Query_Full_ND
         (Query_Vec_Buf    => Q_Buf,
          Dim              => 3,
          Encoding_Mode    => Encoding_Mode,
+         Filter_JSON_Buf  => Empty_Filter,
+         Filter_JSON_Len  => 0,
          Keyword_Buf      => Keyword_Buf,
          Keyword_Len      => Keyword_Len,
          Top_K            => Top_K,
@@ -1278,7 +1524,7 @@ package body Nhe_O.C_API is
 
       Execute_Hybrid_RAG_Query
         (Engine            => G_RAG_Engine,
-         Snapshot          => G_Next_Tx,
+         Snapshot          => Take_Snapshot (G_RAG_Engine),
          DB_Path           => G_DB_Path,
          SQL_Query         => SQL_Query,
          Query_Vec         => Query_Vec,
@@ -1353,6 +1599,7 @@ package body Nhe_O.C_API is
          Out_Graph_Hit    => Out_Graph_Hit,
          Out_Status       => Out_Status);
 
+      --  Report the bytes actually written to the 512-byte buffer, not the chunk size
       if Out_Status = C_Status_Ok and then Out_Parent_Len > 0 then
          Copy_Len := Natural'Min (Max_Text_Len, Natural (Out_Parent_Len));
          for I in 1 .. Copy_Len loop
@@ -1361,6 +1608,9 @@ package body Nhe_O.C_API is
          if Copy_Len < Max_Text_Len then
             Out_Parent_Buf (size_t (Copy_Len + 1)) := nul;
          end if;
+         Out_Parent_Len := int (Copy_Len);
+      else
+         Out_Parent_Len := 0;
       end if;
    end C_RAG_Query_ND;
 

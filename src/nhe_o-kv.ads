@@ -75,14 +75,31 @@ package Nhe_O.KV is
           Post   => Status in Status_Ok | Status_Not_Found | Status_Expired
                     and then (if Status = Status_Ok then Exists (Store, Key, Now));
 
-   --  Redis `DEL`: Remove key from store
+   --  Remove every stored entry for Key (live or already expired); Removed is True iff
+   --  at least one slot was freed. Used by WAL replay, which must be clock-free.
    procedure Del
      (Store   : in out KV_Store;
       Key     : in     Bounded_Ident;
       Removed :    out Boolean)
      with Global => null,
           Always_Terminates,
-          Post   => not Exists (Store, Key, 0);
+          Post   => not Exists (Store, Key, 0)
+                    and then Removed =
+                      (for some I in KV_Slot_Index =>
+                         Store'Old.Slots (I).Occupied
+                         and then Equal_Ident (Store'Old.Slots (I).Key, Key));
+
+   --  Redis `DEL` at timestamp Now: removes every stored entry for Key; Removed is True
+   --  iff Key was live (present and not expired) at Now, matching Redis's reply count
+   procedure Del
+     (Store   : in out KV_Store;
+      Key     : in     Bounded_Ident;
+      Now     : in     Epoch_Seconds;
+      Removed :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Post   => not Exists (Store, Key, 0)
+                    and then Removed = Exists (Store'Old, Key, Now);
 
    --  Redis `EXPIRE`: Attach a TTL in seconds to an existing live key
    procedure Expire
@@ -124,13 +141,30 @@ package Nhe_O.KV is
 
    type KV_Wal_Op is (KV_Op_Set, KV_Op_Del);
 
-   --  Serialize a KV mutation into a 4096-byte WAL page with Magic "KVMG" + CRC32
+   --  Serialize a KV mutation into a 4096-byte WAL page with Magic "KVMG" + CRC32.
+   --  Target is the store slot the SET landed in (1 .. Max_KV_Capacity), so replay
+   --  reproduces the exact run-time slot layout, including LRU/expired-slot evictions
+   --  that are never logged separately; 0 means "no slot hint" (legacy frames, DEL).
    procedure Encode_KV_Wal_Page
-     (Op   : in     KV_Wal_Op;
-      Slot : in     KV_Entry;
-      Page :    out Page_Buffer)
+     (Op     : in     KV_Wal_Op;
+      Slot   : in     KV_Entry;
+      Page   :    out Page_Buffer;
+      Target : in     KV_Slot_Count := 0)
      with Global => null,
           Always_Terminates;
+
+   --  Deserialize and CRC32-verify a 4096-byte KV WAL page, returning its slot hint
+   procedure Decode_KV_Wal_Page
+     (Page   : in     Page_Buffer;
+      Op     :    out KV_Wal_Op;
+      Slot   :    out KV_Entry;
+      Target :    out KV_Slot_Count;
+      Valid  :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Post   => (if Valid then Slot.Key.Length > 0
+                     else Target = 0)
+                    and then (if Valid and then Op = KV_Op_Del then Target = 0);
 
    --  Deserialize and CRC32-verify a 4096-byte KV WAL page
    procedure Decode_KV_Wal_Page
@@ -162,6 +196,7 @@ package Nhe_O.KV is
                      else Store = Store'Old);
 
    --  Durable DEL: removes Key from in-memory KV_Store and appends a WAL_Frame_KV record
+   --  (only when a slot was actually freed)
    procedure Del_Durable
      (Store    : in out KV_Store;
       WAL_Path : in     Bounded_Text;
@@ -173,6 +208,24 @@ package Nhe_O.KV is
           Always_Terminates,
           Pre    => Key.Length > 0 and then WAL_Path.Length > 0,
           Post   => (if Status = Status_Ok then not Exists (Store, Key, 0)
+                     else Store = Store'Old and then not Removed);
+
+   --  Durable Redis DEL at timestamp Now: Removed is True iff Key was live at Now; a
+   --  WAL_Frame_KV record is appended whenever a stored entry (live or expired) is freed
+   procedure Del_Durable
+     (Store    : in out KV_Store;
+      WAL_Path : in     Bounded_Text;
+      Tx       : in     Valid_Tx_Id;
+      Key      : in     Bounded_Ident;
+      Now      : in     Epoch_Seconds;
+      Removed  :    out Boolean;
+      Status   :    out Engine_Status)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Key.Length > 0 and then WAL_Path.Length > 0,
+          Post   => (if Status = Status_Ok then
+                       not Exists (Store, Key, 0)
+                       and then Removed = Exists (Store'Old, Key, Now)
                      else Store = Store'Old and then not Removed);
 
    --  Durable EXPIRE: attaches a TTL to Key and appends a WAL_Frame_KV record when updated
@@ -210,7 +263,11 @@ package Nhe_O.KV is
           Post   => (if Status = Status_Ok then Exists (Store, Key, Now)
                      else Store = Store'Old);
 
-   --  Replay all WAL_Frame_KV records from WAL_Path into Store at recovery timestamp Now
+   --  Replay all WAL_Frame_KV records from WAL_Path into Store. A torn trailing frame
+   --  left by a crash is repaired first (Nhe_O.Transaction.Repair_WAL_Tail). Frames with
+   --  a slot hint are applied to exactly that slot, so the recovered store equals the
+   --  pre-crash store for every logged mutation (including silent LRU evictions); legacy
+   --  frames without a hint fall back to slot selection at timestamp max (Now, Last_Access).
    procedure Recover_KV_From_WAL
      (Store        : in out KV_Store;
       WAL_Path     : in     Bounded_Text;
@@ -221,6 +278,26 @@ package Nhe_O.KV is
      with Global => null,
           Always_Terminates,
           Pre    => WAL_Path.Length > 0 and then Max_Frames <= Max_Page_Id,
-          Post   => Replayed_Ops <= Max_Frames;
+          Post   => Replayed_Ops <= Max_Frames
+                    and then (if Status /= Status_Ok then
+                                Store = Store'Old and then Replayed_Ops = 0);
+
+   --  Number of occupied slots of Store
+   function Occupied_Count (Store : KV_Store) return KV_Slot_Count
+     with Global => null;
+
+   --  Checkpoint support: append one slot-hinted SET frame per occupied slot of Store to
+   --  WAL_Path (a fresh file), using KV sequence numbers First_Seq .. Next_Seq - 1
+   procedure Write_KV_Snapshot
+     (Store     : in     KV_Store;
+      WAL_Path  : in     Bounded_Text;
+      First_Seq : in     Valid_Tx_Id;
+      Next_Seq  :    out Valid_Tx_Id;
+      Status    :    out Engine_Status)
+     with Global => null,
+          Always_Terminates,
+          Pre    => WAL_Path.Length > 0
+                    and then First_Seq <= Max_Tx_Id - Max_KV_Capacity,
+          Post   => Next_Seq in First_Seq .. First_Seq + Max_KV_Capacity;
 
 end Nhe_O.KV;

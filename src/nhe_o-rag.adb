@@ -5,47 +5,148 @@ with Nhe_O.SQL;  use Nhe_O.SQL;
 
 package body Nhe_O.RAG is
 
+   --  Library-level default document table: assigning it copies static data instead of
+   --  building a document-table aggregate on the caller's stack
+   Empty_Docs : constant RAG_Document_Table := [others => (others => <>)];
+
    procedure Init_RAG_Engine
      (Engine :    out RAG_Engine;
       Dim    : in     Vector_Dim)
    is
    begin
-      Engine.Dim           := Dim;
-      Engine.Doc_Count     := 0;
-      Engine.Next_TOAST_Pg := 10;
-      Engine.CLOG          := Default_CLOG;
-      Engine.Docs          := [others => (others => <>)];
+      Engine.Dim             := Dim;
+      Engine.Doc_Count       := 0;
+      Engine.Next_TOAST_Pg   := 10;
+      Engine.CLOG            := Default_CLOG;
+      Engine.Commit_Seqs     := [others => 0];
+      Engine.Last_Commit_Seq := 0;
+      Engine.Docs            := Empty_Docs;
       Init_BTree (Engine.PK_Tree);
       Init_HNSW (Engine.Vector_Graph, Dim);
    end Init_RAG_Engine;
+
+   --  Simple case folding for the Latin code points used by Vietnamese and the other
+   --  Latin-script languages: ASCII, Latin-1 Supplement, Latin Extended-A, the
+   --  Vietnamese horn letters of Latin Extended-B (U+01A0/U+01A1 and U+01AF/U+01B0) and
+   --  Latin Extended Additional. Every other code point maps to itself.
+   function Fold_Latin (Code : Natural) return Natural is
+     (if Code in 16#41# .. 16#5A# then Code + 32
+      elsif Code in 16#C0# .. 16#DE# and then Code /= 16#D7# then Code + 32
+      elsif Code = 16#178# then 16#FF#
+      elsif Code = 16#17F# then 16#73#
+      elsif Code = 16#1A0# or else Code = 16#1AF# then Code + 1
+      elsif (Code in 16#100# .. 16#12F# or else Code in 16#132# .. 16#137#
+             or else Code in 16#14A# .. 16#177#)
+        and then Code mod 2 = 0
+      then Code + 1
+      elsif (Code in 16#139# .. 16#148# or else Code in 16#179# .. 16#17E#)
+        and then Code mod 2 = 1
+      then Code + 1
+      elsif (Code in 16#1E00# .. 16#1E95# or else Code in 16#1EA0# .. 16#1EFF#)
+        and then Code mod 2 = 0
+      then Code + 1
+      elsif Code = 16#1E9E# then 16#DF#
+      else Code)
+     with Pre => Code <= 16#10FFFF#;
+
+   --  Decode the UTF-8 sequence starting at Pos of S and case-fold it. Malformed bytes
+   --  and 4-byte sequences are compared byte-wise through codes above 16#10FFFF#.
+   procedure Decode_Folded
+     (S    : in     Bounded_Text;
+      Pos  : in     Text_Index;
+      Code :    out Natural;
+      Len  :    out Positive)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Pos <= S.Length,
+          Post   => Len in 1 .. 3 and then Pos + Len - 1 <= S.Length
+   is
+      B0 : constant Natural := Character'Pos (S.Data (Pos));
+      B1 : Natural;
+      B2 : Natural;
+   begin
+      if B0 < 16#80# then
+         Code := Fold_Latin (B0);
+         Len  := 1;
+         return;
+      elsif B0 in 16#C2# .. 16#DF# and then Pos < S.Length then
+         B1 := Character'Pos (S.Data (Pos + 1));
+         if B1 in 16#80# .. 16#BF# then
+            Code := Fold_Latin ((B0 - 16#C0#) * 64 + (B1 - 16#80#));
+            Len  := 2;
+            return;
+         end if;
+      elsif B0 in 16#E0# .. 16#EF# and then Pos + 1 < S.Length then
+         B1 := Character'Pos (S.Data (Pos + 1));
+         B2 := Character'Pos (S.Data (Pos + 2));
+         if B1 in 16#80# .. 16#BF# and then B2 in 16#80# .. 16#BF# then
+            Code := Fold_Latin ((B0 - 16#E0#) * 4096 + (B1 - 16#80#) * 64 + (B2 - 16#80#));
+            Len  := 3;
+            return;
+         end if;
+      end if;
+      Code := 16#110000# + B0;
+      Len  := 1;
+   end Decode_Folded;
 
    function Contains_Keyword
      (Text    : Bounded_Text;
       Keyword : Bounded_Text) return Boolean
    is
-      Match : Boolean;
+      Match  : Boolean;
+      T_Pos  : Positive;
+      K_Pos  : Positive;
+      T_Code : Natural;
+      K_Code : Natural;
+      T_Len  : Positive;
+      K_Len  : Positive;
    begin
       --  Empty keyword never matches a lexical boost
-      if Keyword.Length = 0 or else Text.Length < Keyword.Length then
+      if Keyword.Length = 0 or else Text.Length = 0 then
          return False;
       end if;
 
-      for Start_Pos in 1 .. Text.Length - Keyword.Length + 1 loop
+      for Start_Pos in 1 .. Text.Length loop
          Match := True;
-         for Offset in 1 .. Keyword.Length loop
-            if To_Lower_Char (Text.Data (Start_Pos + Offset - 1)) /=
-               To_Lower_Char (Keyword.Data (Offset))
-            then
+         T_Pos := Start_Pos;
+         K_Pos := 1;
+         --  Every step consumes at least one keyword byte, so Keyword.Length steps suffice
+         for Step in 1 .. Keyword.Length loop
+            pragma Loop_Invariant
+              (K_Pos in Step .. Keyword.Length + 1
+               and then T_Pos in Start_Pos .. Text.Length + 1);
+            exit when K_Pos > Keyword.Length;
+            if T_Pos > Text.Length then
                Match := False;
                exit;
             end if;
+            Decode_Folded (Text, T_Pos, T_Code, T_Len);
+            Decode_Folded (Keyword, K_Pos, K_Code, K_Len);
+            if T_Code /= K_Code then
+               Match := False;
+               exit;
+            end if;
+            T_Pos := T_Pos + T_Len;
+            K_Pos := K_Pos + K_Len;
          end loop;
-         if Match then
+         if Match and then K_Pos > Keyword.Length then
             return True;
          end if;
       end loop;
       return False;
    end Contains_Keyword;
+
+   procedure Mark_Committed
+     (Engine : in out RAG_Engine;
+      Tx     : in     Valid_Tx_Id)
+   is
+   begin
+      Set_CLOG_State (Engine.CLOG, Tx, Tx_Committed);
+      if Engine.Last_Commit_Seq < Commit_Seq_Number'Last then
+         Engine.Last_Commit_Seq := Engine.Last_Commit_Seq + 1;
+      end if;
+      Engine.Commit_Seqs (Tx) := Engine.Last_Commit_Seq;
+   end Mark_Committed;
 
    procedure Capture_Doc_HNSW_Node
      (Graph  : in     HNSW_Index;
@@ -73,6 +174,13 @@ package body Nhe_O.RAG is
       HNSW_Snap : HNSW_Node;
       pragma Warnings (Off, Removed);
    begin
+      if Has_Write_Conflict (Engine, Doc_Id, Ctx.Id)
+        or else Engine.CLOG (Ctx.Id) in Tx_Aborted | Tx_Committed
+      then
+         Status := Status_Tx_Aborted;
+         return;
+      end if;
+
       if not Engine.Docs (Doc_Id).Active
         or else Engine.Docs (Doc_Id).Tuple_Hdr.Xmax > 0
       then
@@ -305,12 +413,24 @@ package body Nhe_O.RAG is
    --  Build_RAG_Slotted_Page & Recover_RAG_Engine
    -------------------------------------------------------------------------
 
-   procedure Build_RAG_Slotted_Page
-     (Engine   : in     RAG_Engine;
-      LSN_Tx   : in     Valid_Tx_Id;
-      Raw_Page :    out Page_Buffer)
+   --  Pack one document version into a "SLOT" tuple (inline layout of section 2.1 of
+   --  docs/domain/storage-and-wal-format.md)
+   procedure Pack_RAG_Tuple
+     (Doc_Id    : in     RAG_Doc_Slot;
+      Hdr       : in     MVCC_Tuple_Header;
+      Meta      : in     JSONB_Document;
+      Summary   : in     Bounded_Text;
+      Toast_P   : in     TOAST_Pointer;
+      Vec_P     : in     TOAST_Pointer;
+      Meta_P    : in     TOAST_Pointer;
+      Rel_Id    : in     Optional_Doc_Id;
+      Tuple_Rec :    out Slotted_Tuple)
+     with Global => null,
+          Always_Terminates,
+          Post   => Tuple_Rec.Occupied
+                    and then Tuple_Rec.Row_Id = Doc_Id
+                    and then Tuple_Rec.Tuple_Hdr = Hdr
    is
-      Page_Rec      : Slotted_Page;
       Vec_B         : TOAST_Pointer_Bytes;
       Meta_B        : TOAST_Pointer_Bytes;
       Sum_Len       : Natural;
@@ -318,88 +438,125 @@ package body Nhe_O.RAG is
       Val_Len       : Natural;
       Cur_Off       : Positive;
       Stored_Fields : Natural;
-      Occupied_Cnt  : Page_Slot_Count := 0;
-      Inl_Data      : Inline_Tuple_Buffer;
+      Inl_Data      : Inline_Tuple_Buffer := [others => 0];
+   begin
+      Encode_TOAST_Pointer (Vec_P, Vec_B);
+      for B in TOAST_Pointer_Index loop
+         Inl_Data (B) := Vec_B (B);
+      end loop;
+
+      --  Bytes 17..80: Summary_Text inline fast-path (1B length <= 63 + up to 63B payload)
+      Sum_Len := Natural'Min (Max_Inline_Summary_Bytes, Summary.Length);
+      Inl_Data (17) := Byte (Sum_Len);
+      for I in 1 .. Sum_Len loop
+         Inl_Data (17 + I) := Byte (Character'Pos (Summary.Data (I)));
+      end loop;
+
+      --  Bytes 81..96: Meta_Toast_Ptr for lossless 512B Summary + 16-field JSONB
+      Encode_TOAST_Pointer (Meta_P, Meta_B);
+      for B in TOAST_Pointer_Index loop
+         Inl_Data (80 + B) := Meta_B (B);
+      end loop;
+
+      --  Bytes 97..208: Multi-field JSONB Metadata inline fast-path
+      --  Byte 97 = Stored_Fields count; Bytes 98..208 = packed entries
+      --  (Key_Len: 1B <= 64, Val_Len: 1B <= 108, Kind: 1B, Key_Bytes, Val_Bytes)
+      Stored_Fields := 0;
+      Cur_Off       := 98;
+      for F_Idx in 1 .. Meta.Count loop
+         pragma Loop_Invariant (Stored_Fields < F_Idx);
+         pragma Loop_Invariant (Cur_Off in 98 .. Max_Inline_Tuple_Bytes + 1);
+         if Meta.Fields (F_Idx).Active then
+            Key_Len := Meta.Fields (F_Idx).Key.Length;
+            Val_Len := Meta.Fields (F_Idx).Val.Length;
+            if Key_Len > 0
+              and then Val_Len <= 108
+              and then Cur_Off + 2 + Key_Len + Val_Len <= Max_Inline_Tuple_Bytes
+            then
+               Inl_Data (Cur_Off)     := Byte (Key_Len);
+               Inl_Data (Cur_Off + 1) := Byte (Val_Len);
+               Inl_Data (Cur_Off + 2) :=
+                 Byte (JSONB_Value_Kind'Pos (Meta.Fields (F_Idx).Kind));
+               for I in 1 .. Key_Len loop
+                  Inl_Data (Cur_Off + 2 + I) :=
+                    Byte (Character'Pos (Meta.Fields (F_Idx).Key.Data (I)));
+               end loop;
+               for I in 1 .. Val_Len loop
+                  Inl_Data (Cur_Off + 2 + Key_Len + I) :=
+                    Byte (Character'Pos (Meta.Fields (F_Idx).Val.Data (I)));
+               end loop;
+               Cur_Off       := Cur_Off + 3 + Key_Len + Val_Len;
+               Stored_Fields := Stored_Fields + 1;
+            end if;
+         end if;
+      end loop;
+      Inl_Data (97) := Byte (Stored_Fields);
+
+      Tuple_Rec := (
+         Occupied    => True,
+         Row_Id      => Doc_Id,
+         Tuple_Hdr   => Hdr,
+         Toast_Ptr   => Toast_P,
+         Related_Id  => Rel_Id,
+         Inline_Len  => Max_Inline_Tuple_Bytes,
+         Inline_Data => Inl_Data
+      );
+   end Pack_RAG_Tuple;
+
+   procedure Build_RAG_Slotted_Page
+     (Engine   : in     RAG_Engine;
+      LSN_Tx   : in     Valid_Tx_Id;
+      Raw_Page :    out Page_Buffer)
+   is
+      Page_Rec : Slotted_Page;
+
+      --  A version or deletion may be persisted iff it is committed or belongs to the
+      --  committing transaction itself
+      function Persistable (Tx : Tx_Id) return Boolean is
+        (Tx = LSN_Tx or else Is_Tx_Committed (Engine.CLOG, Tx));
+
+      --  Never persist another active transaction's uncommitted deletion
+      function Persisted_Hdr (Hdr : MVCC_Tuple_Header) return MVCC_Tuple_Header is
+        (Xmin => Hdr.Xmin,
+         Xmax => (if Hdr.Xmax = 0 or else Persistable (Hdr.Xmax) then Hdr.Xmax else 0));
    begin
       Page_Rec.Page_Id     := 1;
       Page_Rec.Page_LSN_Tx := LSN_Tx;
 
       for Slot in RAG_Doc_Slot loop
-         pragma Loop_Invariant (Occupied_Cnt < Slot);
+         Page_Rec.Tuples (Slot) := (others => <>);
          if Engine.Docs (Slot).Active then
-            Occupied_Cnt := Occupied_Cnt + 1;
-            Inl_Data     := [others => 0];
-            Encode_TOAST_Pointer (Engine.Docs (Slot).Vec_Toast_Ptr, Vec_B);
-            for B in TOAST_Pointer_Index loop
-               Inl_Data (B) := Vec_B (B);
-            end loop;
-
-            --  Bytes 17..80: Summary_Text inline fast-path (1B length <= 63 + up to 63B payload)
-            Sum_Len := Natural'Min (Max_Inline_Summary_Bytes, Engine.Docs (Slot).Summary_Text.Length);
-            Inl_Data (17) := Byte (Sum_Len);
-            for I in 1 .. Sum_Len loop
-               Inl_Data (17 + I) :=
-                 Byte (Character'Pos (Engine.Docs (Slot).Summary_Text.Data (I)));
-            end loop;
-
-            --  Bytes 81..96: Meta_Toast_Ptr for lossless 512B Summary + 16-field JSONB
-            Encode_TOAST_Pointer (Engine.Docs (Slot).Meta_Toast_Ptr, Meta_B);
-            for B in TOAST_Pointer_Index loop
-               Inl_Data (80 + B) := Meta_B (B);
-            end loop;
-
-            --  Bytes 97..208: Multi-field JSONB Metadata inline fast-path
-            --  Byte 97 = Stored_Fields count; Bytes 98..208 = packed entries
-            --  (Key_Len: 1B <= 64, Val_Len: 1B <= 108, Kind: 1B, Key_Bytes, Val_Bytes)
-            Stored_Fields := 0;
-            Cur_Off       := 98;
-            for F_Idx in 1 .. Engine.Docs (Slot).Metadata.Count loop
-               pragma Loop_Invariant (Stored_Fields < F_Idx);
-               pragma Loop_Invariant (Cur_Off in 98 .. Max_Inline_Tuple_Bytes + 1);
-               if Engine.Docs (Slot).Metadata.Fields (F_Idx).Active then
-                  Key_Len := Engine.Docs (Slot).Metadata.Fields (F_Idx).Key.Length;
-                  Val_Len := Engine.Docs (Slot).Metadata.Fields (F_Idx).Val.Length;
-                  if Key_Len > 0
-                    and then Val_Len <= 108
-                    and then Cur_Off + 2 + Key_Len + Val_Len <= Max_Inline_Tuple_Bytes
-                  then
-                     Inl_Data (Cur_Off)     := Byte (Key_Len);
-                     Inl_Data (Cur_Off + 1) := Byte (Val_Len);
-                     Inl_Data (Cur_Off + 2) :=
-                       Byte (JSONB_Value_Kind'Pos
-                         (Engine.Docs (Slot).Metadata.Fields (F_Idx).Kind));
-                     for I in 1 .. Key_Len loop
-                        Inl_Data (Cur_Off + 2 + I) :=
-                          Byte (Character'Pos
-                            (Engine.Docs (Slot).Metadata.Fields (F_Idx).Key.Data (I)));
-                     end loop;
-                     for I in 1 .. Val_Len loop
-                        Inl_Data (Cur_Off + 2 + Key_Len + I) :=
-                          Byte (Character'Pos
-                            (Engine.Docs (Slot).Metadata.Fields (F_Idx).Val.Data (I)));
-                     end loop;
-                     Cur_Off       := Cur_Off + 3 + Key_Len + Val_Len;
-                     Stored_Fields := Stored_Fields + 1;
-                  end if;
-               end if;
-            end loop;
-            Inl_Data (97) := Byte (Stored_Fields);
-
-            Page_Rec.Tuples (Slot) := (
-               Occupied    => True,
-               Row_Id      => Engine.Docs (Slot).Doc_Id,
-               Tuple_Hdr   => Engine.Docs (Slot).Tuple_Hdr,
-               Toast_Ptr   => Engine.Docs (Slot).Toast_Ptr,
-               Related_Id  => Engine.Docs (Slot).Related_Doc_Id,
-               Inline_Len  => Max_Inline_Tuple_Bytes,
-               Inline_Data => Inl_Data
-            );
-         else
-            Page_Rec.Tuples (Slot) := (others => <>);
+            if Persistable (Engine.Docs (Slot).Tuple_Hdr.Xmin) then
+               Pack_RAG_Tuple
+                 (Doc_Id    => Slot,
+                  Hdr       => Persisted_Hdr (Engine.Docs (Slot).Tuple_Hdr),
+                  Meta      => Engine.Docs (Slot).Metadata,
+                  Summary   => Engine.Docs (Slot).Summary_Text,
+                  Toast_P   => Engine.Docs (Slot).Toast_Ptr,
+                  Vec_P     => Engine.Docs (Slot).Vec_Toast_Ptr,
+                  Meta_P    => Engine.Docs (Slot).Meta_Toast_Ptr,
+                  Rel_Id    => Engine.Docs (Slot).Related_Doc_Id,
+                  Tuple_Rec => Page_Rec.Tuples (Slot));
+            elsif Engine.Docs (Slot).Has_Prior_Version
+              and then Persistable (Engine.Docs (Slot).Prior_Tuple_Hdr.Xmin)
+            then
+               --  The current version is another transaction's uncommitted work:
+               --  persist the committed version it replaced
+               Pack_RAG_Tuple
+                 (Doc_Id    => Slot,
+                  Hdr       => Persisted_Hdr (Engine.Docs (Slot).Prior_Tuple_Hdr),
+                  Meta      => Engine.Docs (Slot).Prior_Metadata,
+                  Summary   => Engine.Docs (Slot).Prior_Summary,
+                  Toast_P   => Engine.Docs (Slot).Prior_Toast_Ptr,
+                  Vec_P     => Engine.Docs (Slot).Prior_Vec_Toast_Ptr,
+                  Meta_P    => Engine.Docs (Slot).Prior_Meta_Toast_Ptr,
+                  Rel_Id    => Engine.Docs (Slot).Prior_Related_Id,
+                  Tuple_Rec => Page_Rec.Tuples (Slot));
+            end if;
          end if;
       end loop;
 
-      Page_Rec.Slot_Count := Occupied_Cnt;
+      --  Encode_Slotted_Page derives Slot_Count from the occupied tuples
       Encode_Slotted_Page (Page_Rec, Raw_Page);
    end Build_RAG_Slotted_Page;
 
@@ -411,16 +568,27 @@ package body Nhe_O.RAG is
       Doc_Id   : in     RAG_Doc_Slot;
       Status   :    out Engine_Status)
    is
-      Saved_Engine : constant RAG_Engine := Engine;
-      Slot_Page    : Page_Buffer;
-      Slot_WAL     : WAL_Frame_Buffer;
-      Slot_CRC     : Unsigned_32;
+      Old_Entry       : constant RAG_Document_Entry := Engine.Docs (Doc_Id);
+      Saved_Doc_Count : constant RAG_Doc_Count      := Engine.Doc_Count;
+      Saved_Tx_State  : constant Tx_State           := Engine.CLOG (Ctx.Id);
+      Saved_PK_Tree   : constant BTree_Index        := Engine.PK_Tree;
+      Saved_Graph     : constant HNSW_Index         := Engine.Vector_Graph;
+      Slot_Page       : Page_Buffer;
+      Slot_WAL        : WAL_Frame_Buffer;
+      Slot_CRC        : Unsigned_32;
       pragma Warnings (Off, Slot_CRC);
-      WAL_Ok       : Boolean;
-      Removed      : Boolean;
-      HNSW_Snap    : HNSW_Node;
+      WAL_Ok          : Boolean;
+      Removed         : Boolean;
+      HNSW_Snap       : HNSW_Node;
       pragma Warnings (Off, Removed);
    begin
+      if Has_Write_Conflict (Engine, Doc_Id, Ctx.Id)
+        or else Engine.CLOG (Ctx.Id) in Tx_Aborted | Tx_Committed
+      then
+         Status := Status_Tx_Aborted;
+         return;
+      end if;
+
       if Equal_Text (DB_Path, WAL_Path) then
          Status := Status_IO_Error;
          return;
@@ -453,12 +621,17 @@ package body Nhe_O.RAG is
       Delete_Key (Engine.PK_Tree, Integer_64 (Doc_Id), Removed);
       Remove_Vector (Engine.Vector_Graph, Doc_Id);
 
-      --  Stage updated Slotted_Page in WAL (NO-STEAL; Commit_Tx flushes to DB_Path)
+      --  Stage updated Slotted_Page in WAL (NO-STEAL; Commit_Tx flushes to DB_Path).
+      --  A failed append leaves the WAL unchanged, so only memory must be restored.
       Build_RAG_Slotted_Page (Engine, Ctx.Id, Slot_Page);
       Encode_WAL_Frame (Ctx.Id, 1, Slot_Page, Slot_CRC, Slot_WAL, WAL_Frame_Data);
       Append_WAL_Frame (WAL_Path, Slot_WAL, WAL_Ok);
       if not WAL_Ok then
-         Engine := Saved_Engine;
+         Engine.Docs (Doc_Id)          := Old_Entry;
+         Engine.Doc_Count              := Saved_Doc_Count;
+         Engine.PK_Tree                := Saved_PK_Tree;
+         Engine.Vector_Graph           := Saved_Graph;
+         Engine.CLOG (Ctx.Id)          := Saved_Tx_State;
          Status := Status_IO_Error;
          return;
       end if;
@@ -476,10 +649,7 @@ package body Nhe_O.RAG is
      with Pre  => Engine.Vector_Graph.Dim = Engine.Dim
                   and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
                   and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count,
-          Post => Engine.Dim = Engine.Dim'Old
-                  and then Engine.Vector_Graph.Dim = Engine.Dim
-                  and then Engine.PK_Tree.Node_Count = Engine.PK_Tree.Node_Count'Old
-                  and then Engine.PK_Tree.Root_Node = Engine.PK_Tree.Root_Node'Old
+          Post => Engine = (Engine'Old with delta Next_TOAST_Pg => Engine.Next_TOAST_Pg)
                   and then Engine.Next_TOAST_Pg in 10 .. Max_Safe_TOAST_Page
    is
       HWM      : Valid_Page_Id := 10;
@@ -566,6 +736,8 @@ package body Nhe_O.RAG is
          pragma Loop_Invariant (Engine.Vector_Graph.Dim = Engine.Dim);
          pragma Loop_Invariant (Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes);
          pragma Loop_Invariant (Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count);
+         pragma Loop_Invariant (Engine.CLOG (Tx_Num) = Tx_Aborted);
+         pragma Loop_Invariant (Engine.Next_TOAST_Pg = Engine.Next_TOAST_Pg'Loop_Entry);
 
          if Engine.Docs (Slot).Active then
             if Engine.Docs (Slot).Tuple_Hdr.Xmin = Tx_Num then
@@ -721,18 +893,24 @@ package body Nhe_O.RAG is
    end Is_TOAST_Range_Free;
 
    procedure Recover_RAG_Engine
-     (Engine   :    out RAG_Engine;
-      Dim      : in     Vector_Dim;
-      DB_Path  : in     Bounded_Text;
-      WAL_Path : in     Bounded_Text;
-      Status   :    out Engine_Status)
+     (Engine      :    out RAG_Engine;
+      Dim         : in     Vector_Dim;
+      DB_Path     : in     Bounded_Text;
+      WAL_Path    : in     Bounded_Text;
+      Max_Seen_Tx :    out Tx_Id;
+      Status      :    out Engine_Status)
    is
       WAL_Exists     : Boolean;
+      DB_Exists      : Boolean;
       Replayed       : Natural;
       Max_Rec_Tx     : Tx_Id;
+      Redo_Seen_Tx   : Tx_Id;
       Sub_Stat       : Engine_Status;
       Raw_Page       : Page_Buffer;
       Read_Ok        : Boolean;
+      Read_EOF       : Boolean;
+      P0_Ok          : Boolean;
+      P0_EOF         : Boolean;
       Page_Rec       : Slotted_Page;
       Page_Valid     : Boolean;
       Vec_B          : TOAST_Pointer_Bytes;
@@ -769,13 +947,14 @@ package body Nhe_O.RAG is
       pragma Warnings (Off, Doc_Payload);
    begin
       Init_RAG_Engine (Engine, Dim);
+      Max_Seen_Tx := 0;
 
       if Equal_Text (DB_Path, WAL_Path) then
          Status := Status_IO_Error;
          return;
       end if;
 
-      --  1. Run 2-pass committed-only WAL Redo Recovery when WAL_Path exists on disk
+      --  1. Run committed-only WAL Redo Recovery (with torn-tail repair) when WAL_Path exists
       Check_File_Exists (WAL_Path, WAL_Exists);
       if WAL_Exists then
          Redo_WAL_Recovery
@@ -784,17 +963,32 @@ package body Nhe_O.RAG is
             Max_Frames       => Max_WAL_Scan_Frames,
             Replayed_Count   => Replayed,
             Max_Recovered_Tx => Max_Rec_Tx,
+            Max_Seen_Tx      => Redo_Seen_Tx,
             Status           => Sub_Stat);
          if Sub_Stat /= Status_Ok then
             Status := Sub_Stat;
             return;
          end if;
+         Max_Seen_Tx := Redo_Seen_Tx;
       end if;
 
-      --  2. Read and CRC32-verify primary Slotted_Page at Page_Id = 1
-      Read_Page (DB_Path, 1, Raw_Page, Read_Ok);
+      --  2. A missing or empty database file recovers an empty engine
+      Check_File_Exists (DB_Path, DB_Exists);
+      if not DB_Exists then
+         Status := Status_Ok;
+         return;
+      end if;
+
+      --  3. Read and CRC32-verify primary Slotted_Page at Page_Id = 1
+      Read_Page (DB_Path, 1, Raw_Page, Read_Ok, Read_EOF);
       if not Read_Ok then
-         Status := Status_IO_Error;
+         if Read_EOF then
+            --  Page 1 is past EOF: only a completely empty file is a valid empty database
+            Read_Page (DB_Path, 0, Raw_Page, P0_Ok, P0_EOF);
+            Status := (if P0_EOF then Status_Ok else Status_IO_Error);
+         else
+            Status := Status_IO_Error;
+         end if;
          return;
       end if;
 
@@ -803,14 +997,22 @@ package body Nhe_O.RAG is
          Status := Status_Invalid_Syntax;
          return;
       end if;
+      if Page_Rec.Page_LSN_Tx > Max_Seen_Tx then
+         Max_Seen_Tx := Page_Rec.Page_LSN_Tx;
+      end if;
 
-      --  3. Reconstruct documents, CLOG, B+Tree PK index, and HNSW vector graph
+      --  4. Reconstruct documents, CLOG, B+Tree PK index, and HNSW vector graph
       for Slot in RAG_Doc_Slot loop
          pragma Loop_Invariant (Engine.Dim = Dim);
          pragma Loop_Invariant (Engine.Vector_Graph.Dim = Dim);
          pragma Loop_Invariant (Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes);
          pragma Loop_Invariant (Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count);
          pragma Loop_Invariant (Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page);
+         pragma Loop_Invariant
+           (for all S in RAG_Doc_Slot =>
+              (if Engine.Docs (S).Active then
+                 Engine.Docs (S).Tuple_Hdr.Xmin <= Max_Seen_Tx
+                 and then Engine.Docs (S).Tuple_Hdr.Xmax <= Max_Seen_Tx));
 
          if Page_Rec.Tuples (Slot).Occupied then
             if Page_Rec.Tuples (Slot).Row_Id /= Slot
@@ -961,6 +1163,13 @@ package body Nhe_O.RAG is
                Engine.Docs (Slot).Metadata     := Rec_Meta;
             end if;
 
+            if Page_Rec.Tuples (Slot).Tuple_Hdr.Xmin > Max_Seen_Tx then
+               Max_Seen_Tx := Page_Rec.Tuples (Slot).Tuple_Hdr.Xmin;
+            end if;
+            if Page_Rec.Tuples (Slot).Tuple_Hdr.Xmax > Max_Seen_Tx then
+               Max_Seen_Tx := Page_Rec.Tuples (Slot).Tuple_Hdr.Xmax;
+            end if;
+
             Engine.Docs (Slot).Active         := True;
             Engine.Docs (Slot).Doc_Id         := Slot;
             Engine.Docs (Slot).Tuple_Hdr      := Page_Rec.Tuples (Slot).Tuple_Hdr;
@@ -1079,6 +1288,161 @@ package body Nhe_O.RAG is
       Status := Status_Ok;
    end Recover_RAG_Engine;
 
+   procedure Recover_RAG_Engine
+     (Engine   :    out RAG_Engine;
+      Dim      : in     Vector_Dim;
+      DB_Path  : in     Bounded_Text;
+      WAL_Path : in     Bounded_Text;
+      Status   :    out Engine_Status)
+   is
+      Ignored_Seen : Tx_Id;
+      pragma Warnings (Off, Ignored_Seen);
+   begin
+      Recover_RAG_Engine (Engine, Dim, DB_Path, WAL_Path, Ignored_Seen, Status);
+   end Recover_RAG_Engine;
+
+   -------------------------------------------------------------------------
+   --  Commit_RAG_Tx & Freeze_RAG_Engine
+   -------------------------------------------------------------------------
+
+   procedure Commit_RAG_Tx
+     (Engine        : in out RAG_Engine;
+      Ctx           : in out Transaction_Context;
+      DB_Path       : in     Bounded_Text;
+      WAL_Path      : in     Bounded_Text;
+      Staging       : in out Tx_Notification_Buffer;
+      Broker        : in out PubSub_Broker;
+      Delivered     :    out Natural;
+      Status        :    out Engine_Status;
+      Flush_Pending :    out Boolean)
+   is
+      Commit_Page : Page_Buffer;
+      Replayed    : Natural;
+      Max_Rec_Tx  : Tx_Id;
+      Max_Seen    : Tx_Id;
+      Redo_Stat   : Engine_Status;
+      pragma Warnings (Off, Replayed);
+      pragma Warnings (Off, Max_Rec_Tx);
+      pragma Warnings (Off, Max_Seen);
+   begin
+      Delivered     := 0;
+      Flush_Pending := False;
+
+      --  A transaction id that the engine already knows as committed can never commit
+      --  again (reused id); nothing of the engine is touched
+      if Engine.CLOG (Ctx.Id) = Tx_Committed then
+         Rollback_Tx (Ctx);
+         Discard_Staged_Notifications (Ctx, Staging);
+         Status := Status_Tx_Aborted;
+         return;
+      end if;
+
+      --  A poisoned transaction (failed Ingest/Delete with orphan WAL frames) must not
+      --  reach Commit_Tx, which would materialize those frames
+      if Engine.CLOG (Ctx.Id) = Tx_Aborted then
+         Rollback_RAG_Tx (Engine, Ctx.Id);
+         Rollback_Tx (Ctx);
+         Discard_Staged_Notifications (Ctx, Staging);
+         Status := Status_Tx_Aborted;
+         return;
+      end if;
+
+      Build_RAG_Slotted_Page (Engine, Ctx.Id, Commit_Page);
+      Commit_Tx (Ctx, DB_Path, WAL_Path, 1, Commit_Page, Status, Flush_Pending);
+
+      if Ctx.State = Tx_Committed then
+         Mark_Committed (Engine, Ctx.Id);
+         Flush_Committed_Notifications (Ctx, Staging, Broker, Delivered);
+         if Flush_Pending then
+            --  The barrier is durable but DB_Path is stale: re-materialize it now
+            Redo_WAL_Recovery
+              (DB_Path          => DB_Path,
+               WAL_Path         => WAL_Path,
+               Max_Frames       => Max_WAL_Scan_Frames,
+               Replayed_Count   => Replayed,
+               Max_Recovered_Tx => Max_Rec_Tx,
+               Max_Seen_Tx      => Max_Seen,
+               Status           => Redo_Stat);
+            Flush_Pending := (Redo_Stat /= Status_Ok);
+         end if;
+      else
+         Rollback_RAG_Tx (Engine, Ctx.Id);
+         Discard_Staged_Notifications (Ctx, Staging);
+      end if;
+   end Commit_RAG_Tx;
+
+   procedure Freeze_RAG_Engine
+     (Engine : in out RAG_Engine;
+      Status :    out Engine_Status)
+   is
+   begin
+      --  Refuse while any transaction is in flight
+      for T in CLOG_Tx_Index loop
+         if Engine.CLOG (T) = Tx_Active then
+            Status := Status_Tx_Aborted;
+            return;
+         end if;
+      end loop;
+
+      for S in RAG_Doc_Slot loop
+         if Engine.Docs (S).Active
+           and then (not Is_Tx_Committed (Engine.CLOG, Engine.Docs (S).Tuple_Hdr.Xmin)
+                     or else (Engine.Docs (S).Tuple_Hdr.Xmax > 0
+                              and then not Is_Tx_Committed
+                                (Engine.CLOG, Engine.Docs (S).Tuple_Hdr.Xmax)))
+         then
+            Status := Status_Tx_Aborted;
+            return;
+         end if;
+      end loop;
+
+      for S in RAG_Doc_Slot loop
+         pragma Loop_Invariant (Engine.Dim = Engine.Dim'Loop_Entry);
+         pragma Loop_Invariant (Engine.Vector_Graph = Engine.Vector_Graph'Loop_Entry);
+         pragma Loop_Invariant (Engine.PK_Tree = Engine.PK_Tree'Loop_Entry);
+         pragma Loop_Invariant
+           (for all P in 1 .. S - 1 =>
+              (if Engine.Docs (P).Active then
+                 Engine.Docs (P).Tuple_Hdr.Xmin = 1
+                 and then Engine.Docs (P).Tuple_Hdr.Xmax = 0
+                 and then not Engine.Docs (P).Has_Prior_Version));
+         if Engine.Docs (S).Active then
+            if Engine.Docs (S).Tuple_Hdr.Xmax > 0 then
+               --  Committed delete: no snapshot can see this document any more (its
+               --  PK_Tree / Vector_Graph entries were already removed by the delete)
+               Engine.Docs (S) := (others => <>);
+            else
+               Engine.Docs (S).Tuple_Hdr            := (Xmin => 1, Xmax => 0);
+               Engine.Docs (S).Has_Prior_Version    := False;
+               Engine.Docs (S).Prior_Tuple_Hdr      := (Xmin => 1, Xmax => 0);
+               Engine.Docs (S).Prior_Metadata       := (others => <>);
+               Engine.Docs (S).Prior_Summary        := (Length => 0, Data => [others => ' ']);
+               Engine.Docs (S).Prior_Toast_Ptr      := (others => <>);
+               Engine.Docs (S).Prior_Vec_Toast_Ptr  := (others => <>);
+               Engine.Docs (S).Prior_Meta_Toast_Ptr := (others => <>);
+               Engine.Docs (S).Prior_Related_Id     := 0;
+               Engine.Docs (S).Prior_HNSW_Node      := (others => <>);
+            end if;
+         end if;
+      end loop;
+
+      Engine.CLOG            := Default_CLOG;
+      Engine.CLOG (1)        := Tx_Committed;
+      Engine.Commit_Seqs     := [others => 0];
+      Engine.Last_Commit_Seq := 0;
+
+      Engine.Doc_Count := 0;
+      for S in RAG_Doc_Slot loop
+         pragma Loop_Invariant (Engine.Doc_Count < S);
+         if Engine.Docs (S).Active then
+            Engine.Doc_Count := Engine.Doc_Count + 1;
+         end if;
+      end loop;
+
+      Recompute_TOAST_High_Water_Mark (Engine, 0);
+      Status := Status_Ok;
+   end Freeze_RAG_Engine;
+
    -------------------------------------------------------------------------
    --  Ingest_Document
    -------------------------------------------------------------------------
@@ -1099,8 +1463,12 @@ package body Nhe_O.RAG is
       Layer_Hint     : in     HNSW_Layer;
       Status         :    out Engine_Status)
    is
-      Saved_Engine       : constant RAG_Engine         := Engine;
       Old_Entry          : constant RAG_Document_Entry := Engine.Docs (Doc_Id);
+      Saved_Next_TOAST   : constant Valid_Page_Id      := Engine.Next_TOAST_Pg;
+      Saved_Doc_Count    : constant RAG_Doc_Count      := Engine.Doc_Count;
+      Saved_Tx_State     : constant Tx_State           := Engine.CLOG (Ctx.Id);
+      Saved_PK_Tree      : constant BTree_Index        := Engine.PK_Tree;
+      Saved_Graph        : constant HNSW_Index         := Engine.Vector_Graph;
       Old_Xmin_Comm      : constant Boolean            :=
         Old_Entry.Active
         and then Is_Tx_Committed (Engine.CLOG, Old_Entry.Tuple_Hdr.Xmin);
@@ -1180,8 +1548,52 @@ package body Nhe_O.RAG is
       Slot_CRC           : Unsigned_32;
       pragma Warnings (Off, Slot_CRC);
       WAL_Ok             : Boolean;
+      WAL_Exists         : Boolean;
+      WAL_Start          : File_Size                   := 0;
+      Size_Ok            : Boolean;
+      WAL_Touched        : Boolean                     := False;
       Notify_Ch          : constant Bounded_Ident      := Make_Ident ("rag.indexed");
+
+      --  Undo every in-memory mutation of this call. When WAL frames were already
+      --  appended, truncate the WAL back to its size at entry; if that is impossible
+      --  the transaction is poisoned so its orphan frames can never be committed.
+      procedure Restore_State
+        with Pre  => WAL_Path.Length > 0,
+             Post => Engine.Dim = Engine.Dim'Old
+                     and then Engine.PK_Tree = Saved_PK_Tree
+                     and then Engine.Vector_Graph = Saved_Graph
+                     and then Engine.Next_TOAST_Pg = Saved_Next_TOAST
+      is
+         Trunc_Ok   : Boolean;
+         Exists_Now : Boolean;
+      begin
+         Engine.Docs (Doc_Id) := Old_Entry;
+         Engine.Doc_Count     := Saved_Doc_Count;
+         Engine.Next_TOAST_Pg := Saved_Next_TOAST;
+         Engine.PK_Tree       := Saved_PK_Tree;
+         Engine.Vector_Graph  := Saved_Graph;
+         Engine.CLOG (Ctx.Id) := Saved_Tx_State;
+         if WAL_Touched then
+            Check_File_Exists (WAL_Path, Exists_Now);
+            if Exists_Now then
+               Truncate_File (WAL_Path, WAL_Start, Trunc_Ok);
+            else
+               Trunc_Ok := (WAL_Start = 0);
+            end if;
+            if not Trunc_Ok then
+               Engine.CLOG (Ctx.Id) := Tx_Aborted;
+            end if;
+         end if;
+      end Restore_State;
    begin
+      --  First-updater-wins conflict detection and poisoned-transaction guard
+      if Has_Write_Conflict (Engine, Doc_Id, Ctx.Id)
+        or else Engine.CLOG (Ctx.Id) in Tx_Aborted | Tx_Committed
+      then
+         Status := Status_Tx_Aborted;
+         return;
+      end if;
+
       --  Pre-check path hygiene and notification staging before any WAL I/O
       if Equal_Text (DB_Path, WAL_Path) then
          Status := Status_IO_Error;
@@ -1224,7 +1636,7 @@ package body Nhe_O.RAG is
       elsif Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page - Needed_Doc_Chunks then
          Start_Pg := Engine.Next_TOAST_Pg;
       else
-         Engine := Saved_Engine;
+         Restore_State;
          Status := Status_Capacity_Exceeded;
          return;
       end if;
@@ -1254,7 +1666,7 @@ package body Nhe_O.RAG is
       elsif Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page - Needed_Vec_Chunks then
          Vec_Start_Pg := Engine.Next_TOAST_Pg;
       else
-         Engine := Saved_Engine;
+         Restore_State;
          Status := Status_Capacity_Exceeded;
          return;
       end if;
@@ -1289,7 +1701,7 @@ package body Nhe_O.RAG is
          elsif Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page - Needed_Meta_Chunks then
             Meta_Start_Pg := Engine.Next_TOAST_Pg;
          else
-            Engine := Saved_Engine;
+            Restore_State;
             Status := Status_Capacity_Exceeded;
             return;
          end if;
@@ -1311,7 +1723,7 @@ package body Nhe_O.RAG is
                     TOAST_Root  => Start_Pg),
          Status => Sub_Stat);
       if Sub_Stat /= Status_Ok then
-         Engine := Saved_Engine;
+         Restore_State;
          Status := Sub_Stat;
          return;
       end if;
@@ -1324,12 +1736,24 @@ package body Nhe_O.RAG is
          Layer_Hint => Layer_Hint,
          Status     => Sub_Stat);
       if Sub_Stat /= Status_Ok then
-         Engine := Saved_Engine;
+         Restore_State;
          Status := Sub_Stat;
          return;
       end if;
 
       Capture_Doc_HNSW_Node (Engine.Vector_Graph, Doc_Id, New_HNSW_Node);
+
+      --  Remember the WAL length so a failure below can drop this call's frames
+      Check_File_Exists (WAL_Path, WAL_Exists);
+      if WAL_Exists then
+         Get_File_Size (WAL_Path, WAL_Start, Size_Ok);
+         if not Size_Ok then
+            Restore_State;
+            Status := Status_IO_Error;
+            return;
+         end if;
+      end if;
+      WAL_Touched := True;
 
       --  5a. Stage parent chunk into 4KB TOAST overflow chain in WAL (NO-STEAL)
       Write_TOAST_Chain
@@ -1342,7 +1766,7 @@ package body Nhe_O.RAG is
          Ptr           => Ptr,
          Status        => Sub_Stat);
       if Sub_Stat /= Status_Ok then
-         Engine := Saved_Engine;
+         Restore_State;
          Status := Sub_Stat;
          return;
       end if;
@@ -1358,7 +1782,7 @@ package body Nhe_O.RAG is
          Ptr           => Vec_Ptr,
          Status        => Sub_Stat);
       if Sub_Stat /= Status_Ok then
-         Engine := Saved_Engine;
+         Restore_State;
          Status := Sub_Stat;
          return;
       end if;
@@ -1375,7 +1799,7 @@ package body Nhe_O.RAG is
             Ptr           => Meta_Ptr,
             Status        => Sub_Stat);
          if Sub_Stat /= Status_Ok then
-            Engine := Saved_Engine;
+            Restore_State;
             Status := Sub_Stat;
             return;
          end if;
@@ -1420,7 +1844,7 @@ package body Nhe_O.RAG is
       Encode_WAL_Frame (Ctx.Id, 1, Slot_Page, Slot_CRC, Slot_WAL, WAL_Frame_Data);
       Append_WAL_Frame (WAL_Path, Slot_WAL, WAL_Ok);
       if not WAL_Ok then
-         Engine := Saved_Engine;
+         Restore_State;
          Status := Status_IO_Error;
          return;
       end if;
@@ -1433,7 +1857,7 @@ package body Nhe_O.RAG is
          Payload => Summary_Text,
          Status  => Sub_Stat);
       if Sub_Stat /= Status_Ok then
-         Engine := Saved_Engine;
+         Restore_State;
          Status := Sub_Stat;
          return;
       end if;
@@ -1445,11 +1869,14 @@ package body Nhe_O.RAG is
    --  Insert_Hit_Sorted (Distance + Tie-Breaking Keyword Boost at Dist = 0.0)
    -------------------------------------------------------------------------
 
+   --  Total order on hits: smaller distance, then keyword match, then smaller Doc_Id,
+   --  so equal-distance results are identical before and after recovery
    function Is_Better_Hit (Candidate, Existing : RAG_Search_Hit) return Boolean is
      (Candidate.Distance < Existing.Distance
       or else (Candidate.Distance = Existing.Distance
-               and then Candidate.Keyword_Match
-               and then not Existing.Keyword_Match));
+               and then ((Candidate.Keyword_Match and then not Existing.Keyword_Match)
+                         or else (Candidate.Keyword_Match = Existing.Keyword_Match
+                                  and then Candidate.Doc_Id < Existing.Doc_Id))));
 
    procedure Insert_Hit_Sorted
      (Result : in out RAG_Query_Result;
@@ -1498,9 +1925,9 @@ package body Nhe_O.RAG is
    -------------------------------------------------------------------------
 
    procedure Resolve_Visible_Doc
-     (Entry_Rec : in     RAG_Document_Entry;
-      Snapshot  : in     Valid_Tx_Id;
-      CLOG      : in     Commit_Log;
+     (Engine    : in     RAG_Engine;
+      Entry_Rec : in     RAG_Document_Entry;
+      Snapshot  : in     Commit_Seq_Number;
       Visible   :    out Boolean;
       Meta      :    out JSONB_Document;
       Summary   :    out Bounded_Text;
@@ -1523,7 +1950,7 @@ package body Nhe_O.RAG is
          return;
       end if;
 
-      if Is_Tuple_Visible (Entry_Rec.Tuple_Hdr, Snapshot, CLOG) then
+      if Is_Version_Visible (Engine, Entry_Rec.Tuple_Hdr, Snapshot) then
          Visible := True;
          Meta    := Entry_Rec.Metadata;
          Summary := Entry_Rec.Summary_Text;
@@ -1531,7 +1958,7 @@ package body Nhe_O.RAG is
          Vec_P   := Entry_Rec.Vec_Toast_Ptr;
          Rel_Id  := Entry_Rec.Related_Doc_Id;
       elsif Entry_Rec.Has_Prior_Version
-        and then Is_Tuple_Visible (Entry_Rec.Prior_Tuple_Hdr, Snapshot, CLOG)
+        and then Is_Version_Visible (Engine, Entry_Rec.Prior_Tuple_Hdr, Snapshot)
       then
          Visible := True;
          Meta    := Entry_Rec.Prior_Metadata;
@@ -1548,7 +1975,7 @@ package body Nhe_O.RAG is
 
    procedure Evaluate_Doc_Candidate
      (Engine            : in     RAG_Engine;
-      Snapshot          : in     Valid_Tx_Id;
+      Snapshot          : in     Commit_Seq_Number;
       DB_Path           : in     Bounded_Text;
       Doc_Id            : in     RAG_Doc_Slot;
       Query_Vec         : in     Vector_Value;
@@ -1601,9 +2028,9 @@ package body Nhe_O.RAG is
       end if;
 
       Resolve_Visible_Doc
-        (Entry_Rec => Engine.Docs (Doc_Id),
+        (Engine    => Engine,
+         Entry_Rec => Engine.Docs (Doc_Id),
          Snapshot  => Snapshot,
-         CLOG      => Engine.CLOG,
          Visible   => Vis,
          Meta      => Doc_Meta,
          Summary   => Doc_Summary,
@@ -1683,7 +2110,7 @@ package body Nhe_O.RAG is
 
    procedure Execute_Hybrid_RAG_Query
      (Engine            : in     RAG_Engine;
-      Snapshot          : in     Valid_Tx_Id;
+      Snapshot          : in     Commit_Seq_Number;
       DB_Path           : in     Bounded_Text;
       SQL_Query         : in     Bounded_Text;
       Query_Vec         : in     Vector_Value;
@@ -1877,9 +2304,9 @@ package body Nhe_O.RAG is
                                  or else Engine.Docs (Rel_Id).Has_Prior_Version))
             then
                Resolve_Visible_Doc
-                 (Entry_Rec => Engine.Docs (Rel_Id),
+                 (Engine    => Engine,
+                  Entry_Rec => Engine.Docs (Rel_Id),
                   Snapshot  => Snapshot,
-                  CLOG      => Engine.CLOG,
                   Visible   => Rel_Vis,
                   Meta      => Rel_Meta,
                   Summary   => Rel_Sum,

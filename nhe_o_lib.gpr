@@ -25,13 +25,16 @@ library project Nhe_O_Lib is
    );
    for Library_Auto_Init use "true";
 
+   --  No -gnata: every assertion (Pre/Post/Assert/Loop_Invariant) is proved statically
+   --  by gnatprove, and executing them would only add stack (whole-engine 'Old copies)
+   --  and an exception path that cannot cross the C ABI. Run-time checks stay enabled.
+   --  The verification executable (nhe_o.gpr) keeps -gnata.
    package Compiler is
       for Default_Switches ("Ada") use (
          "-O2",
          "-g",
          "-gnat2022",
          "-gnatwa",
-         "-gnata",
          "-gnatQ",
          "-fPIC"
       );

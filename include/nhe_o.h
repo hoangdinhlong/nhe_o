@@ -1,8 +1,27 @@
 /*
- * nhe_o.h — C99 / C++17 Foreign Function Interface Header for Nhe_O
+ * nhe_o.h — C99 / C++17 Foreign Function Interface Header for Nhe_O (ABI 0.4)
  *
  * Formally verified embedded PostgreSQL + pgvector + Redis + Hybrid RAG engine
  * written in 100% Ada/SPARK 2022 (pragma SPARK_Mode (On);).
+ *
+ * Runtime model (read before use):
+ *  - One process-wide engine. Every nhe_o_* call reads and writes the same global
+ *    state, so the library is NOT thread-safe: serialize all calls (one mutex around
+ *    every call). Two "handles" in one process are the same engine.
+ *  - Stack: the deepest calls (4096-D RAG ingest, recovery, checkpoint) need about
+ *    256 KiB of thread stack (192 KiB overflows); call the library from a thread with
+ *    at least 1 MiB of stack.
+ *  - Loading the library elaborates the GNAT runtime, which installs handlers for
+ *    SIGSEGV, SIGBUS, SIGFPE and SIGILL. Hosts that install their own handlers for
+ *    these signals (JVM, Go, crash reporters) must re-install them after loading.
+ *  - Input buffers are read only up to the given length (no NUL terminator needed).
+ *    Output text buffers must have the full capacity listed for each call: at most
+ *    *out_*_len bytes are written, plus a trailing NUL only when the text is shorter
+ *    than the capacity, so always use the returned length.
+ *  - Durability: a write that returns NHE_O_STATUS_OK is durable in the WAL. After an
+ *    I/O error on a durable write path the engine refuses every further write with
+ *    NHE_O_STATUS_IO_ERROR (reads keep working) until nhe_o_init_with_paths reopens
+ *    the database; recovery then decides from disk whether the failed write survived.
  */
 
 #ifndef NHE_O_H
@@ -33,6 +52,10 @@ extern "C" {
 #define NHE_O_MAX_CLOG_ENTRIES 8192
 #define NHE_O_MAX_WAL_FRAMES   4096
 #define NHE_O_MAX_KV_KEYS      64
+#define NHE_O_MAX_PATH_LEN     512  /* db_path_len / wal_path_len upper bound */
+#define NHE_O_MAX_WAL_PATH_LEN 507  /* resolved WAL path (room for ".ckpt") */
+#define NHE_O_CHECKPOINT_WAL_FRAMES 512  /* automatic checkpoint thresholds */
+#define NHE_O_CHECKPOINT_TX_ID      4096
 
 /* Status codes returned in *out_status */
 typedef enum {
@@ -60,11 +83,18 @@ typedef enum {
 int nhe_o_version_major(void);
 int nhe_o_version_minor(void);
 
-/* Initialize / reset embedded Nhe_O runtime state (default paths, 3D vectors) */
+/* Initialize / reset the runtime as a scratch database (3-D vectors) on the per-process
+ * files /tmp/nhe_o_c_api.<pid>.db and .wal, deleting earlier contents of those files
+ * (NHE_O_STATUS_IO_ERROR if one cannot be removed). For data that must persist, use
+ * nhe_o_init_with_paths with paths inside a private directory. */
 void nhe_o_init(int *out_status);
 
-/* Initialize embedded Nhe_O runtime state with custom DB/WAL paths & dimension (1..4096),
- * recovering existing WAL/DB state when present on disk */
+/* Initialize the runtime on caller-specified DB/WAL paths with dimension 1..4096,
+ * recovering existing state (a torn WAL or database tail left by a crash is repaired).
+ * Relative paths are resolved against the current directory once, here. Both lengths
+ * are 1..512 bytes, the resolved WAL path at most 507 bytes (room for ".ckpt"), and the
+ * two paths must name different files, also through links (NHE_O_STATUS_INVALID_ARG).
+ * The WAL file is created when missing. */
 void nhe_o_init_with_paths(
     const char *db_path_buf,
     int         db_path_len,
@@ -73,6 +103,16 @@ void nhe_o_init_with_paths(
     int         dim,
     int        *out_status
 );
+
+/* Release the runtime (later calls return NHE_O_STATUS_NOT_INITIALIZED). The scratch
+ * files of nhe_o_init are deleted; files given to nhe_o_init_with_paths are kept. */
+void nhe_o_close(int *out_status);
+
+/* Compact the WAL: write "<wal>.ckpt" with the KV entries and the frozen RAG page,
+ * then rename it over the WAL and fsync the directory. Transaction ids restart at 2.
+ * Runs automatically after a durable write once the WAL holds 512 frames or an id
+ * reaches 4096; an explicit call is only needed to compact earlier. */
+void nhe_o_checkpoint(int *out_status);
 
 /* Analyze a PostgreSQL-dialect SQL statement */
 void nhe_o_analyze_sql(
@@ -105,7 +145,8 @@ void nhe_o_vector_distance_nd(
     int         *out_status
 );
 
-/* Redis-compatible Key-Value Cache operations */
+/* Redis-compatible Key-Value Cache operations (keys 1..64 bytes, values 0..512 bytes,
+ * timestamps now_sec >= 0, at most NHE_O_MAX_KV_KEYS keys with LRU eviction) */
 void nhe_o_kv_set(
     const char *key_buf,
     int         key_len,
@@ -116,6 +157,7 @@ void nhe_o_kv_set(
     int        *out_status
 );
 
+/* out_val_buf capacity: NHE_O_MAX_TEXT_LEN (512) bytes */
 void nhe_o_kv_get(
     const char *key_buf,
     int         key_len,
@@ -125,9 +167,11 @@ void nhe_o_kv_get(
     int        *out_status
 );
 
+/* DEL at time now_sec: *out_removed = 1 iff the key was live (present, not expired) */
 void nhe_o_kv_del(
     const char *key_buf,
     int         key_len,
+    int64_t     now_sec,
     int        *out_removed,
     int        *out_status
 );
@@ -188,6 +232,8 @@ void nhe_o_pubsub_publish(
     int        *out_status
 );
 
+/* out_chan_buf capacity: NHE_O_MAX_IDENT_LEN (64) bytes;
+ * out_payload_buf capacity: NHE_O_MAX_TEXT_LEN (512) bytes */
 void nhe_o_pubsub_poll(
     int   sub_id,
     char *out_chan_buf,
@@ -198,7 +244,10 @@ void nhe_o_pubsub_poll(
     int  *out_status
 );
 
-/* Universal Hybrid RAG (B+Tree + HNSW + TOAST Parent Chunks + GraphRAG + WAL) */
+/* Universal Hybrid RAG (B+Tree + HNSW + TOAST Parent Chunks + GraphRAG + WAL).
+ * Each ingest/delete is one transaction; NHE_O_STATUS_OK means its commit is durable.
+ * doc_id is 1..16, related_doc_id 0..16 (0 = none). The ingest_3d / ingest_nd variants
+ * store the summary as the parent chunk, so summary_len must be at least 1. */
 void nhe_o_rag_ingest_3d(
     int         doc_id,
     const char *summary_buf,
@@ -220,6 +269,7 @@ void nhe_o_rag_ingest_nd(
     int         *out_status
 );
 
+/* parent_len 0..16392 (0: the summary is the parent chunk; both 0 is invalid) */
 void nhe_o_rag_ingest_full_nd(
     int          doc_id,
     const char  *meta_json_buf,
@@ -239,6 +289,7 @@ void nhe_o_rag_delete(
     int *out_status
 );
 
+/* *out_parent_bytes: full byte length of the top hit's parent chunk (no text copied) */
 void nhe_o_rag_query_3d(
     float       qx,
     float       qy,
@@ -255,6 +306,8 @@ void nhe_o_rag_query_3d(
     int        *out_status
 );
 
+/* out_parent_buf capacity: NHE_O_MAX_TEXT_LEN (512) bytes; *out_parent_len is the number
+ * of bytes written (the first 512 bytes of the parent chunk at most) */
 void nhe_o_rag_query_nd(
     const float *query_vec_buf,
     int          dim,
@@ -271,6 +324,8 @@ void nhe_o_rag_query_nd(
     int         *out_status
 );
 
+/* out_parent_buf capacity: NHE_O_MAX_TOAST_BYTES (16392) bytes; *out_parent_len is the
+ * byte length of the whole parent chunk, all of which is written */
 void nhe_o_rag_query_full_nd(
     const float *query_vec_buf,
     int          dim,

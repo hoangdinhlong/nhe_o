@@ -26,6 +26,13 @@ package Nhe_O.RAG is
    Max_Safe_TOAST_Page : constant Valid_Page_Id :=
      Max_Page_Id - (3 * Max_TOAST_Chunks);
 
+   --  MVCC commit sequence numbers (BR-002): every commit observed by the engine gets
+   --  the next number; a snapshot is the last number taken when the snapshot starts.
+   --  Versions recovered from disk (or frozen by a checkpoint) carry number 0, i.e.
+   --  they committed before every snapshot.
+   subtype Commit_Seq_Number is Natural range 0 .. Max_Tx_Id;
+   type Commit_Seq_Log is array (CLOG_Tx_Index) of Commit_Seq_Number;
+
    type RAG_Document_Entry is record
       Active               : Boolean           := False;
       Doc_Id               : Positive          := 1;
@@ -52,13 +59,15 @@ package Nhe_O.RAG is
    type RAG_Document_Table is array (RAG_Doc_Slot) of RAG_Document_Entry;
 
    type RAG_Engine is record
-      Dim           : Vector_Dim         := 3;
-      Doc_Count     : RAG_Doc_Count      := 0;
-      Next_TOAST_Pg : Valid_Page_Id      := 10;
-      CLOG          : Commit_Log         := Default_CLOG;
-      PK_Tree       : BTree_Index        := (others => <>);
-      Vector_Graph  : HNSW_Index         := (others => <>);
-      Docs          : RAG_Document_Table := [others => (others => <>)];
+      Dim             : Vector_Dim         := 3;
+      Doc_Count       : RAG_Doc_Count      := 0;
+      Next_TOAST_Pg   : Valid_Page_Id      := 10;
+      CLOG            : Commit_Log         := Default_CLOG;
+      Commit_Seqs     : Commit_Seq_Log     := [others => 0];
+      Last_Commit_Seq : Commit_Seq_Number  := 0;
+      PK_Tree         : BTree_Index        := (others => <>);
+      Vector_Graph    : HNSW_Index         := (others => <>);
+      Docs            : RAG_Document_Table := [others => (others => <>)];
    end record;
 
    --  Structural invariant check for a RAG_Engine instance
@@ -67,6 +76,40 @@ package Nhe_O.RAG is
       and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
       and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
       and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page);
+
+   --  Snapshot for MVCC reads: the commit sequence number of the latest commit the
+   --  engine has observed. Commits observed later are invisible to this snapshot.
+   function Take_Snapshot (Engine : RAG_Engine) return Commit_Seq_Number is
+     (Engine.Last_Commit_Seq);
+
+   --  Snapshot-isolation visibility rule (BR-002): a version is visible to Snapshot iff
+   --  its creator committed at or before Snapshot and its deleter (if any) did not.
+   --  Uncommitted versions are never visible, including the reader's own (NO-STEAL:
+   --  their TOAST pages only exist in the WAL until Commit_Tx materializes them).
+   function Is_Version_Visible
+     (Engine   : RAG_Engine;
+      Hdr      : MVCC_Tuple_Header;
+      Snapshot : Commit_Seq_Number) return Boolean
+   is
+     (Is_Tx_Committed (Engine.CLOG, Hdr.Xmin)
+      and then Engine.Commit_Seqs (Hdr.Xmin) <= Snapshot
+      and then (Hdr.Xmax = 0
+                or else not Is_Tx_Committed (Engine.CLOG, Hdr.Xmax)
+                or else Engine.Commit_Seqs (Hdr.Xmax) > Snapshot));
+
+   --  First-updater-wins write conflict (BR-002): Doc_Id currently carries a version
+   --  created or deleted by another transaction that is still active
+   function Has_Write_Conflict
+     (Engine : RAG_Engine;
+      Doc_Id : RAG_Doc_Slot;
+      Tx     : Valid_Tx_Id) return Boolean
+   is
+     (Engine.Docs (Doc_Id).Active
+      and then ((Engine.Docs (Doc_Id).Tuple_Hdr.Xmin /= Tx
+                 and then Engine.CLOG (Engine.Docs (Doc_Id).Tuple_Hdr.Xmin) = Tx_Active)
+                or else (Engine.Docs (Doc_Id).Tuple_Hdr.Xmax > 0
+                         and then Engine.Docs (Doc_Id).Tuple_Hdr.Xmax /= Tx
+                         and then Engine.CLOG (Engine.Docs (Doc_Id).Tuple_Hdr.Xmax) = Tx_Active)));
 
    Max_RAG_Hits : constant := 8;
    subtype RAG_Hit_Index is Positive range 1 .. Max_RAG_Hits;
@@ -102,18 +145,40 @@ package Nhe_O.RAG is
                     and then Engine.PK_Tree.Node_Count = 1
                     and then Engine.PK_Tree.Root_Node = 1
                     and then Engine.Next_TOAST_Pg = 10
+                    and then Engine.Last_Commit_Seq = 0
                     and then Is_Valid_RAG_Engine (Engine);
 
-   --  Case-insensitive substring check for Hybrid Lexical + Vector RAG.
-   --  Returns False when Keyword.Length = 0.
+   --  Case-insensitive substring check for Hybrid Lexical + Vector RAG. Case folding
+   --  covers ASCII and the Latin letters of UTF-8 (Latin-1 Supplement, Latin
+   --  Extended-A, the horn letters O/U of Latin Extended-B, and Latin Extended
+   --  Additional), i.e. every Vietnamese letter. Returns False when Keyword.Length = 0.
    function Contains_Keyword
      (Text    : Bounded_Text;
       Keyword : Bounded_Text) return Boolean
      with Global => null,
           Post   => (if Keyword.Length = 0 then not Contains_Keyword'Result);
 
+   --  Record that transaction Tx committed (after its Commit_Tx barrier is durable):
+   --  CLOG (Tx) := Tx_Committed and Tx receives the next commit sequence number
+   procedure Mark_Committed
+     (Engine : in out RAG_Engine;
+      Tx     : in     Valid_Tx_Id)
+     with Global => null,
+          Always_Terminates,
+          Post   => Engine.CLOG (Tx) = Tx_Committed
+                    and then Engine.Commit_Seqs (Tx) = Engine.Last_Commit_Seq
+                    and then Engine.Last_Commit_Seq >= Engine.Last_Commit_Seq'Old
+                    and then Engine.Dim = Engine.Dim'Old
+                    and then Engine.Vector_Graph = Engine.Vector_Graph'Old
+                    and then Engine.PK_Tree = Engine.PK_Tree'Old
+                    and then Engine.Next_TOAST_Pg = Engine.Next_TOAST_Pg'Old
+                    and then Engine.Doc_Count = Engine.Doc_Count'Old
+                    and then Engine.Docs = Engine.Docs'Old;
+
    --  MVCC logical delete of a document at transaction Ctx (sets Xmax := Ctx.Id
-   --  and removes Doc_Id from PK_Tree and Vector_Graph)
+   --  and removes Doc_Id from PK_Tree and Vector_Graph). Status_Tx_Aborted when
+   --  another active transaction holds an uncommitted version of Doc_Id
+   --  (Has_Write_Conflict) or Ctx was already aborted; the engine is then unchanged.
    procedure Delete_Document
      (Engine : in out RAG_Engine;
       Ctx    : in     Transaction_Context;
@@ -130,9 +195,13 @@ package Nhe_O.RAG is
                     and then Engine.Vector_Graph.Dim = Engine.Dim
                     and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
                     and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
-                    and then Engine.Next_TOAST_Pg = Engine.Next_TOAST_Pg'Old;
+                    and then Engine.Next_TOAST_Pg = Engine.Next_TOAST_Pg'Old
+                    and then (if Has_Write_Conflict (Engine'Old, Doc_Id, Ctx.Id)
+                              then Status = Status_Tx_Aborted);
 
-   --  Durable WAL-staged MVCC delete of a document at transaction Ctx
+   --  Durable WAL-staged MVCC delete of a document at transaction Ctx. If staging the
+   --  page fails after the WAL was touched, Ctx is poisoned (CLOG (Ctx.Id) :=
+   --  Tx_Aborted) so it can never commit its partially staged frames.
    procedure Delete_Document
      (Engine   : in out RAG_Engine;
       Ctx      : in     Transaction_Context;
@@ -153,13 +222,95 @@ package Nhe_O.RAG is
                     and then Engine.Vector_Graph.Dim = Engine.Dim
                     and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
                     and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
-                    and then Engine.Next_TOAST_Pg = Engine.Next_TOAST_Pg'Old;
+                    and then Engine.Next_TOAST_Pg = Engine.Next_TOAST_Pg'Old
+                    and then (if Has_Write_Conflict (Engine'Old, Doc_Id, Ctx.Id)
+                              then Status = Status_Tx_Aborted);
 
    --  Roll back in-memory RAG_Engine mutations (Docs, PK_Tree, Vector_Graph,
-   --  CLOG, and Next_TOAST_Pg) performed by transaction Tx_Num
+   --  CLOG, and Next_TOAST_Pg) performed by the uncommitted transaction Tx_Num.
+   --  Each document's prior version is restored; a version that the rolled-back update
+   --  had already displaced from the single prior-version slot cannot be resurrected.
    procedure Rollback_RAG_Tx
      (Engine : in out RAG_Engine;
       Tx_Num : in     Valid_Tx_Id)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Engine.CLOG (Tx_Num) /= Tx_Committed
+                    and then Engine.Vector_Graph.Dim = Engine.Dim
+                    and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
+                    and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page,
+          Post   => Engine.Dim = Engine.Dim'Old
+                    and then Engine.Vector_Graph.Dim = Engine.Dim
+                    and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
+                    and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page
+                    and then Engine.CLOG (Tx_Num) = Tx_Aborted;
+
+   --  Encode the committed state of Engine.Docs plus the changes of the committing
+   --  transaction LSN_Tx into a 4096-byte primary Slotted_Page (`"SLOT"`). Per slot the
+   --  newest version created by a committed transaction or by LSN_Tx is persisted
+   --  (falling back to the committed prior version), and a deleter that is neither
+   --  committed nor LSN_Tx is not persisted, so the page never carries another active
+   --  transaction's uncommitted work.
+   procedure Build_RAG_Slotted_Page
+     (Engine   : in     RAG_Engine;
+      LSN_Tx   : in     Valid_Tx_Id;
+      Raw_Page :    out Page_Buffer)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Engine.CLOG (LSN_Tx) /= Tx_Aborted;
+
+   --  Commit transaction Ctx against Engine (BR-002 / ADR-006): builds Page 1 with
+   --  Build_RAG_Slotted_Page, runs Commit_Tx, then either marks Ctx committed
+   --  (Mark_Committed) and delivers its staged notifications, or rolls Engine back
+   --  (Rollback_RAG_Tx) and discards them. A poisoned transaction (CLOG (Ctx.Id) =
+   --  Tx_Aborted after a failed Ingest/Delete) is rolled back without touching the WAL.
+   --  If the commit barrier is durable but materializing pages failed, the database
+   --  file is repaired in place with Redo_WAL_Recovery; Flush_Pending reports that the
+   --  repair failed too (the commit stands and is replayed at the next recovery).
+   procedure Commit_RAG_Tx
+     (Engine        : in out RAG_Engine;
+      Ctx           : in out Transaction_Context;
+      DB_Path       : in     Bounded_Text;
+      WAL_Path      : in     Bounded_Text;
+      Staging       : in out Tx_Notification_Buffer;
+      Broker        : in out PubSub_Broker;
+      Delivered     :    out Natural;
+      Status        :    out Engine_Status;
+      Flush_Pending :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Ctx.State = Tx_Active
+                    and then DB_Path.Length > 0
+                    and then WAL_Path.Length > 0
+                    and then Engine.Vector_Graph.Dim = Engine.Dim
+                    and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
+                    and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page,
+          Post   => Engine.Dim = Engine.Dim'Old
+                    and then Engine.Vector_Graph.Dim = Engine.Dim
+                    and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
+                    and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page
+                    and then Ctx.Id = Ctx.Id'Old
+                    and then Ctx.State in Tx_Committed | Tx_Aborted
+                    and then (Status = Status_Ok) = (Ctx.State = Tx_Committed)
+                    and then (if Ctx.State = Tx_Committed
+                              then Engine.CLOG (Ctx.Id) = Tx_Committed)
+                    and then (if Ctx.State = Tx_Aborted
+                                and then Engine'Old.CLOG (Ctx.Id) /= Tx_Committed
+                              then Engine.CLOG (Ctx.Id) = Tx_Aborted)
+                    and then (if Flush_Pending then Status = Status_Ok);
+
+   --  Checkpoint support (VACUUM FREEZE): when no transaction is in flight, drop deleted
+   --  documents and prior versions, re-stamp every live version as created by the
+   --  frozen transaction 1 (Xmin = 1, commit sequence 0), and reset the CLOG so that
+   --  transaction ids restart at 2. Status_Tx_Aborted (engine unchanged) if any document
+   --  still carries an uncommitted version.
+   procedure Freeze_RAG_Engine
+     (Engine : in out RAG_Engine;
+      Status :    out Engine_Status)
      with Global => null,
           Always_Terminates,
           Pre    => Engine.Vector_Graph.Dim = Engine.Dim
@@ -170,17 +321,44 @@ package Nhe_O.RAG is
                     and then Engine.Vector_Graph.Dim = Engine.Dim
                     and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
                     and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
-                    and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page;
+                    and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page
+                    and then Status in Status_Ok | Status_Tx_Aborted
+                    and then (if Status = Status_Ok then
+                                Engine.Last_Commit_Seq = 0
+                                and then Engine.CLOG (1) = Tx_Committed
+                                and then (for all S in RAG_Doc_Slot =>
+                                            (if Engine.Docs (S).Active then
+                                               Engine.Docs (S).Tuple_Hdr.Xmin = 1
+                                               and then Engine.Docs (S).Tuple_Hdr.Xmax = 0
+                                               and then not Engine.Docs (S).Has_Prior_Version))
+                              else Engine = Engine'Old);
 
-   --  Encode Engine.Docs into a 4096-byte primary Slotted_Page (`"SLOT"`)
-   procedure Build_RAG_Slotted_Page
-     (Engine   : in     RAG_Engine;
-      LSN_Tx   : in     Valid_Tx_Id;
-      Raw_Page :    out Page_Buffer)
+   --  Recover a RAG_Engine from on-disk WAL + Page 1 Slotted_Page. A missing or empty
+   --  database file recovers an empty engine. Max_Seen_Tx is the largest transaction id
+   --  found in the WAL (Redo_WAL_Recovery.Max_Seen_Tx), the Page 1 LSN, and any
+   --  recovered tuple header: callers must seed Next_Tx above it.
+   procedure Recover_RAG_Engine
+     (Engine      :    out RAG_Engine;
+      Dim         : in     Vector_Dim;
+      DB_Path     : in     Bounded_Text;
+      WAL_Path    : in     Bounded_Text;
+      Max_Seen_Tx :    out Tx_Id;
+      Status      :    out Engine_Status)
      with Global => null,
-          Always_Terminates;
+          Always_Terminates,
+          Pre    => DB_Path.Length > 0 and then WAL_Path.Length > 0,
+          Post   => Engine.Dim = Dim
+                    and then Engine.Vector_Graph.Dim = Dim
+                    and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
+                    and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page
+                    and then (if Status = Status_Ok then
+                                (for all S in RAG_Doc_Slot =>
+                                   (if Engine.Docs (S).Active then
+                                      Engine.Docs (S).Tuple_Hdr.Xmin <= Max_Seen_Tx
+                                      and then Engine.Docs (S).Tuple_Hdr.Xmax <= Max_Seen_Tx)));
 
-   --  Recover a RAG_Engine from on-disk WAL + Page 1 Slotted_Page
+   --  Recover_RAG_Engine for callers that track transaction ids themselves
    procedure Recover_RAG_Engine
      (Engine   :    out RAG_Engine;
       Dim      : in     Vector_Dim;
@@ -197,11 +375,17 @@ package Nhe_O.RAG is
                     and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page;
 
    --  Transactional Document Ingestion:
-   --  1. Persists oversized parent chunk (and full >64-D vector when Dim > 64) to 4KB TOAST chains
+   --  1. Persists the oversized parent chunk and the full Float32 embedding ("VTST",
+   --     for every dimension) to 4KB TOAST chains, plus an "RMET" chain when the
+   --     summary or metadata does not fit inline
    --  2. Indexes Doc_Id in B+Tree (Nhe_O.BTree)
    --  3. Indexes Embedding in Multi-Layer Quantized HNSW Graph (Nhe_O.HNSW)
    --  4. Preserves prior MVCC version & persists primary Slotted_Page on Page 1
    --  5. Stages a DURABLE WAL notification on channel "rag.indexed" (Nhe_O.PubSub)
+   --  Status_Tx_Aborted with an unchanged engine on a write conflict
+   --  (Has_Write_Conflict) or when Ctx was already poisoned. A failure after the first
+   --  WAL frame was appended restores the engine and poisons Ctx (CLOG (Ctx.Id) :=
+   --  Tx_Aborted): its staged frames must never be committed.
    procedure Ingest_Document
      (Engine         : in out RAG_Engine;
       Ctx            : in     Transaction_Context;
@@ -231,12 +415,15 @@ package Nhe_O.RAG is
                     and then Engine.Vector_Graph.Dim = Engine.Dim
                     and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
                     and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
-                    and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page;
+                    and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page
+                    and then (if Has_Write_Conflict (Engine'Old, Doc_Id, Ctx.Id)
+                              then Status = Status_Tx_Aborted);
 
-   --  Execute a Hybrid SQL + JSONB (`@>`) + Lexical + HNSW Vector + TOAST + GraphRAG query
+   --  Execute a Hybrid SQL + JSONB (`@>`) + Lexical + HNSW Vector + TOAST + GraphRAG
+   --  query at MVCC Snapshot (a commit sequence number, see Take_Snapshot)
    procedure Execute_Hybrid_RAG_Query
      (Engine            : in     RAG_Engine;
-      Snapshot          : in     Valid_Tx_Id;
+      Snapshot          : in     Commit_Seq_Number;
       DB_Path           : in     Bounded_Text;
       SQL_Query         : in     Bounded_Text;
       Query_Vec         : in     Vector_Value;

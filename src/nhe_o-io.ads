@@ -8,6 +8,8 @@ with Nhe_O.Types; use Nhe_O.Types;
 
 package Nhe_O.IO is
 
+   use type Interfaces.Integer_64;
+
    subtype Byte is Interfaces.Unsigned_8;
 
    --  Maximum page index (1,048,575 pages * 4096 bytes = 4 GiB per database file)
@@ -26,6 +28,9 @@ package Nhe_O.IO is
    type WAL_Frame_Buffer is array (WAL_Frame_Offset) of Byte
      with Convention => C;
 
+   --  Size of a database or WAL file in bytes
+   subtype File_Size is Interfaces.Integer_64 range 0 .. Interfaces.Integer_64'Last;
+
    --  NUL-terminated C path string buffer proven free of buffer overruns
    Max_C_Path_Length : constant Positive := Max_Text_Len + 1;
    subtype C_Path_Index is Positive range 1 .. Max_C_Path_Length;
@@ -33,7 +38,9 @@ package Nhe_O.IO is
 
    --  True iff Path contains an embedded ASCII.NUL character within 1 .. Path.Length
    function Has_Embedded_NUL (Path : Bounded_Text) return Boolean
-     with Global => null;
+     with Global => null,
+          Post   => Has_Embedded_NUL'Result =
+                      (for some I in 1 .. Path.Length => Path.Data (I) = ASCII.NUL);
 
    procedure To_C_Path
      (Path   : in     Bounded_Text;
@@ -53,7 +60,77 @@ package Nhe_O.IO is
           Always_Terminates,
           Pre    => File_Path.Length > 0;
 
-   --  Write a 4096-byte slotted page to the database file at offset Page_Id * 4096
+   --  Create File_Path as an empty regular file when it does not exist yet (an existing
+   --  file is left untouched), fsync it and its directory. Success is True iff the path
+   --  could be opened read-write (so it is not a directory) and every fsync succeeded.
+   procedure Create_File_If_Missing
+     (File_Path : in     Bounded_Text;
+      Success   :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => File_Path.Length > 0;
+
+   --  Report the current size in bytes of an existing file (open + lseek SEEK_END)
+   procedure Get_File_Size
+     (File_Path : in     Bounded_Text;
+      Size      :    out File_Size;
+      Success   :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => File_Path.Length > 0,
+          Post   => (if not Success then Size = 0);
+
+   --  Shrink an existing file to New_Size bytes and fsync it. Used by crash recovery
+   --  to drop a torn trailing WAL frame or a partially written trailing page.
+   procedure Truncate_File
+     (File_Path : in     Bounded_Text;
+      New_Size  : in     File_Size;
+      Success   :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => File_Path.Length > 0;
+
+   --  Atomically replace Dst_Path with Src_Path via rename(2), then fsync the parent
+   --  directory of Dst_Path so the replacement survives a crash
+   procedure Replace_File
+     (Src_Path : in     Bounded_Text;
+      Dst_Path : in     Bounded_Text;
+      Success  :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Src_Path.Length > 0 and then Dst_Path.Length > 0;
+
+   --  Same is True iff both paths exist and resolve (following symbolic links)
+   --  to the same file, i.e. stat(2) reports identical st_dev and st_ino
+   procedure Check_Same_File
+     (Path_A : in     Bounded_Text;
+      Path_B : in     Bounded_Text;
+      Same   :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Path_A.Length > 0 and then Path_B.Length > 0;
+
+   --  Return the calling process identifier (getpid), used to derive
+   --  per-process default database paths
+   function Get_Process_Id return Natural
+     with Global => null;
+
+   --  Prefix a relative Path with the current working directory (getcwd) so later
+   --  calls are immune to chdir(2); absolute paths are returned unchanged
+   procedure Make_Absolute_Path
+     (Path     : in     Bounded_Text;
+      Abs_Path :    out Bounded_Text;
+      Success  :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Path.Length > 0,
+          Post   => (if Success then Abs_Path.Length >= Path.Length
+                                     and then Abs_Path.Data (1) = '/'
+                     else Abs_Path.Length = 0);
+
+   --  Write a 4096-byte slotted page to the database file at offset Page_Id * 4096.
+   --  A failed write that was extending the file truncates it back to its previous
+   --  page-aligned size, so a failure never leaves a torn trailing page behind.
    procedure Write_Page
      (File_Path : in     Bounded_Text;
       Page_Id   : in     Valid_Page_Id;
@@ -73,8 +150,9 @@ package Nhe_O.IO is
           Always_Terminates,
           Pre    => File_Path.Length > 0;
 
-   --  Read a 4096-byte slotted page at Page_Id, distinguishing clean EOF (0 bytes at
-   --  page boundary) from torn pages or I/O errors
+   --  Read a 4096-byte slotted page at Page_Id, distinguishing clean EOF (Page_Id at or
+   --  past the end of a page-aligned file) from I/O errors; a file whose size is not a
+   --  multiple of 4096 bytes fails closed for every Page_Id (see Repair_DB_Tail)
    procedure Read_Page
      (File_Path : in     Bounded_Text;
       Page_Id   : in     Valid_Page_Id;
@@ -86,17 +164,10 @@ package Nhe_O.IO is
           Pre    => File_Path.Length > 0,
           Post   => not (Success and Is_EOF);
 
-   --  Write a CRC32-framed WAL record at exact 0-based index Frame_Idx via positional pwrite
-   procedure Write_WAL_Frame
-     (WAL_Path  : in     Bounded_Text;
-      Frame_Idx : in     Valid_Page_Id;
-      Frame     : in     WAL_Frame_Buffer;
-      Success   :    out Boolean)
-     with Global => null,
-          Always_Terminates,
-          Pre    => WAL_Path.Length > 0;
-
-   --  Append a CRC32-framed WAL record at a frame-aligned offset via positional pwrite + fsync
+   --  Append a CRC32-framed WAL record at the frame-aligned end of the WAL via
+   --  positional pwrite + fsync. Success is True iff the whole frame was written and
+   --  fsynced. On any failure the WAL is truncated back to its previous length, so a
+   --  frame reported as not appended is never replayed by recovery.
    procedure Append_WAL_Frame
      (WAL_Path : in     Bounded_Text;
       Frame    : in     WAL_Frame_Buffer;
@@ -115,8 +186,10 @@ package Nhe_O.IO is
           Always_Terminates,
           Pre    => WAL_Path.Length > 0;
 
-   --  Read a WAL frame at 0-based index Frame_Idx, distinguishing clean EOF (0 bytes at
-   --  exact frame boundary) from torn frames or I/O errors
+   --  Read a WAL frame at 0-based index Frame_Idx, distinguishing clean EOF (Frame_Idx at
+   --  or past the last frame of a frame-aligned WAL) from I/O errors. A WAL whose size is
+   --  not a multiple of 4120 bytes, or that holds more than Max_WAL_Frames frames, fails
+   --  closed for every Frame_Idx (see Nhe_O.Transaction.Repair_WAL_Tail).
    procedure Read_WAL_Frame
      (WAL_Path  : in     Bounded_Text;
       Frame_Idx : in     Valid_Page_Id;
@@ -128,7 +201,7 @@ package Nhe_O.IO is
           Pre    => WAL_Path.Length > 0,
           Post   => not (Success and Is_EOF);
 
-   --  Delete a database or WAL file if present on disk
+   --  Delete a database or WAL file if present on disk (best effort)
    pragma Warnings (GNATprove, Off, "subprogram ""Delete_File_If_Exists"" has no effect",
                     Reason => "Unlinks OS file on disk via contract-bound POSIX unlink syscall");
    procedure Delete_File_If_Exists
@@ -137,6 +210,15 @@ package Nhe_O.IO is
           Always_Terminates,
           Pre    => File_Path.Length > 0;
    pragma Warnings (GNATprove, On, "subprogram ""Delete_File_If_Exists"" has no effect");
+
+   --  Delete a database or WAL file if present; Removed is True iff the path no
+   --  longer exists afterwards
+   procedure Delete_File_If_Exists
+     (File_Path : in     Bounded_Text;
+      Removed   :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => File_Path.Length > 0;
 
    --  Console output & CLI helpers in SPARK_Mode (On)
    procedure Print_Line (Msg : in String)
