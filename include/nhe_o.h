@@ -120,7 +120,26 @@ void nhe_o_close(int *out_status);
  * reaches 4096; an explicit call is only needed to compact earlier. */
 void nhe_o_checkpoint(int *out_status);
 
-/* Analyze a PostgreSQL-dialect SQL statement */
+/* Statement kinds reported in *out_stmt_kind by nhe_o_analyze_sql */
+typedef enum {
+    NHE_O_STMT_UNKNOWN      = 0,
+    NHE_O_STMT_CREATE_TABLE = 1,
+    NHE_O_STMT_INSERT       = 2,
+    NHE_O_STMT_SELECT       = 3,
+    NHE_O_STMT_UPDATE       = 4,
+    NHE_O_STMT_DELETE       = 5,
+    NHE_O_STMT_BEGIN        = 6,
+    NHE_O_STMT_COMMIT       = 7,
+    NHE_O_STMT_ROLLBACK     = 8,
+    NHE_O_STMT_LISTEN       = 9,
+    NHE_O_STMT_NOTIFY       = 10
+} nhe_o_stmt_kind_t;
+
+/* Analyze one PostgreSQL-dialect SQL statement (query_len 0..512) against the dialect
+ * documented in src/nhe_o-sql.ads: NHE_O_STATUS_OK only for exactly one supported
+ * statement, NHE_O_STATUS_INVALID_SYNTAX otherwise (including multi-statement input).
+ * out_has_vector: <->, <=> or <#> outside literals; out_has_jsonb: ->, ->>, #>, #>>,
+ * @>, <@, ?, ?|, ?&, @? or #- outside literals. */
 void nhe_o_analyze_sql(
     const char *query_buf,
     int         query_len,

@@ -66,6 +66,19 @@ STATUS_IO_ERROR = 8
 STATUS_INVALID_ARG = 9
 STATUS_NOT_INITIALIZED = 10
 
+# SQL statement kinds reported by analyze_sql()["stmt_kind"] (Nhe_O.SQL.SQL_Statement_Kind)
+STMT_UNKNOWN = 0
+STMT_CREATE_TABLE = 1
+STMT_INSERT = 2
+STMT_SELECT = 3
+STMT_UPDATE = 4
+STMT_DELETE = 5
+STMT_BEGIN = 6
+STMT_COMMIT = 7
+STMT_ROLLBACK = 8
+STMT_LISTEN = 9
+STMT_NOTIFY = 10
+
 ENCODING_FLOAT32 = 0
 ENCODING_INT8_SQ8 = 1
 ENCODING_BINARY_1BIT = 2
@@ -857,6 +870,7 @@ def run_self_test() -> None:
         "SELECT id FROM docs WHERE meta @> $1::jsonb ORDER BY emb <-> $2;"
     )
     _check(sql_info["status"] == STATUS_OK, "analyze_sql status")
+    _check(sql_info["stmt_kind"] == STMT_SELECT, "analyze_sql statement kind")
     _check(sql_info["has_vector_op"] is True, "has_vector_op")
     _check(sql_info["has_jsonb_op"] is True, "has_jsonb_op")
 
