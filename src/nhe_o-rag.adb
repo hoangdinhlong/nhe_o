@@ -2127,6 +2127,8 @@ package body Nhe_O.RAG is
       SQL_Desc     : Parsed_SQL_Descriptor;
       SQL_Stat     : Engine_Status;
       Effective_K  : RAG_Hit_Index := Top_K;
+      Skip_Count   : RAG_Hit_Count := 0;
+      Window_K     : RAG_Hit_Index;
       KNN_Res      : HNSW_Search_Result;
       Cand_Id      : Positive;
       Cand_IO_Err  : Boolean;
@@ -2159,7 +2161,14 @@ package body Nhe_O.RAG is
          return;
       end if;
 
-      --  Honor SQL LIMIT clause when present
+      --  Honor the SQL row window: LIMIT n / FETCH FIRST n caps the hits and OFFSET n
+      --  skips the first n ranked hits. LIMIT $n / OFFSET $n cannot be bound (the
+      --  only parameter of this executor is the query vector) and are rejected, as is
+      --  a window reaching past the Max_RAG_Hits ranking depth.
+      if SQL_Desc.Has_Param_Limit or else SQL_Desc.Has_Param_Offset then
+         Status := Status_Invalid_Syntax;
+         return;
+      end if;
       if SQL_Desc.Has_Limit then
          if SQL_Desc.Limit_Value = 0 then
             Status := Status_Ok;
@@ -2168,6 +2177,12 @@ package body Nhe_O.RAG is
             Effective_K := RAG_Hit_Index (SQL_Desc.Limit_Value);
          end if;
       end if;
+      if SQL_Desc.Offset_Value > Max_RAG_Hits - Effective_K then
+         Status := Status_Capacity_Exceeded;
+         return;
+      end if;
+      Skip_Count := SQL_Desc.Offset_Value;
+      Window_K   := Effective_K + Skip_Count;
 
       --  2. Stage 1: HNSW ANN candidate retrieval in requested quantization mode
       Search_KNN
@@ -2180,8 +2195,8 @@ package body Nhe_O.RAG is
       --  3. Stage 2: Apply PK_Tree check, MVCC Snapshot + CLOG visibility,
       --     JSONB `@>` filter, Stage-2 TOAST Exact Re-Ranking, and Keyword Boost
       for I in 1 .. KNN_Res.Count loop
-         pragma Loop_Invariant (Result.Count <= Effective_K);
-         pragma Loop_Invariant (Effective_K <= Top_K);
+         pragma Loop_Invariant (Result.Count <= Window_K);
+         pragma Loop_Invariant (Window_K = Effective_K + Skip_Count);
          Cand_Id := KNN_Res.Items (I).Doc_Id;
          if Cand_Id <= Max_RAG_Docs then
             Evaluate_Doc_Candidate
@@ -2195,7 +2210,7 @@ package body Nhe_O.RAG is
                Filter_Meta       => Filter_Meta,
                Use_Keyword_Boost => Use_Keyword_Boost,
                Keyword           => Keyword,
-               Top_K             => Effective_K,
+               Top_K             => Window_K,
                Result            => Result,
                IO_Err            => Cand_IO_Err);
             if Cand_IO_Err then
@@ -2211,8 +2226,8 @@ package body Nhe_O.RAG is
       --  concurrently deleted / historical docs via Cur_HNSW_Node / Prior_HNSW_Node
       --  so top-K ranking is exact across all visible snapshots
       for Slot in RAG_Doc_Slot loop
-         pragma Loop_Invariant (Result.Count <= Effective_K);
-         pragma Loop_Invariant (Effective_K <= Top_K);
+         pragma Loop_Invariant (Result.Count <= Window_K);
+         pragma Loop_Invariant (Window_K = Effective_K + Skip_Count);
          if Engine.Docs (Slot).Active then
             Found_Node := False;
             for N_Idx in 1 .. Engine.Vector_Graph.Node_Count loop
@@ -2251,7 +2266,7 @@ package body Nhe_O.RAG is
                   Filter_Meta       => Filter_Meta,
                   Use_Keyword_Boost => Use_Keyword_Boost,
                   Keyword           => Keyword,
-                  Top_K             => Effective_K,
+                  Top_K             => Window_K,
                   Result            => Result,
                   IO_Err            => Cand_IO_Err);
                if Cand_IO_Err then
@@ -2264,8 +2279,22 @@ package body Nhe_O.RAG is
          end if;
       end loop;
 
+      --  Drop the OFFSET hits: the window keeps ranks Skip_Count + 1 .. Window_K
+      if Skip_Count > 0 then
+         if Result.Count <= Skip_Count then
+            Result := (others => <>);
+         else
+            for I in 1 .. Result.Count - Skip_Count loop
+               pragma Loop_Invariant (Result.Count in Skip_Count + 1 .. Window_K);
+               Result.Hits (I) := Result.Hits (I + Skip_Count);
+            end loop;
+            Result.Count := Result.Count - Skip_Count;
+         end if;
+      end if;
+      pragma Assert (Result.Count <= Effective_K);
+
       --  4. Stage 3: Fetch full Parent-Document Chunk from 4KB TOAST Overflow Pages
-      --     and check 1-hop GraphRAG neighbor for the #1 ranked hit
+      --     and check 1-hop GraphRAG neighbor for the #1 hit of the window
       if Result.Count > 0 then
          if Result.Hits (1).Toast_Ptr.Total_Byte_Length not in 1 .. Max_TOAST_Payload_Bytes
            or else Result.Hits (1).Toast_Ptr.Chunk_Count not in 1 .. Max_TOAST_Chunks

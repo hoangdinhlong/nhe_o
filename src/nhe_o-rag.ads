@@ -420,7 +420,12 @@ package Nhe_O.RAG is
                               then Status = Status_Tx_Aborted);
 
    --  Execute a Hybrid SQL + JSONB (`@>`) + Lexical + HNSW Vector + TOAST + GraphRAG
-   --  query at MVCC Snapshot (a commit sequence number, see Take_Snapshot)
+   --  query at MVCC Snapshot (a commit sequence number, see Take_Snapshot). SQL_Query
+   --  must be a valid SELECT (Status_Invalid_Syntax otherwise); of its clauses only the
+   --  row window is applied: LIMIT n / FETCH FIRST n caps the hits below Top_K and
+   --  OFFSET n skips the first n ranked hits. LIMIT $n / OFFSET $n are rejected
+   --  (Status_Invalid_Syntax: the query vector is the only bound parameter) and so is
+   --  a window ending past rank Max_RAG_Hits (Status_Capacity_Exceeded).
    procedure Execute_Hybrid_RAG_Query
      (Engine            : in     RAG_Engine;
       Snapshot          : in     Commit_Seq_Number;

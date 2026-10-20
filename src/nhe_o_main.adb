@@ -856,6 +856,57 @@ procedure Nhe_O_Main is
       Check (RAG_Status = Status_Ok and then RAG_Res.Count = 2
              and then RAG_Res.Hits (1).Doc_Id = 6 and then RAG_Res.Hits (2).Doc_Id = 7);
 
+      --  The SQL row window: OFFSET skips ranked hits, a parameterized LIMIT cannot be
+      --  bound, and a window past the ranking depth is refused
+      Execute_Hybrid_RAG_Query
+        (Engine            => RAG_Recovered,
+         Snapshot          => Take_Snapshot (RAG_Recovered),
+         DB_Path           => DB_File,
+         SQL_Query         => Make_Text ("SELECT id FROM rag_docs ORDER BY emb <-> $1 LIMIT 1 OFFSET 1;"),
+         Query_Vec         => Make_Vector_3D (-0.5, -0.5, -0.5),
+         Encoding          => Encoding_Float32,
+         Use_Meta_Filter   => False,
+         Filter_Meta       => Meta_RAG_Query,
+         Use_Keyword_Boost => False,
+         Keyword           => Make_Text (""),
+         Top_K             => 2,
+         Result            => RAG_Res,
+         Top_Parent_Chunk  => Fetched_Chunk,
+         Status            => RAG_Status);
+      Check (RAG_Status = Status_Ok and then RAG_Res.Count = 1 and then RAG_Res.Hits (1).Doc_Id = 7);
+      Execute_Hybrid_RAG_Query
+        (Engine            => RAG_Recovered,
+         Snapshot          => Take_Snapshot (RAG_Recovered),
+         DB_Path           => DB_File,
+         SQL_Query         => Make_Text ("SELECT id FROM rag_docs ORDER BY emb <-> $1 LIMIT $2;"),
+         Query_Vec         => Make_Vector_3D (-0.5, -0.5, -0.5),
+         Encoding          => Encoding_Float32,
+         Use_Meta_Filter   => False,
+         Filter_Meta       => Meta_RAG_Query,
+         Use_Keyword_Boost => False,
+         Keyword           => Make_Text (""),
+         Top_K             => 2,
+         Result            => RAG_Res,
+         Top_Parent_Chunk  => Fetched_Chunk,
+         Status            => RAG_Status);
+      Check (RAG_Status = Status_Invalid_Syntax and then RAG_Res.Count = 0);
+      Execute_Hybrid_RAG_Query
+        (Engine            => RAG_Recovered,
+         Snapshot          => Take_Snapshot (RAG_Recovered),
+         DB_Path           => DB_File,
+         SQL_Query         => Make_Text ("SELECT id FROM rag_docs ORDER BY emb <-> $1 OFFSET 7;"),
+         Query_Vec         => Make_Vector_3D (-0.5, -0.5, -0.5),
+         Encoding          => Encoding_Float32,
+         Use_Meta_Filter   => False,
+         Filter_Meta       => Meta_RAG_Query,
+         Use_Keyword_Boost => False,
+         Keyword           => Make_Text (""),
+         Top_K             => 2,
+         Result            => RAG_Res,
+         Top_Parent_Chunk  => Fetched_Chunk,
+         Status            => RAG_Status);
+      Check (RAG_Status = Status_Capacity_Exceeded);
+
       --  UTF-8 Latin case folding (Vietnamese) in the lexical keyword boost
       Check (Contains_Keyword (Make_Text ("SPARK " & Viet_Lower & " RAG"), Make_Text (Viet_Upper)));
       Check (not Contains_Keyword (Make_Text (Viet_Lower), Make_Text ("")));
