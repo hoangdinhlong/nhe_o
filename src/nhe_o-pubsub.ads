@@ -88,6 +88,15 @@ package Nhe_O.PubSub is
                     and then Broker.Subscribers (Sub_Id).Count = 0
                     and then Is_Valid_Subscriber_Ring (Broker.Subscribers (Sub_Id));
 
+   --  True iff an active subscriber's pattern matches Channel
+   function Has_Matching_Subscriber
+     (Broker  : PubSub_Broker;
+      Channel : Bounded_Ident) return Boolean
+   is
+     (for some S in Subscriber_Id =>
+        Broker.Subscribers (S).Active
+        and then Matches_Channel (Broker.Subscribers (S).Pattern, Channel));
+
    --  Mode 1 (Redis PUBLISH): Immediate in-memory delivery to matching subscribers
    procedure Publish
      (Broker    : in out PubSub_Broker;
@@ -96,7 +105,8 @@ package Nhe_O.PubSub is
       Delivered :    out Subscriber_Count)
      with Global => null,
           Always_Terminates,
-          Pre    => Channel.Length > 0;
+          Pre    => Channel.Length > 0,
+          Post   => (if Delivered > 0 then Has_Matching_Subscriber (Broker, Channel));
 
    --  Mode 1 with explicit overflow reporting: reports both Delivered
    --  and Dropped subscriber counts when a matching subscriber's ring is full.
@@ -108,7 +118,10 @@ package Nhe_O.PubSub is
       Dropped   :    out Subscriber_Count)
      with Global => null,
           Always_Terminates,
-          Pre    => Channel.Length > 0;
+          Pre    => Channel.Length > 0,
+          Post   => Delivered + Dropped <= Max_Subscribers
+                    and then (if Delivered + Dropped > 0
+                              then Has_Matching_Subscriber (Broker, Channel));
 
    --  Mode 2 (PostgreSQL NOTIFY — Durable): Stage a notification inside an active transaction
    --  held behind the WAL Commit Barrier until Commit_Tx succeeds (ADR-004 / BR-005)

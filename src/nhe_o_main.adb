@@ -182,9 +182,13 @@ procedure Nhe_O_Main is
          end loop;
          C_Init (C_Rc);
          C_KV_Set (K_Buf, int (Key_Arg.Length), V_Buf, int (Val_Arg.Length), 1000, TTL_Val, C_Rc);
-         C_KV_Get (K_Buf, int (Key_Arg.Length), 1010, Out_V_Buf, Out_V_Len, C_Rc);
+         --  Read back at the write timestamp: any TTL >= 1 is still live then
+         C_KV_Get (K_Buf, int (Key_Arg.Length), 1000, Out_V_Buf, Out_V_Len, C_Rc);
          Print_Line ("[CLI --kv] Stored & Retrieved Length : " & int'Image (Out_V_Len));
          Check (C_Rc = C_Status_Ok and then Out_V_Len = int (Val_Arg.Length));
+         --  Remove the per-process scratch files of C_Init
+         C_Close (C_Rc);
+         Check (C_Rc = C_Status_Ok);
          Done := True;
       elsif Equal_Text (Arg1, Make_Text ("--rag-demo")) then
          C_Init (C_Rc);
@@ -202,6 +206,8 @@ procedure Nhe_O_Main is
          Print_Line ("[CLI --rag-demo] Hit_Count        : " & int'Image (Hit_Cnt));
          Print_Line ("[CLI --rag-demo] GraphRAG_1Hop    : " & int'Image (Graph_Hit));
          Check (C_Rc = C_Status_Ok and then Hit_Cnt = 2 and then Top_Doc = 1 and then Graph_Hit = 1);
+         C_Close (C_Rc);
+         Check (C_Rc = C_Status_Ok);
          Done := True;
       else
          Done := False;

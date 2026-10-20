@@ -84,7 +84,16 @@ package body Nhe_O.PubSub is
       Delivered := 0;
       Dropped   := 0;
       for I in Subscriber_Id loop
-         pragma Loop_Invariant (Delivered <= I - 1 and then Dropped <= I - 1);
+         pragma Loop_Invariant (Delivered + Dropped <= I - 1);
+         pragma Loop_Invariant
+           (for all S in Subscriber_Id =>
+              Broker.Subscribers (S).Active = Broker.Subscribers'Loop_Entry (S).Active
+              and then Broker.Subscribers (S).Pattern = Broker.Subscribers'Loop_Entry (S).Pattern);
+         pragma Loop_Invariant
+           (if Delivered + Dropped > 0 then
+              (for some S in 1 .. I - 1 =>
+                 Broker.Subscribers (S).Active
+                 and then Matches_Channel (Broker.Subscribers (S).Pattern, Channel)));
          if Broker.Subscribers (I).Active
            and then Matches_Channel (Broker.Subscribers (I).Pattern, Channel)
          then
