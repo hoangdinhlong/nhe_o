@@ -14,6 +14,11 @@ as a context manager, before opening another) and serializes every call
 through a process-wide lock, so the engine is safe to share between threads.
 Each call needs about 256 KiB of thread stack; call it from threads with at least
 1 MiB (the default on Linux and for the main thread; see include/nhe_o.h).
+
+KV methods take `now_sec`, the Unix time of the operation (the engine has no clock of
+its own); when it is omitted the current time is used. Timestamps should never
+decrease. Integer arguments outside their C range raise ValueError instead of
+wrapping silently.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ import math
 import shutil
 import tempfile
 import threading
+import time
 from ctypes import POINTER, byref, c_char, c_float, c_int, c_int64
 from pathlib import Path
 from typing import Any, Sequence
@@ -108,6 +114,35 @@ def _make_toast_buf(text: str) -> tuple[ToastBuffer, int]:
     buf = ToastBuffer()
     buf[: len(raw)] = raw
     return buf, len(raw)
+
+
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
+_INT32_MIN = -(2**31)
+_INT32_MAX = 2**31 - 1
+
+
+def _i64(val: int, name: str) -> c_int64:
+    """Range-checked int64 argument (ctypes would silently wrap out-of-range ints)."""
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise TypeError(f"{name} must be an int")
+    if not _INT64_MIN <= val <= _INT64_MAX:
+        raise ValueError(f"{name} {val} is outside the int64 range")
+    return c_int64(val)
+
+
+def _i32(val: int, name: str) -> c_int:
+    """Range-checked C int argument (ctypes would silently wrap out-of-range ints)."""
+    if isinstance(val, bool) or not isinstance(val, int):
+        raise TypeError(f"{name} must be an int")
+    if not _INT32_MIN <= val <= _INT32_MAX:
+        raise ValueError(f"{name} {val} is outside the C int range")
+    return c_int(val)
+
+
+def _now(now_sec: int | None) -> c_int64:
+    """The KV clock: the caller's timestamp, or the current Unix time when None."""
+    return _i64(int(time.time()) if now_sec is None else now_sec, "now_sec")
 
 
 def _validate_float(val: float) -> float:
@@ -296,7 +331,7 @@ class NheOEngine:
             self._require_open()
             status = c_int(0)
             self._lib.nhe_o_init_with_paths(
-                db_buf, db_len, wal_buf, wal_len, c_int(dim), byref(status)
+                db_buf, db_len, wal_buf, wal_len, _i32(dim, "dim"), byref(status)
             )
             if status.value != STATUS_OK:
                 raise NheOError("nhe_o_init_with_paths", status.value)
@@ -382,7 +417,7 @@ class NheOEngine:
             self._lib.nhe_o_vector_distance_nd(
                 a_buf,
                 b_buf,
-                c_int(dim),
+                _i32(dim, "dim"),
                 byref(l2_dist),
                 byref(cos_dist),
                 byref(hamming),
@@ -397,7 +432,7 @@ class NheOEngine:
         }
 
     def kv_set(
-        self, key: str, val: str, now_sec: int = 1000, ttl_sec: int = 0
+        self, key: str, val: str, now_sec: int | None = None, ttl_sec: int = 0
     ) -> None:
         k_buf, k_len = _make_ident_buf(key)
         v_buf, v_len = _make_text_buf(val)
@@ -409,14 +444,14 @@ class NheOEngine:
                 k_len,
                 v_buf,
                 v_len,
-                c_int64(now_sec),
-                c_int64(ttl_sec),
+                _now(now_sec),
+                _i64(ttl_sec, "ttl_sec"),
                 byref(status),
             )
         if status.value != STATUS_OK:
             raise NheOError("nhe_o_kv_set", status.value)
 
-    def kv_get(self, key: str, now_sec: int = 1000) -> str | None:
+    def kv_get(self, key: str, now_sec: int | None = None) -> str | None:
         k_buf, k_len = _make_ident_buf(key)
         out_buf = TextBuffer()
         out_len = c_int(0)
@@ -426,7 +461,7 @@ class NheOEngine:
             self._lib.nhe_o_kv_get(
                 k_buf,
                 k_len,
-                c_int64(now_sec),
+                _now(now_sec),
                 out_buf,
                 byref(out_len),
                 byref(status),
@@ -437,7 +472,7 @@ class NheOEngine:
             raise NheOError("nhe_o_kv_get", status.value)
         return bytes(out_buf[: out_len.value]).decode("utf-8")
 
-    def kv_del(self, key: str, now_sec: int = 1000) -> bool:
+    def kv_del(self, key: str, now_sec: int | None = None) -> bool:
         """Redis DEL at now_sec: True iff the key was live (present and not expired)."""
         k_buf, k_len = _make_ident_buf(key)
         removed = c_int(0)
@@ -445,26 +480,26 @@ class NheOEngine:
         with _ENGINE_LOCK:
             self._require_open()
             self._lib.nhe_o_kv_del(
-                k_buf, k_len, c_int64(now_sec), byref(removed), byref(status)
+                k_buf, k_len, _now(now_sec), byref(removed), byref(status)
             )
         if status.value != STATUS_OK:
             raise NheOError("nhe_o_kv_del", status.value)
         return bool(removed.value)
 
-    def kv_exists(self, key: str, now_sec: int = 1000) -> bool:
+    def kv_exists(self, key: str, now_sec: int | None = None) -> bool:
         k_buf, k_len = _make_ident_buf(key)
         exists = c_int(0)
         status = c_int(0)
         with _ENGINE_LOCK:
             self._require_open()
             self._lib.nhe_o_kv_exists(
-                k_buf, k_len, c_int64(now_sec), byref(exists), byref(status)
+                k_buf, k_len, _now(now_sec), byref(exists), byref(status)
             )
         if status.value != STATUS_OK:
             raise NheOError("nhe_o_kv_exists", status.value)
         return bool(exists.value)
 
-    def kv_expire(self, key: str, ttl_sec: int, now_sec: int = 1000) -> bool:
+    def kv_expire(self, key: str, ttl_sec: int, now_sec: int | None = None) -> bool:
         k_buf, k_len = _make_ident_buf(key)
         updated = c_int(0)
         status = c_int(0)
@@ -473,8 +508,8 @@ class NheOEngine:
             self._lib.nhe_o_kv_expire(
                 k_buf,
                 k_len,
-                c_int64(now_sec),
-                c_int64(ttl_sec),
+                _now(now_sec),
+                _i64(ttl_sec, "ttl_sec"),
                 byref(updated),
                 byref(status),
             )
@@ -482,20 +517,20 @@ class NheOEngine:
             raise NheOError("nhe_o_kv_expire", status.value)
         return bool(updated.value)
 
-    def kv_ttl(self, key: str, now_sec: int = 1000) -> int:
+    def kv_ttl(self, key: str, now_sec: int | None = None) -> int:
         k_buf, k_len = _make_ident_buf(key)
         ttl_val = c_int64(0)
         status = c_int(0)
         with _ENGINE_LOCK:
             self._require_open()
             self._lib.nhe_o_kv_ttl(
-                k_buf, k_len, c_int64(now_sec), byref(ttl_val), byref(status)
+                k_buf, k_len, _now(now_sec), byref(ttl_val), byref(status)
             )
         if status.value != STATUS_OK:
             raise NheOError("nhe_o_kv_ttl", status.value)
         return int(ttl_val.value)
 
-    def kv_incr_by(self, key: str, delta: int, now_sec: int = 1000) -> int:
+    def kv_incr_by(self, key: str, delta: int, now_sec: int | None = None) -> int:
         k_buf, k_len = _make_ident_buf(key)
         new_val = c_int64(0)
         status = c_int(0)
@@ -504,8 +539,8 @@ class NheOEngine:
             self._lib.nhe_o_kv_incr_by(
                 k_buf,
                 k_len,
-                c_int64(delta),
-                c_int64(now_sec),
+                _i64(delta, "delta"),
+                _now(now_sec),
                 byref(new_val),
                 byref(status),
             )
@@ -528,7 +563,7 @@ class NheOEngine:
         status = c_int(0)
         with _ENGINE_LOCK:
             self._require_open()
-            self._lib.nhe_o_pubsub_unsubscribe(c_int(sub_id), byref(status))
+            self._lib.nhe_o_pubsub_unsubscribe(_i32(sub_id, "sub_id"), byref(status))
         if status.value != STATUS_OK:
             raise NheOError("nhe_o_pubsub_unsubscribe", status.value)
 
@@ -556,7 +591,7 @@ class NheOEngine:
         with _ENGINE_LOCK:
             self._require_open()
             self._lib.nhe_o_pubsub_poll(
-                c_int(sub_id),
+                _i32(sub_id, "sub_id"),
                 c_buf,
                 byref(c_len),
                 p_buf,
@@ -613,7 +648,7 @@ class NheOEngine:
         with _ENGINE_LOCK:
             self._require_open()
             self._lib.nhe_o_rag_ingest_full_nd(
-                c_int(doc_id),
+                _i32(doc_id, "doc_id"),
                 m_buf,
                 m_len,
                 s_buf,
@@ -621,8 +656,8 @@ class NheOEngine:
                 p_buf,
                 p_len,
                 v_buf,
-                c_int(dim),
-                c_int(related_doc_id),
+                _i32(dim, "dim"),
+                _i32(related_doc_id, "related_doc_id"),
                 byref(status),
             )
         if status.value != STATUS_OK:
@@ -650,7 +685,7 @@ class NheOEngine:
         status = c_int(0)
         with _ENGINE_LOCK:
             self._require_open()
-            self._lib.nhe_o_rag_delete(c_int(doc_id), byref(status))
+            self._lib.nhe_o_rag_delete(_i32(doc_id, "doc_id"), byref(status))
         if status.value != STATUS_OK:
             raise NheOError("nhe_o_rag_delete", status.value)
 
@@ -692,13 +727,13 @@ class NheOEngine:
             self._require_open()
             self._lib.nhe_o_rag_query_full_nd(
                 q_buf,
-                c_int(dim),
-                c_int(encoding_mode),
+                _i32(dim, "dim"),
+                _i32(encoding_mode, "encoding_mode"),
                 f_buf,
                 f_len,
                 k_buf,
                 k_len,
-                c_int(top_k),
+                _i32(top_k, "top_k"),
                 byref(hit_count),
                 byref(top_doc_id),
                 byref(top_dist),
@@ -757,11 +792,11 @@ class NheOEngine:
             self._require_open()
             self._lib.nhe_o_rag_query_nd(
                 q_buf,
-                c_int(dim),
-                c_int(encoding_mode),
+                _i32(dim, "dim"),
+                _i32(encoding_mode, "encoding_mode"),
                 k_buf,
                 k_len,
-                c_int(top_k),
+                _i32(top_k, "top_k"),
                 byref(hit_count),
                 byref(top_doc_id),
                 byref(top_dist),
@@ -859,6 +894,17 @@ def run_self_test() -> None:
     _check(engine.kv_del("llm:prompt:qwen", now_sec=200) is False, "kv_del expired")
     _check(engine.kv_incr_by("llm:tokens", 42, now_sec=200) == 42, "kv_incr_by")
     _check(engine.kv_del("llm:tokens", now_sec=200) is True, "kv_del live")
+    # Out-of-range integers are rejected instead of wrapping inside ctypes
+    _expect_error(ValueError, lambda: engine.kv_incr_by("llm:tokens", 2**64 + 1, now_sec=200),
+                  "Expected ValueError for an int64 overflow")
+    _expect_error(ValueError, lambda: engine.kv_set("k", "v", now_sec=2**64 + 100),
+                  "Expected ValueError for an out-of-range timestamp")
+    _expect_error(ValueError, lambda: engine.pubsub_poll(2**32 + 1),
+                  "Expected ValueError for an out-of-range subscriber id")
+    # Without now_sec the current time is used, so a TTL can elapse
+    engine.kv_set("clock:key", "v", ttl_sec=1)
+    _check(engine.kv_get("clock:key") == "v", "real-clock key is live")
+    _check(engine.kv_get("clock:key", now_sec=int(time.time()) + 5) is None, "real-clock TTL elapses")
     # INCRBY follows Redis string2ll (no "+", no leading zeros)
     engine.kv_set("llm:plus", "+5", now_sec=200)
     exc = _expect_error(NheOError, lambda: engine.kv_incr_by("llm:plus", 1, now_sec=200),
@@ -1010,8 +1056,18 @@ def run_self_test() -> None:
         "Expected NheOError on corrupted TOAST page during recovery",
     )
 
-    # A torn WAL tail is repaired, but the corrupted database page still fails recovery
-    wal_4096.write_bytes(b"TORN_WAL_FRAME")
+    # A file that is not a WAL is refused and left untouched
+    wal_4096.write_bytes(b"NOT_A_WAL_FILE")
+    exc = _expect_error(
+        NheOError,
+        lambda: engine.init_with_paths(str(db_4096), str(wal_4096), dim=4096),
+        "Expected NheOError on a WAL path naming a foreign file",
+    )
+    _check(getattr(exc, "status", None) == STATUS_IO_ERROR, "foreign WAL status")
+    _check(wal_4096.read_bytes() == b"NOT_A_WAL_FILE", "foreign WAL left untouched")
+
+    # A torn first frame is repaired, but the corrupted database page still fails recovery
+    wal_4096.write_bytes(b"NHEO" + b"\x00" * 10)
     _expect_error(
         NheOError,
         lambda: engine.init_with_paths(str(db_4096), str(wal_4096), dim=4096),

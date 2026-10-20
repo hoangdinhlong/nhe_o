@@ -95,6 +95,10 @@ package Nhe_O.Transaction is
    function Verify_WAL_Frame (Frame : WAL_Frame_Buffer) return Boolean
      with Global => null;
 
+   --  True iff Frame begins with the 4-byte WAL frame magic "NHEO"
+   function Has_WAL_Magic (Frame : WAL_Frame_Buffer) return Boolean
+     with Global => null;
+
    --  Return the WAL_Frame_Kind encoded in a verified WAL frame
    function Get_WAL_Frame_Kind (Frame : WAL_Frame_Buffer) return WAL_Frame_Kind
      with Global => null,
@@ -125,7 +129,9 @@ package Nhe_O.Transaction is
    --  Commit an active transaction (BR-002 / ADR-006). The commit point is the durable
    --  append of the WAL_Frame_Commit barrier frame (carrying Page as its payload):
    --  * barrier not appended   => Status /= Status_Ok, Ctx.State = Tx_Aborted, and the
-   --    WAL is left exactly as before the call (nothing to replay);
+   --    WAL is truncated back to its length before the barrier, so nothing is replayed.
+   --    That truncation is best effort (Append_WAL_Frame): after Status_IO_Error the
+   --    outcome is decided by the next recovery, which may still find the barrier;
    --  * barrier appended       => Status = Status_Ok and Ctx.State = Tx_Committed, even if
    --    materializing the staged WAL_Frame_Data pages (and Page) into DB_Path then fails.
    --    In that case Flush_Pending is True: the database file is stale until
@@ -327,9 +333,13 @@ package Nhe_O.Transaction is
    --  a crash or failed write during Append_WAL_Frame can only leave an unacknowledged
    --  frame at the very end of the log, either as a partial trailing frame (file size
    --  not a multiple of WAL_Frame_Size) or as a final complete frame that fails
-   --  Verify_WAL_Frame. Both are truncated away. Any invalid frame before the last one is
-   --  mid-log corruption and fails closed with Status_IO_Error; so does a WAL holding
-   --  more than Max_WAL_Frames frames. A missing WAL is not an error.
+   --  Verify_WAL_Frame. Both are truncated away. The file is classified before anything
+   --  is truncated: an invalid complete frame that is not the last one, a bad final
+   --  frame followed by a partial one, or (with no complete frame at all) bytes that do
+   --  not start like a frame (neither the "NHEO" magic nor zeros) mean mid-log
+   --  corruption or a file that is not a WAL, and fail closed with Status_IO_Error
+   --  leaving the file untouched; so does a WAL holding more than Max_WAL_Frames
+   --  frames. A missing WAL is not an error.
    procedure Repair_WAL_Tail
      (WAL_Path : in     Bounded_Text;
       Status   :    out Engine_Status)

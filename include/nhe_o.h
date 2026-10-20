@@ -84,17 +84,22 @@ int nhe_o_version_major(void);
 int nhe_o_version_minor(void);
 
 /* Initialize / reset the runtime as a scratch database (3-D vectors) on the per-process
- * files /tmp/nhe_o_c_api.<pid>.db and .wal, deleting earlier contents of those files
- * (NHE_O_STATUS_IO_ERROR if one cannot be removed). For data that must persist, use
- * nhe_o_init_with_paths with paths inside a private directory. */
+ * files /tmp/nhe_o_c_api.<pid>.db and .wal: earlier contents are deleted and both files
+ * are recreated with O_EXCL, so a link planted at these predictable names is refused
+ * (NHE_O_STATUS_IO_ERROR if a file cannot be removed or created). For data that must
+ * persist, use nhe_o_init_with_paths with paths inside a private directory. */
 void nhe_o_init(int *out_status);
 
 /* Initialize the runtime on caller-specified DB/WAL paths with dimension 1..4096,
  * recovering existing state (a torn WAL or database tail left by a crash is repaired).
  * Relative paths are resolved against the current directory once, here. Both lengths
- * are 1..512 bytes, the resolved WAL path at most 507 bytes (room for ".ckpt"), and the
- * two paths must name different files, also through links (NHE_O_STATUS_INVALID_ARG).
- * The WAL file is created when missing. */
+ * are 1..512 bytes and the resolved WAL path at most 507 bytes (room for ".ckpt"). The
+ * database, the WAL and "<wal>.ckpt" must be three different files, also through links,
+ * and an existing database must not start like a WAL (swapped arguments): otherwise
+ * NHE_O_STATUS_INVALID_ARG. Missing files are created (directory fsynced). A WAL path
+ * naming a file that is not a WAL fails with NHE_O_STATUS_IO_ERROR and is never
+ * truncated. Paths are used as given, symbolic links included: keep them in a
+ * directory other users cannot write. */
 void nhe_o_init_with_paths(
     const char *db_path_buf,
     int         db_path_len,
@@ -104,8 +109,9 @@ void nhe_o_init_with_paths(
     int        *out_status
 );
 
-/* Release the runtime (later calls return NHE_O_STATUS_NOT_INITIALIZED). The scratch
- * files of nhe_o_init are deleted; files given to nhe_o_init_with_paths are kept. */
+/* Release the runtime (later calls return NHE_O_STATUS_NOT_INITIALIZED). A database
+ * opened with nhe_o_init_with_paths is checkpointed first (best effort) and its files are
+ * kept; the scratch files of nhe_o_init are deleted. */
 void nhe_o_close(int *out_status);
 
 /* Compact the WAL: write "<wal>.ckpt" with the KV entries and the frozen RAG page,
@@ -146,7 +152,12 @@ void nhe_o_vector_distance_nd(
 );
 
 /* Redis-compatible Key-Value Cache operations (keys 1..64 bytes, values 0..512 bytes,
- * timestamps now_sec >= 0, at most NHE_O_MAX_KV_KEYS keys with LRU eviction) */
+ * at most NHE_O_MAX_KV_KEYS keys with LRU eviction). The engine has no clock: every call
+ * takes the caller's now_sec (>= 0, never decreasing). A GET of an expired key returns
+ * NHE_O_STATUS_EXPIRED (until a write reuses its slot). Read recency is not durable:
+ * after a reopen without nhe_o_close, LRU order follows the last durable write.
+ * Deliberate Redis deviations: EXPIRE with ttl_sec <= 0 is NHE_O_STATUS_INVALID_ARG
+ * (Redis deletes the key) and SET with ttl_sec = 0 stores the key without a TTL. */
 void nhe_o_kv_set(
     const char *key_buf,
     int         key_len,

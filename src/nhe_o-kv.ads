@@ -63,7 +63,11 @@ package Nhe_O.KV is
                     and then (if Has_TTL then TTL_Sec > 0 and then Now <= Epoch_Seconds'Last - TTL_Sec),
           Post   => Exists (Store, Key, Now);
 
-   --  Redis `GET`: Retrieve value if present and not expired; updates LRU timestamp
+   --  Redis `GET`: Retrieve value if present and not expired; updates the LRU timestamp
+   --  (in memory only: read recency is not logged, see Recover_KV_From_WAL). An expired
+   --  entry yields Status_Expired and stays in its slot: only logged writes (SET /
+   --  INCRBY of the key, an eviction by another SET, DEL) change the slot layout, so a
+   --  replayed WAL reproduces it. Timestamps are expected never to decrease.
    procedure Get
      (Store  : in out KV_Store;
       Key    : in     Bounded_Ident;
@@ -73,7 +77,8 @@ package Nhe_O.KV is
      with Global => null,
           Always_Terminates,
           Post   => Status in Status_Ok | Status_Not_Found | Status_Expired
-                    and then (if Status = Status_Ok then Exists (Store, Key, Now));
+                    and then (if Status = Status_Ok then Exists (Store, Key, Now)
+                              else Store = Store'Old);
 
    --  Remove every stored entry for Key (live or already expired); Removed is True iff
    --  at least one slot was freed. Used by WAL replay, which must be clock-free.
@@ -101,7 +106,8 @@ package Nhe_O.KV is
           Post   => not Exists (Store, Key, 0)
                     and then Removed = Exists (Store'Old, Key, Now);
 
-   --  Redis `EXPIRE`: Attach a TTL in seconds to an existing live key
+   --  Redis `EXPIRE`: Attach a TTL in seconds to an existing live key (an expired or
+   --  missing key is left untouched and Updated is False)
    procedure Expire
      (Store   : in out KV_Store;
       Key     : in     Bounded_Ident;
@@ -111,7 +117,7 @@ package Nhe_O.KV is
      with Global => null,
           Always_Terminates,
           Pre    => TTL_Sec > 0 and then Now <= Epoch_Seconds'Last - TTL_Sec,
-          Post   => (if Updated then Exists (Store, Key, Now));
+          Post   => (if Updated then Exists (Store, Key, Now) else Store = Store'Old);
 
    --  Redis `TTL`: Return remaining seconds (-2 if missing/expired, -1 if no TTL)
    function Remaining_TTL
@@ -263,11 +269,15 @@ package Nhe_O.KV is
           Post   => (if Status = Status_Ok then Exists (Store, Key, Now)
                      else Store = Store'Old);
 
-   --  Replay all WAL_Frame_KV records from WAL_Path into Store. A torn trailing frame
-   --  left by a crash is repaired first (Nhe_O.Transaction.Repair_WAL_Tail). Frames with
-   --  a slot hint are applied to exactly that slot, so the recovered store equals the
-   --  pre-crash store for every logged mutation (including silent LRU evictions); legacy
-   --  frames without a hint fall back to slot selection at timestamp max (Now, Last_Access).
+   --  Replay all WAL_Frame_KV records from WAL_Path into Store (a missing WAL is an empty
+   --  log). A torn trailing frame left by a crash is repaired first
+   --  (Nhe_O.Transaction.Repair_WAL_Tail). Frames with a slot hint are applied to exactly
+   --  that slot, so the recovered store has the pre-crash keys, values, TTLs and slot
+   --  layout, including silent LRU / expired-slot evictions; legacy frames without a hint
+   --  fall back to slot selection at timestamp max (Now, Last_Access). Read recency is
+   --  not logged: each entry's Last_Access is the time of its last durable write (or of
+   --  the last checkpoint), so LRU choices after a reopen may differ from an
+   --  uninterrupted run that served GETs in between.
    procedure Recover_KV_From_WAL
      (Store        : in out KV_Store;
       WAL_Path     : in     Bounded_Text;

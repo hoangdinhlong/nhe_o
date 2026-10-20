@@ -70,7 +70,20 @@ package Nhe_O.IO is
           Always_Terminates,
           Pre    => File_Path.Length > 0;
 
-   --  Report the current size in bytes of an existing file (open + lseek SEEK_END)
+   --  Create File_Path as a new empty file (open with O_CREAT | O_EXCL, mode 0600) and
+   --  fsync it and its directory. Fails, touching nothing, when the path already exists
+   --  in any form (O_EXCL also refuses a symbolic link, dangling or not), so a file
+   --  created this way can never be redirected to another file by a pre-planted link.
+   procedure Create_File_Exclusive
+     (File_Path : in     Bounded_Text;
+      Success   :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => File_Path.Length > 0;
+
+   --  Report the current size in bytes of an existing regular file that can be opened
+   --  read-write (open O_RDWR + lseek SEEK_END): a directory, FIFO or read-only file
+   --  reports failure
    procedure Get_File_Size
      (File_Path : in     Bounded_Text;
       Size      :    out File_Size;
@@ -130,7 +143,9 @@ package Nhe_O.IO is
 
    --  Write a 4096-byte slotted page to the database file at offset Page_Id * 4096.
    --  A failed write that was extending the file truncates it back to its previous
-   --  page-aligned size, so a failure never leaves a torn trailing page behind.
+   --  page-aligned size (best effort: if that truncation fails too, Repair_DB_Tail
+   --  removes the torn page at the next recovery). The first write into an empty file
+   --  also fsyncs the parent directory, so a newly created file's name is durable.
    procedure Write_Page
      (File_Path : in     Bounded_Text;
       Page_Id   : in     Valid_Page_Id;
@@ -165,9 +180,11 @@ package Nhe_O.IO is
           Post   => not (Success and Is_EOF);
 
    --  Append a CRC32-framed WAL record at the frame-aligned end of the WAL via
-   --  positional pwrite + fsync. Success is True iff the whole frame was written and
-   --  fsynced. On any failure the WAL is truncated back to its previous length, so a
-   --  frame reported as not appended is never replayed by recovery.
+   --  positional pwrite + fsync (plus a directory fsync when the WAL was empty). Success
+   --  is True iff the whole frame was written and made durable. On failure the WAL is
+   --  truncated back to its previous length and fsynced. That rollback is best effort:
+   --  if it fails too, the complete frame may survive and be replayed by recovery, so a
+   --  failed append means "outcome decided by the next recovery", never "certainly lost".
    procedure Append_WAL_Frame
      (WAL_Path : in     Bounded_Text;
       Frame    : in     WAL_Frame_Buffer;
@@ -175,6 +192,20 @@ package Nhe_O.IO is
      with Global => null,
           Always_Terminates,
           Pre    => WAL_Path.Length > 0;
+
+   --  Read up to WAL_Frame_Size bytes of an existing file starting at byte Offset,
+   --  whatever its size or alignment (crash-repair needs to inspect torn tails that
+   --  Read_WAL_Frame refuses); Count is the number of bytes read, 0 at or past EOF
+   procedure Read_File_Bytes
+     (File_Path : in     Bounded_Text;
+      Offset    : in     File_Size;
+      Buffer    :    out WAL_Frame_Buffer;
+      Count     :    out Natural;
+      Success   :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => File_Path.Length > 0,
+          Post   => Count <= WAL_Frame_Size and then (if not Success then Count = 0);
 
    --  Read a WAL frame at 0-based index Frame_Idx from the Write-Ahead Log on disk
    procedure Read_WAL_Frame

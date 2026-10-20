@@ -374,6 +374,7 @@ procedure Nhe_O_Main is
    WAL_Bad       : WAL_Frame_Buffer;
    Tail_Size     : File_Size;
    DB_Size       : File_Size;
+   Foreign_File  : constant Bounded_Text := Make_Text ("/tmp/nhe_o_verify_foreign.bin");
    Size_Ok       : Boolean;
    Trunc_Ok      : Boolean;
 
@@ -970,9 +971,11 @@ procedure Nhe_O_Main is
    C_Empty_Text  : constant C_Text_Buf  := [others => nul];
    C_DB_Buf      : constant C_Text_Buf  := To_C_Text ("/tmp/nhe_o_capi_persist.db");
    C_WAL_Buf     : constant C_Text_Buf  := To_C_Text ("/tmp/nhe_o_capi_persist.wal");
+   C_Ckpt_Buf    : constant C_Text_Buf  := To_C_Text ("/tmp/nhe_o_capi_persist.wal.ckpt");
    C_Alias_A     : constant C_Text_Buf  := To_C_Text ("/tmp/nhe_o_capi_alias.db");
    C_Alias_B     : constant C_Text_Buf  := To_C_Text ("/tmp/./nhe_o_capi_alias.db");
    C_Saved_DB    : Bounded_Text;
+   C_Saved_Tx    : Valid_Tx_Id;
    C_Saved_WAL   : Bounded_Text;
    C_WAL_Size    : File_Size;
    C_Size_Ok     : Boolean;
@@ -1839,6 +1842,36 @@ begin
    Check (Size_Ok and then Tail_Size = DB_Size);
    Read_Page (DB_File, 9, Page_In, Read_Ok);
    Check (Read_Ok and then Page_In = Page_A);
+
+   --  WAL repair classifies before truncating: a file that is not a WAL is never
+   --  shortened, while an all-zero torn first append is dropped
+   Delete_File_If_Exists (Foreign_File);
+   Write_Page (Foreign_File, 1, Page_B, WAL_App_Ok);
+   Check (WAL_App_Ok);
+   Repair_WAL_Tail (Foreign_File, Tx_Status);
+   Get_File_Size (Foreign_File, Tail_Size, Size_Ok);
+   Check (Tx_Status = Status_IO_Error and then Size_Ok and then Tail_Size = 8192);
+   Delete_File_If_Exists (Foreign_File);
+   Write_Page (Foreign_File, 0, Page_B, WAL_App_Ok);
+   Repair_WAL_Tail (Foreign_File, Tx_Status);
+   Get_File_Size (Foreign_File, Tail_Size, Size_Ok);
+   Check (Tx_Status = Status_IO_Error and then Size_Ok and then Tail_Size = 4096);
+   Delete_File_If_Exists (Foreign_File);
+   Write_Page (Foreign_File, 0, [others => 0], WAL_App_Ok);
+   Repair_WAL_Tail (Foreign_File, Tx_Status);
+   Get_File_Size (Foreign_File, Tail_Size, Size_Ok);
+   Check (Tx_Status = Status_Ok and then Size_Ok and then Tail_Size = 0);
+
+   --  Exclusive creation refuses an existing path; sizes are only reported for
+   --  regular files
+   Create_File_Exclusive (Foreign_File, Trunc_Ok);
+   Check (not Trunc_Ok);
+   Delete_File_If_Exists (Foreign_File);
+   Create_File_Exclusive (Foreign_File, Trunc_Ok);
+   Check (Trunc_Ok);
+   Delete_File_If_Exists (Foreign_File);
+   Get_File_Size (Make_Text ("/tmp"), Tail_Size, Size_Ok);
+   Check (not Size_Ok and then Tail_Size = 0);
    Print_Line ("  => Passed: 16-byte TOAST pointer, NO-STEAL 3-page chain, and 2-pass committed-only WAL Redo verified.");
 
    --  6. Verify Multi-Page B+Tree Index with Multi-Level Splitting & Deletion (`Nhe_O.BTree`)
@@ -2234,10 +2267,38 @@ begin
    end loop;
    Check (Evict_Same);
 
-   --  DEL at timestamp Now frees an expired entry without reporting a removal
-   Set_Durable (KV_Evict, KV_WAL_File, 66, Make_Ident ("ttl:short"), Make_Text ("x"), 6000, True, 5, KV_Status);
+   --  Reads never change the slot layout: an expired entry is reported, not reclaimed,
+   --  until a logged write reuses its slot, so the replayed WAL equals the live store
+   Set_Durable (KV_Evict, KV_WAL_File, 70, Make_Ident ("lazy:a"), Make_Text ("x"), 4100, True, 5, KV_Status);
    Check (KV_Status = Status_Ok);
-   Del_Durable (KV_Evict, KV_WAL_File, 67, Make_Ident ("ttl:short"), 7000, KV_Removed, KV_Status);
+   Get (KV_Evict, Make_Ident ("lazy:a"), 4200, KV_Val, KV_Status);
+   Check (KV_Status = Status_Expired);
+   Get (KV_Evict, Make_Ident ("lazy:a"), 4201, KV_Val, KV_Status);
+   Check (KV_Status = Status_Expired);
+   KV_Evict_R := (others => <>);
+   Recover_KV_From_WAL (KV_Evict_R, KV_WAL_File, 5000, 256, KV_Rec_Cnt, KV_Status);
+   Check (KV_Status = Status_Ok);
+   Evict_Same := True;
+   for I in KV_Slot_Index loop
+      if KV_Evict.Slots (I).Occupied /= KV_Evict_R.Slots (I).Occupied
+        or else not Equal_Ident (KV_Evict.Slots (I).Key, KV_Evict_R.Slots (I).Key)
+        or else not Equal_Text (KV_Evict.Slots (I).Val, KV_Evict_R.Slots (I).Val)
+      then
+         Evict_Same := False;
+      end if;
+   end loop;
+   Check (Evict_Same);
+
+   --  A missing WAL is an empty log
+   Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_kv_missing.wal"));
+   KV_Evict_R := (others => <>);
+   Recover_KV_From_WAL (KV_Evict_R, Make_Text ("/tmp/nhe_o_kv_missing.wal"), 5000, 8, KV_Rec_Cnt, KV_Status);
+   Check (KV_Status = Status_Ok and then KV_Rec_Cnt = 0 and then Occupied_Count (KV_Evict_R) = 0);
+
+   --  DEL at timestamp Now frees an expired entry without reporting a removal
+   Set_Durable (KV_Evict, KV_WAL_File, 71, Make_Ident ("ttl:short"), Make_Text ("x"), 6000, True, 5, KV_Status);
+   Check (KV_Status = Status_Ok);
+   Del_Durable (KV_Evict, KV_WAL_File, 72, Make_Ident ("ttl:short"), 7000, KV_Removed, KV_Status);
    Check (KV_Status = Status_Ok and then not KV_Removed
           and then not Exists (KV_Evict, Make_Ident ("ttl:short"), 0));
 
@@ -2400,14 +2461,23 @@ begin
    Check (C_Rc = C_Status_Ok);
    C_Close (C_Rc);
    Check (C_Rc = C_Status_Ok);
+   --  nhe_o_close checkpointed the database: ids restart above the frozen transaction
    C_Init_With_Paths (C_DB_Buf, 26, C_WAL_Buf, 27, 3, C_Rc);
-   Check (C_Rc = C_Status_Ok and then G_Next_Tx = 3);
+   Check (C_Rc = C_Status_Ok and then G_Next_Tx = 2);
    C_KV_Get (C_Key_Buf, 3, 1020, C_Out_Val_Buf, C_Out_Val_Len, C_Rc);
    Check (C_Rc = C_Status_Ok and then C_Out_Val_Len = 2);
    C_RAG_Query_ND
      (C_Vec_ND_A, 3, 0, C_Empty_Text, 0, 8,
       C_Hit_Cnt, C_Top_Doc, C_Top_Dist, C_Top_Par_Buf, C_Top_Par_Len, C_Graph_Hit, C_Rc);
    Check (C_Rc = C_Status_Ok and then C_Hit_Cnt = 2 and then C_Top_Doc = 1);
+
+   --  Deleting an absent document consumes no transaction id
+   C_Saved_Tx := G_Next_Tx;
+   for Round in 1 .. 20 loop
+      C_RAG_Delete (9, C_Rc);
+      Check (C_Rc = C_Status_Not_Found);
+   end loop;
+   Check (G_Next_Tx = C_Saved_Tx);
 
    --  The automatic checkpoint keeps the WAL far below its 4096-frame cap
    for Round in 1 .. 600 loop
@@ -2442,6 +2512,17 @@ begin
       C_Hit_Cnt, C_Top_Doc, C_Top_Dist, C_Top_Par_Buf, C_Top_Par_Len, C_Graph_Hit, C_Rc);
    Check (C_Rc = C_Status_Ok and then C_Hit_Cnt = 2);
    C_Close (C_Rc);
+
+   --  Swapped arguments and a database named "<wal>.ckpt" are refused without touching
+   --  either file
+   Get_File_Size (Make_Text ("/tmp/nhe_o_capi_persist.wal"), C_WAL_Size, C_Size_Ok);
+   Check (C_Size_Ok);
+   C_Init_With_Paths (C_WAL_Buf, 27, C_DB_Buf, 26, 3, C_Rc);
+   Check (C_Rc = C_Status_Invalid_Arg and then not G_Initialized);
+   Get_File_Size (Make_Text ("/tmp/nhe_o_capi_persist.wal"), C_Rem_TTL, C_Size_Ok);
+   Check (C_Size_Ok and then C_Rem_TTL = C_WAL_Size);
+   C_Init_With_Paths (C_Ckpt_Buf, 32, C_WAL_Buf, 27, 3, C_Rc);
+   Check (C_Rc = C_Status_Invalid_Arg and then not G_Initialized);
    Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_capi_persist.db"));
    Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_capi_persist.wal"));
    Print_Line ("  => Passed: C ABI / FFI exports, N-D vector/RAG/Delete FFI, checkpoint, recovery, and defensive boundary guards verified.");

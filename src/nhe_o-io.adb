@@ -22,6 +22,7 @@ package body Nhe_O.IO is
    O_RDONLY       : constant int      := 8#0#;
    O_RDWR         : constant int      := 8#2#;
    O_CREAT        : constant int      := 8#100#;
+   O_EXCL         : constant int      := 8#200#;
    O_NONBLOCK     : constant int      := 8#4000#;
    O_CLOEXEC      : constant int      := 8#2000000#;
    Mode_0600      : constant unsigned := 8#600#;
@@ -251,8 +252,9 @@ package body Nhe_O.IO is
          return;
       end if;
 
+      --  O_RDWR refuses a directory (EISDIR); lseek refuses a FIFO (ESPIPE)
       To_C_Path (File_Path, C_Path);
-      Fd := Posix_Open (C_Path, O_RDONLY + O_NONBLOCK + O_CLOEXEC, 0);
+      Fd := Posix_Open (C_Path, O_RDWR + O_NONBLOCK + O_CLOEXEC, 0);
       if Fd < 0 then
          return;
       end if;
@@ -375,6 +377,34 @@ package body Nhe_O.IO is
       Sync_Parent_Directory (File_Path, Dir_Ok);
       Success := Sync_Rc = 0 and then Close_R = 0 and then Dir_Ok;
    end Create_File_If_Missing;
+
+   procedure Create_File_Exclusive
+     (File_Path : in     Bounded_Text;
+      Success   :    out Boolean)
+   is
+      C_Path  : C_Path_String;
+      Fd      : int;
+      Sync_Rc : int;
+      Close_R : int;
+      Dir_Ok  : Boolean;
+   begin
+      if Has_Embedded_NUL (File_Path) then
+         Success := False;
+         return;
+      end if;
+
+      To_C_Path (File_Path, C_Path);
+      Fd := Posix_Open (C_Path, O_RDWR + O_CREAT + O_EXCL + O_NONBLOCK + O_CLOEXEC, Mode_0600);
+      if Fd < 0 then
+         Success := False;
+         return;
+      end if;
+
+      Sync_Rc := Posix_Fsync (Fd);
+      Close_R := Posix_Close (Fd);
+      Sync_Parent_Directory (File_Path, Dir_Ok);
+      Success := Sync_Rc = 0 and then Close_R = 0 and then Dir_Ok;
+   end Create_File_Exclusive;
 
    procedure Replace_File
      (Src_Path : in     Bounded_Text;
@@ -541,6 +571,12 @@ package body Nhe_O.IO is
       Sync_Rc := Posix_Fsync (Fd);
       Success := (Written = Ssize_T (Nhe_O.Page_Size)) and then (Sync_Rc = 0);
 
+      --  The first page of an empty (possibly just created) file also makes the
+      --  file's directory entry durable
+      if Success and then End_Pos = 0 then
+         Sync_Parent_Directory (File_Path, Success);
+      end if;
+
       --  Undo a failed file extension so the database stays page-aligned
       if not Success and then Offset >= End_Pos then
          Trunc_R := Posix_Ftruncate (Fd, End_Pos);
@@ -678,6 +714,12 @@ package body Nhe_O.IO is
       Sync_Rc := Posix_Fsync (Fd);
       Success := (Written = Ssize_T (WAL_Frame_Size)) and then (Sync_Rc = 0);
 
+      --  The first frame of an empty (possibly just created) WAL also makes the WAL's
+      --  directory entry durable
+      if Success and then Frame_Count = 0 then
+         Sync_Parent_Directory (WAL_Path, Success);
+      end if;
+
       --  A frame that was not durably appended must not survive in the WAL: drop any
       --  partial or unsynced bytes so recovery can never replay a failed append
       if not Success then
@@ -687,6 +729,51 @@ package body Nhe_O.IO is
 
       Close_R := Posix_Close (Fd);
    end Append_WAL_Frame;
+
+   procedure Read_File_Bytes
+     (File_Path : in     Bounded_Text;
+      Offset    : in     File_Size;
+      Buffer    :    out WAL_Frame_Buffer;
+      Count     :    out Natural;
+      Success   :    out Boolean)
+   is
+      C_Path  : C_Path_String;
+      Fd      : int;
+      End_Pos : Off_T;
+      N_Read  : Ssize_T := -1;
+      Close_R : int;
+   begin
+      Buffer  := [others => 0];
+      Count   := 0;
+      Success := False;
+
+      if Has_Embedded_NUL (File_Path) then
+         return;
+      end if;
+
+      To_C_Path (File_Path, C_Path);
+      Fd := Posix_Open (C_Path, O_RDONLY + O_NONBLOCK + O_CLOEXEC, 0);
+      if Fd < 0 then
+         return;
+      end if;
+
+      --  lseek fails on a FIFO (ESPIPE), so pread never blocks
+      End_Pos := Posix_Lseek (Fd, 0, SEEK_END);
+      if End_Pos >= 0 then
+         for Attempt in 1 .. Max_IO_Retries loop
+            N_Read := Posix_Pread_WAL (Fd, Buffer, size_t (WAL_Frame_Size), Offset);
+            exit when N_Read >= 0;
+         end loop;
+      end if;
+
+      Close_R := Posix_Close (Fd);
+      if End_Pos >= 0 and then N_Read in 0 .. Ssize_T (WAL_Frame_Size) and then Close_R = 0 then
+         Count   := Natural (N_Read);
+         Success := True;
+      else
+         Buffer := [others => 0];
+      end if;
+   end Read_File_Bytes;
 
    procedure Read_WAL_Frame
      (WAL_Path  : in     Bounded_Text;

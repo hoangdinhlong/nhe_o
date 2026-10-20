@@ -89,9 +89,10 @@ package Nhe_O.C_API is
           External_Name => "nhe_o_version_minor";
 
    --  Initialize / reset the embedded runtime as a scratch database (Dim = 3) on the
-   --  per-process paths /tmp/nhe_o_c_api.<pid>.db / .wal, deleting earlier contents of
-   --  those files only (C_Status_IO_Error if one of them cannot be removed);
-   --  nhe_o_close removes them again
+   --  per-process paths /tmp/nhe_o_c_api.<pid>.db / .wal: earlier contents of those
+   --  files are deleted and both are recreated with O_EXCL, so a link planted at the
+   --  predictable names is refused, never followed (C_Status_IO_Error if a file cannot
+   --  be removed or created); nhe_o_close removes them again
    procedure C_Init (Out_Status : out int)
      with Global        => (Output => (G_Initialized, G_Ephemeral, G_Next_Tx, G_Next_KV_Seq, G_DB_Path,
                                        G_WAL_Path, G_KV_Store, G_Broker, G_RAG_Engine,
@@ -106,10 +107,14 @@ package Nhe_O.C_API is
    --  (the scratch files of a previous nhe_o_init database are deleted first).
    --  Relative paths are resolved against the current directory once, here; after that
    --  resolution the WAL path must leave room for the 5-byte ".ckpt" checkpoint suffix
-   --  (at most Max_Text_Len - 5 bytes) and the two paths must name different files (also
-   --  through links). Recovery first repairs a torn WAL / database tail left by a crash,
-   --  then replays KV and committed RAG work, and finally checkpoints the WAL when it is
-   --  past the automatic thresholds (or its id space was exhausted by an older version).
+   --  (at most Max_Text_Len - 5 bytes). The database, the WAL and "<wal>.ckpt" must be
+   --  three different files, also through links, and an existing database must not
+   --  start with the WAL frame magic (swapped arguments) - C_Status_Invalid_Arg. Both
+   --  files are created when missing (with their directory fsynced). Recovery repairs a
+   --  torn WAL / database tail left by a crash (a WAL path naming a file that is not a
+   --  WAL fails with C_Status_IO_Error and is left untouched), replays KV and committed
+   --  RAG work, and finally checkpoints the WAL when it is past the automatic
+   --  thresholds (or its id space was exhausted by an older version).
    procedure C_Init_With_Paths
      (DB_Path_Buf  : in     C_Text_Buf;
       DB_Path_Len  : in     int;
@@ -125,14 +130,17 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_init_with_paths";
 
-   --  Release the runtime: state is cleared, G_Initialized becomes False, and the
-   --  scratch files of an nhe_o_init database are deleted (files given to
-   --  nhe_o_init_with_paths are kept). C_Status_IO_Error reports that a scratch file
-   --  could not be removed; the runtime is released either way.
+   --  Release the runtime: a database opened with nhe_o_init_with_paths is first
+   --  checkpointed (best effort, so the next open replays a compact WAL that also
+   --  carries the current LRU recency) and its files are kept; the scratch files of an
+   --  nhe_o_init database are deleted. State is cleared and G_Initialized becomes False.
+   --  C_Status_IO_Error reports that a scratch file could not be removed; the runtime is
+   --  released either way.
    procedure C_Close (Out_Status : out int)
-     with Global        => (In_Out => (G_Ephemeral, G_DB_Path, G_WAL_Path),
-                            Output => (G_Initialized, G_Next_Tx, G_Next_KV_Seq, G_KV_Store,
-                                       G_Broker, G_RAG_Engine, G_Write_Fault)),
+     with Global        => (In_Out => (G_Initialized, G_Ephemeral, G_DB_Path, G_WAL_Path,
+                                       G_KV_Store, G_Next_Tx, G_Next_KV_Seq, G_RAG_Engine,
+                                       G_Scratch_Engine, G_Write_Fault),
+                            Output => G_Broker),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -215,7 +223,8 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_kv_set";
 
-   --  Redis GET operation via C ABI (writes only 1 .. Out_Val_Len)
+   --  Redis GET operation via C ABI: writes Out_Val_Buf (1 .. Out_Val_Len), plus a NUL at
+   --  Out_Val_Len + 1 when the value is shorter than the buffer
    procedure C_KV_Get
      (Key_Buf     : in     C_Ident_Buf;
       Key_Len     : in     int;
@@ -343,7 +352,8 @@ package Nhe_O.C_API is
           Convention    => C,
           External_Name => "nhe_o_pubsub_publish";
 
-   --  Pub/Sub POLL via C ABI (writes only 1 .. Out_*_Len)
+   --  Pub/Sub POLL via C ABI: writes 1 .. Out_*_Len of each buffer, plus a NUL after the
+   --  text when it is shorter than the buffer
    procedure C_PubSub_Poll
      (Sub_Id          : in     int;
       Out_Chan_Buf    : in out C_Ident_Buf;

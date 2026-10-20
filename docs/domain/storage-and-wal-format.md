@@ -20,14 +20,20 @@ Defined in `src/nhe_o-io.ads` (`WAL_Header_Size = 24`, `WAL_Frame_Size = 4120`, 
 | `18 .. 24` | 7 B | `Reserved` | Zero-filled (`0`, verified by `Verify_WAL_Frame`) |
 | `25 .. 4120` | 4096 B | `Page_Payload` | Complete 4096-byte page image |
 
-- **Exact File-Size Alignment & `Max_WAL_Frames = 4096` Rule (`Read_Page`, `Write_Page`, `Append_WAL_Frame`, `Write_WAL_Frame`, `Read_WAL_Frame`)**:
-  - Every `.db` page read/write verifies via `Posix_Lseek (Fd, 0, SEEK_END)` that the file size is an exact multiple of `Page_Size` (`4096` bytes), and every `.wal` frame read/write/append verifies that the `.wal` file size is an exact multiple of `WAL_Frame_Size` (`4120` bytes) and holds at most `Max_WAL_Frames = 4096` frames (`Frame_Idx < Max_WAL_Frames`). Any trailing partial byte or unaligned tail fails closed with I/O failure.
-- **NO-STEAL Write & Pre-Commit Verification Rule (`Write_TOAST_Chain`, `Ingest_Document`, `Delete_Document`, `Commit_Tx`, `ADR-006`)**:
-  - Active transactions (`Tx_Active`) append `WAL_Frame_Data` frames to `.wal` without mutating `.db` in-place.
-  - `Commit_Tx` first pre-scans existing `.wal` frames up to `Max_WAL_Scan_Frames = 4096`, verifying `Verify_WAL_Frame` (CRC32 + `"NHEO"` magic), rejecting duplicate or post-commit frames for `Tx.Id`, and requiring `Hit_EOF` before appending `WAL_Frame_Commit`, then materializes all `WAL_Frame_Data` frames belonging to `Ctx.Id` and the final committed page to `.db`.
-- **2-Pass Recovery Rule (`Redo_WAL_Recovery`, `BR-002`, `ADR-006`)**:
-  - **Pass 1 (Analysis)**: Scans sequential frames `0 .. Max_Frames - 1` (up to `Max_WAL_Scan_Frames = 4096`), verifies `Verify_WAL_Frame`, and marks `CLOG (Tx_Id) := Tx_Committed` iff `Frame_Kind = WAL_Frame_Commit`.
-  - **Pass 2 (Redo)**: Replays `WAL_Frame_Data` and `WAL_Frame_Commit` pages to `.db` iff `Is_Tx_Committed (CLOG, Tx_Id)`.
+- **File-Size Alignment & `Max_WAL_Frames = 4096` Rule (`Read_Page`, `Write_Page`, `Append_WAL_Frame`, `Read_WAL_Frame`)**:
+  - Every `.db` page read/write verifies via `Posix_Lseek (Fd, 0, SEEK_END)` that the file size is an exact multiple of `Page_Size` (`4096` bytes), and every `.wal` frame read/append verifies that the `.wal` file size is an exact multiple of `WAL_Frame_Size` (`4120` bytes) and holds at most `Max_WAL_Frames = 4096` frames. An unaligned or over-full file fails closed; only crash recovery (`Repair_WAL_Tail` / `Repair_DB_Tail`, below) may shorten a file.
+  - `Append_WAL_Frame` writes at the frame-aligned end with positional `pwrite` + `fsync` (plus a directory `fsync` when the WAL was empty) and reports success only when the frame is durable. On failure it truncates the WAL back and `fsync`s again; that rollback is best effort, so a failed append means "decided by the next recovery". `Write_Page` likewise truncates a failed file extension back and `fsync`s the directory on the first page of an empty file.
+- **NO-STEAL Staging & Commit Point Rule (`Write_TOAST_Chain`, `Ingest_Document`, `Delete_Document`, `Commit_Tx`, `ADR-006`, `ADR-009`)**:
+  - Active transactions (`Tx_Active`) append `WAL_Frame_Data` frames to `.wal` without mutating `.db` in place.
+  - `Commit_Tx` pre-scans the `.wal` (up to `Max_WAL_Scan_Frames = 4096`, every frame CRC32 + `"NHEO"` verified, duplicate or post-commit frames for `Ctx.Id` rejected) and appends the `WAL_Frame_Commit` barrier. **The durable barrier append is the commit point**: from then on `Commit_Tx` returns `Status_Ok` even if materializing the staged pages into `.db` fails, reporting `Flush_Pending = True` so the caller re-runs `Redo_WAL_Recovery` (`Nhe_O.RAG.Commit_RAG_Tx` does this in place).
+- **Crash Repair Rule (`Repair_WAL_Tail`, `Repair_DB_Tail`, run first by every recovery)**:
+  - Appends are sequential and durable, so a crash can only tear the **last** frame. `Repair_WAL_Tail` classifies the whole file before truncating anything: every complete frame must verify, except a final complete frame with nothing after it; a partial trailing frame is allowed after verified frames, or alone when its bytes start like a first append (`"NHEO"` prefix or all zeros). The torn frame (partial, or bad final) is truncated away. Anything else (an invalid frame before the last, a bad frame followed by a partial one, foreign bytes, more than `4096` frames) fails closed with `Status_IO_Error` and leaves the file untouched. A missing WAL is not an error.
+  - `Repair_DB_Tail` truncates a partial trailing `.db` page (a crash while extending the file); the following redo rebuilds it, because every page of `.db` is materialized from a committed WAL frame.
+- **Commit-Order Recovery Rule (`Redo_WAL_Recovery`, `BR-002`, `ADR-009`)**:
+  - **Pass 1 (Analysis)**: scans frames `0 .. Max_Frames - 1`, verifies `Verify_WAL_Frame`, and records each `WAL_Frame_Commit` (a second commit frame for the same transaction is corruption).
+  - **Pass 2 (Redo, in commit order)**: for each commit frame in WAL order, replays the `WAL_Frame_Data` frames that transaction staged **before** its barrier, then the barrier's own page — exactly the order in which `Commit_Tx` materialized them. Data frames of uncommitted transactions and data frames appearing after their transaction's barrier (a reused id) are never replayed; `WAL_Frame_KV` frames are left to `Recover_KV_From_WAL`.
+  - `Max_Seen_Tx` is the largest transaction id of any data or commit frame, committed or not: callers seed their next id above it so a crashed transaction's staged frames can never be committed by a reused id.
+- **Checkpoint Rule (`Nhe_O.C_API.C_Checkpoint`, `ADR-011`)**: the WAL is compacted by writing `"<wal>.ckpt"` (created with `O_EXCL`) holding one slot-hinted `"KVMG"` SET frame per occupied KV slot (sequence numbers `1 ..`) followed by one `WAL_Frame_Commit` of transaction `1` carrying the frozen Page 1 (`Freeze_RAG_Engine`), then `rename(2)` over the live WAL and `fsync` of its directory. The rename is the commit point: a crash before it keeps the old WAL, a crash after it recovers from the new one, and both describe the same logical database. Transaction ids restart at `2` and KV sequence numbers after the snapshot.
 
 ---
 
@@ -86,7 +92,19 @@ Defined in `src/nhe_o-transaction.ad[sb]` (`Encode_TOAST_Pointer`, `Decode_TOAST
 |---|---|---|---|
 | `1 .. 4` | 4 B | `Magic` | ASCII `"VTST"` (`16#56#, 16#54#, 16#53#, 16#54#`) |
 | `5 .. 8` | 4 B | `Dim` | Embedding dimension (`1 .. 4096`, 32-bit Big-Endian) |
-| `9 .. 8 + Dim*4` | `Dim * 4` B | `Elements (1..Dim)` | 32-bit Big-Endian 15-tier scientific Float32 words (`Encode_Vector_TOAST` / `Decode_Vector_TOAST`: `Bit 31 = Sign`, `Bits 27..30 = Exp_Code 0..14` stepping by $10^1$ per tier from $10^5$ down to $10^{-8}$ with `14 = 0.0`, `Bits 0..26 = Mantissa 0..10^8` retaining 7–8 significant decimal digits across all magnitudes) |
+| `9 .. 8 + Dim*4` | `Dim * 4` B | `Elements (1..Dim)` | 32-bit Big-Endian scaled-decimal words: `Bit 31 = Sign`, `Bits 27..30 = Exp_Code (0..15)`, `Bits 0..26 = Mantissa M (0 .. 10^8)` (table below) |
+
+The payload length must be exactly `8 + 4 * Dim` and `Dim` must equal the engine dimension; bytes past the length are not inspected. `Exp_Code` selects the magnitude band of `|x|` and the scale of the mantissa, `M = round (|x| * 10^(30 - 2c))` (code 14: `* 10^3`, code 15: `* 10^2`) capped at `10^8`:
+
+| `Exp_Code` | Encoded `|x|` range | Decoded value |
+|---|---|---|
+| `0` | `x = 0.0` (also `-0.0`; sign bit and `M` must be `0`) | `0.0` |
+| `1` | `(0, 1e-20]` | `M * 1e-28` |
+| `2 .. 13` | `(10^(2c-24), 10^(2c-22)]` (e.g. `11`: `(1e-2, 1]`, `13`: `(1e2, 1e4]`) | `M * 10^(2c-30)` |
+| `14` | `(1e4, 1e5]` | `M * 1e-3` |
+| `15` | `(1e5, 1e6]` | `M * 1e-2` |
+
+The mantissa keeps about 7 significant digits (`M` in `(10^6, 10^8]` for codes `2 .. 13`, `(10^7, 10^8]` for `14 .. 15`): the worst relative error is about `5.9e-7` for `|x|` in `(1e-22, 1e6]`; below `1e-22` precision degrades and values below `5e-29` decode to a signed zero. Decoding rejects `M > 10^8` and a code-0 word with the sign bit or a mantissa set; decoded magnitudes are capped at `1e6` (`Max_Component`).
 
 ### 3.4 `"RMET"` Extended Summary & JSONB Metadata TOAST Payload (`Encode_Meta_TOAST`, `ADR-006`)
 | Byte Offset | Size | Field | Description |
@@ -112,7 +130,7 @@ Defined in `src/nhe_o-btree.ad[sb]` (`Encode_Node_Page` / `Decode_Node_Page`).
 | `8` | 1 B | `Reserved_Hdr` | Zero (`0`) |
 | `9 .. 12` | 4 B | `Page_Id` | `Valid_Page_Id` |
 | `13 .. 16` | 4 B | `Page_CRC32` | IEEE 802.3 CRC-32 over the 4096-byte page with bytes `13 .. 16` zeroed |
-| `17 .. 96` | 80 B | `Key_Slots (1..4)` | Four 20-byte slots (`Key_Hi: 4B`, `Key_Lo: 4B` for full 64-bit `Integer_64`, `Target_Page: 4B`, `Target_Slot: 4B`, `TOAST_Root: 4B`) |
+| `17 .. 96` | 80 B | `Key_Slots (1..4)` | Four 20-byte slots at `17 + 20 * (s - 1)` (`Key_Hi: 4B`, `Key_Lo: 4B`, `Target_Page: 4B`, `Target_Slot: 4B`, `TOAST_Root: 4B`). The 64-bit key `K` is stored as `U = K + 2^63 (mod 2^64)` (sign bit flipped), `Key_Hi = U >> 32`, `Key_Lo = U and 16#FFFF_FFFF#`, so byte order equals signed key order (`Integer_64'First` → `00000000 00000000`, `0` → `80000000 00000000`). Unused slots are encoded as key `0` with pointer `(0, 1, 0)`. |
 | `97 .. 116` | 20 B | `Children (1..5)` | Five 4-byte `BTree_Node_Id` child links (`1 .. 32`) |
 | `117 .. 4096` | 3980 B | `Reserved` | Zero-filled |
 
@@ -128,10 +146,10 @@ Defined in `src/nhe_o-kv.ad[sb]` (`Encode_KV_Wal_Page` / `Decode_KV_Wal_Page`).
 | `5` | 1 B | `Op_Code` | `1 = KV_Op_Set`, `2 = KV_Op_Del` |
 | `6` | 1 B | `Has_TTL` | `1 = True`, `0 = False` (`0` required when `Op_Code = KV_Op_Del`) |
 | `7` | 1 B | `Key_Length` | `1 .. 64` (`Max_Ident_Len`) |
-| `8` | 1 B | `Reserved_Hdr` | Zero (`0`) |
+| `8` | 1 B | `Slot_Hint` | `KV_Op_Set`: the store slot (`1 .. 64`) the SET landed in, so replay reproduces the run-time slot layout including silent LRU / expired-slot evictions; `0` = no hint (legacy frames, replayed by slot selection). `KV_Op_Del`: must be `0`. Values above `64` are rejected |
 | `9 .. 12` | 4 B | `Val_Length` | `0 .. 512` (`Max_Text_Len`; `0` required when `Op_Code = KV_Op_Del`) |
-| `13 .. 20` | 8 B | `Expires_At` | 64-bit `Epoch_Seconds` (`Hi: 4B`, `Lo: 4B`; `0` required when `Op_Code = KV_Op_Del`) |
-| `21 .. 28` | 8 B | `Last_Access` | 64-bit `Epoch_Seconds` (`Hi: 4B`, `Lo: 4B`) |
+| `13 .. 20` | 8 B | `Expires_At` | 64-bit `Epoch_Seconds` (`Hi: 4B`, `Lo: 4B`; `0` required when `Has_TTL = 0` and when `Op_Code = KV_Op_Del`) |
+| `21 .. 28` | 8 B | `Last_Access` | 64-bit `Epoch_Seconds` (`Hi: 4B`, `Lo: 4B`; `0` required when `Op_Code = KV_Op_Del`) |
 | `29 .. 32` | 4 B | `Page_CRC32` | IEEE 802.3 CRC-32 over the 4096-byte page with bytes `29 .. 32` zeroed |
 | `33 .. 96` | 64 B | `Key_Data` | Raw `Bounded_Ident` bytes (`1 .. Key_Length`) |
 | `97 .. 608` | 512 B | `Val_Data` | Raw `Bounded_Text` bytes (`1 .. Val_Length`) |

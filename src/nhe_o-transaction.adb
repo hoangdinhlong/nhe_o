@@ -1015,6 +1015,24 @@ package body Nhe_O.Transaction is
       Valid := True;
    end Decode_Slotted_Page;
 
+   function Has_WAL_Magic (Frame : WAL_Frame_Buffer) return Boolean is
+     (Frame (1) = Magic_0 and then Frame (2) = Magic_1
+      and then Frame (3) = Magic_2 and then Frame (4) = Magic_3);
+
+   --  True iff the first Len bytes of Frame can be the start of the very first append
+   --  to an empty WAL torn by a crash: a prefix of the "NHEO" magic, or all zero bytes
+   --  (an extension whose data blocks never reached the disk)
+   function Is_Torn_First_Frame
+     (Frame : WAL_Frame_Buffer;
+      Len   : WAL_Frame_Offset) return Boolean
+   is
+     ((Frame (1) = Magic_0
+       and then (Len < 2 or else Frame (2) = Magic_1)
+       and then (Len < 3 or else Frame (3) = Magic_2)
+       and then (Len < 4 or else Frame (4) = Magic_3))
+      or else (for all I in 1 .. Len => Frame (I) = 0))
+     with Global => null;
+
    procedure Repair_WAL_Tail
      (WAL_Path : in     Bounded_Text;
       Status   :    out Engine_Status)
@@ -1025,8 +1043,11 @@ package body Nhe_O.Transaction is
       Full      : Integer_64;
       Rem_Bytes : Integer_64;
       Frame     : WAL_Frame_Buffer;
+      Got       : Natural;
       Read_Ok   : Boolean;
       Trunc_Ok  : Boolean;
+      Last_Torn : Boolean := False;
+      New_Size  : File_Size;
    begin
       Status := Status_Ok;
 
@@ -1045,41 +1066,64 @@ package body Nhe_O.Transaction is
       Rem_Bytes := Size mod Integer_64 (WAL_Frame_Size);
 
       --  The engine never appends past Max_WAL_Frames: an over-full WAL is foreign
-      if Full > Integer_64 (Max_WAL_Frames) then
+      if Full > Integer_64 (Max_WAL_Frames)
+        or else (Full = Integer_64 (Max_WAL_Frames) and then Rem_Bytes /= 0)
+      then
          Status := Status_IO_Error;
          return;
       end if;
 
-      --  1. Drop a partial trailing frame (an append interrupted mid-write)
-      if Rem_Bytes /= 0 then
-         Truncate_File (WAL_Path, Full * Integer_64 (WAL_Frame_Size), Trunc_Ok);
-         if not Trunc_Ok then
+      --  1. Classify before truncating anything, so a file that is not a WAL (or a WAL
+      --     corrupted in the middle) is never shortened. Appends are sequential and
+      --     fsynced, so a crash can only tear the LAST frame: every complete frame must
+      --     verify, except a final complete frame with no partial frame after it.
+      for Idx in 0 .. Natural (Full) - 1 loop
+         pragma Loop_Invariant (Status = Status_Ok and then not Last_Torn);
+         Read_File_Bytes
+           (WAL_Path, Integer_64 (Idx) * Integer_64 (WAL_Frame_Size), Frame, Got, Read_Ok);
+         if not Read_Ok or else Got /= WAL_Frame_Size then
+            Status := Status_IO_Error;
+            return;
+         elsif not Verify_WAL_Frame (Frame) then
+            --  A lone bad frame is only a torn first append if it looks like one
+            if Idx = Natural (Full) - 1
+              and then Rem_Bytes = 0
+              and then (Idx > 0 or else Is_Torn_First_Frame (Frame, WAL_Frame_Size))
+            then
+               Last_Torn := True;
+            else
+               Status := Status_IO_Error;
+               return;
+            end if;
+         end if;
+      end loop;
+
+      --  2. Without any complete frame, the partial bytes must look like the start of a
+      --     first append; anything else is a foreign file
+      if Full = 0 and then Rem_Bytes > 0 then
+         Read_File_Bytes (WAL_Path, 0, Frame, Got, Read_Ok);
+         if not Read_Ok
+           or else Integer_64 (Got) /= Rem_Bytes
+           or else not Is_Torn_First_Frame (Frame, Got)
+         then
             Status := Status_IO_Error;
             return;
          end if;
       end if;
 
-      --  2. Drop a final complete frame whose contents never became durable; any
-      --     earlier invalid frame is mid-log corruption and fails closed
-      for Idx in 0 .. Natural (Full) - 1 loop
-         pragma Loop_Invariant (Status = Status_Ok);
-         Read_WAL_Frame (WAL_Path, Idx, Frame, Read_Ok);
-         if not Read_Ok then
-            Status := Status_IO_Error;
-            return;
-         elsif not Verify_WAL_Frame (Frame) then
-            if Idx = Natural (Full) - 1 then
-               Truncate_File
-                 (WAL_Path, Integer_64 (Idx) * Integer_64 (WAL_Frame_Size), Trunc_Ok);
-               if not Trunc_Ok then
-                  Status := Status_IO_Error;
-               end if;
-            else
-               Status := Status_IO_Error;
-            end if;
-            return;
-         end if;
-      end loop;
+      --  3. Drop the torn tail: the partial frame, or the unverifiable final frame
+      if Last_Torn then
+         New_Size := (Full - 1) * Integer_64 (WAL_Frame_Size);
+      elsif Rem_Bytes /= 0 then
+         New_Size := Full * Integer_64 (WAL_Frame_Size);
+      else
+         return;
+      end if;
+
+      Truncate_File (WAL_Path, New_Size, Trunc_Ok);
+      if not Trunc_Ok then
+         Status := Status_IO_Error;
+      end if;
    end Repair_WAL_Tail;
 
    procedure Repair_DB_Tail

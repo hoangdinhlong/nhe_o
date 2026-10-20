@@ -220,8 +220,16 @@ package body Nhe_O.C_API is
       Delete_File_If_Exists (G_DB_Path, DB_Gone);
       Delete_File_If_Exists (G_WAL_Path, WAL_Gone);
       Delete_File_If_Exists (Scratch_Path (Pid, ".wal" & Checkpoint_Suffix), Ckpt_Gone);
+      if DB_Gone and then WAL_Gone and then Ckpt_Gone then
+         --  Recreate both files with O_EXCL: a link planted at a predictable /tmp name
+         --  after the unlink makes the creation fail instead of being followed
+         Create_File_Exclusive (G_DB_Path, DB_Gone);
+         if DB_Gone then
+            Create_File_Exclusive (G_WAL_Path, WAL_Gone);
+         end if;
+      end if;
       if not (DB_Gone and then WAL_Gone and then Ckpt_Gone) then
-         --  Never adopt a scratch file this process cannot remove (e.g. another user's)
+         --  Never adopt a scratch file this process cannot remove or create itself
          G_DB_Path  := Empty_Text;
          G_WAL_Path := Empty_Text;
          Out_Status := C_Status_IO_Error;
@@ -233,8 +241,13 @@ package body Nhe_O.C_API is
    end C_Init;
 
    procedure C_Close (Out_Status : out int) is
-      Removed : Boolean;
+      Removed     : Boolean;
+      Ckpt_Status : int;
+      pragma Warnings (Off, Ckpt_Status);
    begin
+      if G_Initialized and then not G_Ephemeral then
+         C_Checkpoint (Ckpt_Status);
+      end if;
       Remove_Scratch_Files (Removed);
       Reset_Runtime;
       Out_Status := (if Removed then C_Status_Ok else C_Status_IO_Error);
@@ -285,6 +298,10 @@ package body Nhe_O.C_API is
       --     commit frame of the frozen transaction 1 carrying the frozen Page 1
       Tmp_Path := Checkpoint_Path (G_WAL_Path);
       Delete_File_If_Exists (Tmp_Path, Tmp_Gone);
+      if Tmp_Gone then
+         --  O_EXCL: the rename below must move a file this call created, never a link
+         Create_File_Exclusive (Tmp_Path, Tmp_Gone);
+      end if;
       if not Tmp_Gone then
          Out_Status := C_Status_IO_Error;
          return;
@@ -352,8 +369,9 @@ package body Nhe_O.C_API is
       end if;
    end Maybe_Checkpoint;
 
-   --  Bookkeeping after a durable write returned Status: checkpoint after a success,
-   --  enter the write-fault state after an I/O error
+   --  Bookkeeping after a write path returned Status: an I/O error enters the
+   --  write-fault state; any other outcome may still have consumed a transaction or
+   --  sequence id (an aborted or refused transaction), so the thresholds are checked
    procedure After_Durable_Write (Status : in Engine_Status)
      with Global => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path, G_KV_Store),
                      In_Out => (G_Next_Tx, G_Next_KV_Seq, G_RAG_Engine, G_Scratch_Engine,
@@ -361,10 +379,10 @@ package body Nhe_O.C_API is
           Always_Terminates
    is
    begin
-      if Status = Status_Ok then
-         Maybe_Checkpoint;
-      elsif Status = Status_IO_Error then
+      if Status = Status_IO_Error then
          G_Write_Fault := True;
+      else
+         Maybe_Checkpoint;
       end if;
    end After_Durable_Write;
 
@@ -383,7 +401,13 @@ package body Nhe_O.C_API is
       Abs_Ok      : Boolean;
       WAL_Existed : Boolean;
       WAL_Ok      : Boolean;
-      DB_Exists   : Boolean;
+      DB_Existed  : Boolean;
+      DB_Ok       : Boolean;
+      Ckpt_P      : Bounded_Text;
+      Ckpt_Exists : Boolean;
+      Head        : WAL_Frame_Buffer;
+      Head_Len    : Natural;
+      Head_Ok     : Boolean;
       Same        : Boolean;
       KV_Replayed : Natural;
       Status      : Engine_Status;
@@ -441,28 +465,66 @@ package body Nhe_O.C_API is
          return;
       end if;
 
-      --  The two paths must not reach one file through links or aliases ("x" vs
-      --  "./x"). The WAL is created when missing so that stat(2) can compare them.
-      Check_File_Exists (WAL_P, WAL_Existed);
-      Create_File_If_Missing (WAL_P, WAL_Ok);
-      if not WAL_Ok then
-         Out_Status := C_Status_IO_Error;
+      --  The database may not be the checkpoint's temporary WAL either
+      Ckpt_P := Checkpoint_Path (WAL_P);
+      if Equal_Text (DB_P, Ckpt_P) then
+         Out_Status := C_Status_Invalid_Arg;
          return;
       end if;
-      Check_File_Exists (DB_P, DB_Exists);
-      if DB_Exists then
-         Check_Same_File (DB_P, WAL_P, Same);
-         if Same then
-            if not WAL_Existed then
-               Delete_File_If_Exists (WAL_P);
-            end if;
+
+      --  Swapped arguments: an existing database that starts like a WAL frame is a WAL
+      --  (Nhe_O.RAG never writes page 0, so a database file starts with zero bytes)
+      Check_File_Exists (DB_P, DB_Existed);
+      if DB_Existed then
+         Read_File_Bytes (DB_P, 0, Head, Head_Len, Head_Ok);
+         if not Head_Ok then
+            Out_Status := C_Status_IO_Error;
+            return;
+         elsif Head_Len >= 4 and then Has_WAL_Magic (Head) then
             Out_Status := C_Status_Invalid_Arg;
             return;
          end if;
       end if;
 
+      --  Create missing files now: their directory entries become durable before any
+      --  commit, and stat(2) can then compare the paths. The database, the WAL and the
+      --  checkpoint's "<wal>.ckpt" must be three different files, also through links
+      --  or aliases ("x" vs "./x"); files created by this call are removed on refusal.
+      Check_File_Exists (WAL_P, WAL_Existed);
+      Create_File_If_Missing (WAL_P, WAL_Ok);
+      if WAL_Ok then
+         Create_File_If_Missing (DB_P, DB_Ok);
+      else
+         DB_Ok := False;
+      end if;
+      if not (WAL_Ok and then DB_Ok) then
+         if not WAL_Existed then
+            Delete_File_If_Exists (WAL_P);
+         end if;
+         Out_Status := C_Status_IO_Error;
+         return;
+      end if;
+      Check_Same_File (DB_P, WAL_P, Same);
+      Check_File_Exists (Ckpt_P, Ckpt_Exists);
+      if not Same and then Ckpt_Exists then
+         Check_Same_File (DB_P, Ckpt_P, Same);
+         if not Same then
+            Check_Same_File (WAL_P, Ckpt_P, Same);
+         end if;
+      end if;
+      if Same then
+         if not DB_Existed then
+            Delete_File_If_Exists (DB_P);
+         end if;
+         if not WAL_Existed then
+            Delete_File_If_Exists (WAL_P);
+         end if;
+         Out_Status := C_Status_Invalid_Arg;
+         return;
+      end if;
+
       --  A checkpoint interrupted before its rename leaves a stale "<wal>.ckpt"
-      Delete_File_If_Exists (Checkpoint_Path (WAL_P));
+      Delete_File_If_Exists (Ckpt_P);
 
       --  KV replay (repairs a torn WAL tail first)
       Recover_KV_From_WAL
@@ -1358,6 +1420,14 @@ package body Nhe_O.C_API is
 
       if Doc_Id not in int (RAG_Doc_Slot'First) .. int (RAG_Doc_Slot'Last) then
          Out_Status := C_Status_Invalid_Arg;
+         return;
+      end if;
+
+      --  Deleting an absent document is a no-op: answer it without a transaction id
+      if not G_RAG_Engine.Docs (RAG_Doc_Slot (Doc_Id)).Active
+        or else G_RAG_Engine.Docs (RAG_Doc_Slot (Doc_Id)).Tuple_Hdr.Xmax > 0
+      then
+         Out_Status := C_Status_Not_Found;
          return;
       end if;
 

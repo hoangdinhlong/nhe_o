@@ -227,8 +227,8 @@ package body Nhe_O.KV is
       for I in KV_Slot_Index loop
          if Store.Slots (I).Occupied and then Equal_Ident (Store.Slots (I).Key, Key) then
             if Is_Slot_Expired (Store.Slots (I), Now) then
-               --  Lazy TTL reclamation (BR-004)
-               Store.Slots (I).Occupied := False;
+               --  Reported, not reclaimed: reads never change the slot layout, which
+               --  only logged writes may do (BR-004)
                Status := Status_Expired;
                return;
             else
@@ -298,7 +298,7 @@ package body Nhe_O.KV is
       for I in KV_Slot_Index loop
          if Store.Slots (I).Occupied and then Equal_Ident (Store.Slots (I).Key, Key) then
             if Is_Slot_Expired (Store.Slots (I), Now) then
-               Store.Slots (I).Occupied := False;
+               --  An expired key is absent; its slot stays as it is (see Get)
                return;
             else
                Store.Slots (I).Has_TTL     := True;
@@ -373,9 +373,10 @@ package body Nhe_O.KV is
                   and then not Is_Slot_Expired (Store.Slots (I), Now)
                   and then Equal_Ident (Store.Slots (I).Key, Key));
                return;
-            else
-               Store.Slots (I).Occupied := False;
             end if;
+            --  An expired entry counts as absent: Select_Target_Slot below returns its
+            --  slot, which the new value overwrites
+            exit;
          end if;
       end loop;
 
@@ -851,9 +852,16 @@ package body Nhe_O.KV is
       Legacy_Target : KV_Slot_Index;
       Effective_Now : Epoch_Seconds := Now;
       Repair_Stat   : Engine_Status;
+      WAL_Exists    : Boolean;
    begin
       Replayed_Ops := 0;
       Status       := Status_Ok;
+
+      --  A missing WAL is an empty log
+      Check_File_Exists (WAL_Path, WAL_Exists);
+      if not WAL_Exists then
+         return;
+      end if;
 
       --  Drop a torn trailing frame left by a crash during Append_WAL_Frame
       Repair_WAL_Tail (WAL_Path, Repair_Stat);
