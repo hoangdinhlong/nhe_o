@@ -632,7 +632,9 @@ procedure Nhe_O_Main is
          Check (RAG_Status = Status_Ok);
       end if;
       Rollback_Tx (Tx_RAG_Aborted);
-      Rollback_RAG_Tx (RAG_Store, Tx_RAG_Aborted.Id);
+      if RAG_Store.CLOG (Tx_RAG_Aborted.Id) /= Tx_Committed then
+         Rollback_RAG_Tx (RAG_Store, Tx_RAG_Aborted.Id);
+      end if;
       Discard_Staged_Notifications (Tx_RAG_Aborted, RAG_Staging);
       Check (Tx_RAG_Aborted.State = Tx_Aborted and then RAG_Staging.Count = 0);
 
@@ -1159,7 +1161,9 @@ procedure Nhe_O_Main is
       Put_Doc (T1, S1, Stg_1, 4, Dup_Key, "duplicate key", 9.0, St);
       Check (St = Status_Invalid_Syntax and then not Eng.Docs (4).Active);
       Rollback_Tx (T1);
-      Rollback_RAG_Tx (Eng, T1.Id);
+      if Eng.CLOG (T1.Id) /= Tx_Committed then
+         Rollback_RAG_Tx (Eng, T1.Id);
+      end if;
       Discard_Staged_Notifications (T1, Stg_1);
 
       --  R13-RAG-07: deleting a transaction's own new version keeps the version it
