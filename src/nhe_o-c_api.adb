@@ -188,6 +188,26 @@ package body Nhe_O.C_API is
       G_Write_Fault := False;
    end Reset_Runtime;
 
+   --  Delete the scratch files of an nhe_o_init database (no-op otherwise); Removed is
+   --  True iff none of them is left on disk
+   procedure Remove_Scratch_Files (Removed : out Boolean)
+     with Global => (Input => (G_Ephemeral, G_DB_Path, G_WAL_Path)),
+          Always_Terminates
+   is
+      DB_Gone   : Boolean := True;
+      WAL_Gone  : Boolean := True;
+      Ckpt_Gone : Boolean := True;
+   begin
+      if G_Ephemeral and then G_DB_Path.Length > 0 then
+         Delete_File_If_Exists (G_DB_Path, DB_Gone);
+      end if;
+      if G_Ephemeral and then G_WAL_Path.Length in 1 .. Max_WAL_Path_Len then
+         Delete_File_If_Exists (G_WAL_Path, WAL_Gone);
+         Delete_File_If_Exists (Checkpoint_Path (G_WAL_Path), Ckpt_Gone);
+      end if;
+      Removed := DB_Gone and then WAL_Gone and then Ckpt_Gone;
+   end Remove_Scratch_Files;
+
    procedure C_Init (Out_Status : out int) is
       Pid       : constant Natural := Get_Process_Id;
       DB_Gone   : Boolean;
@@ -213,21 +233,11 @@ package body Nhe_O.C_API is
    end C_Init;
 
    procedure C_Close (Out_Status : out int) is
-      DB_Gone   : Boolean := True;
-      WAL_Gone  : Boolean := True;
-      Ckpt_Gone : Boolean := True;
+      Removed : Boolean;
    begin
-      if G_Ephemeral and then G_DB_Path.Length > 0 then
-         Delete_File_If_Exists (G_DB_Path, DB_Gone);
-      end if;
-      if G_Ephemeral and then G_WAL_Path.Length in 1 .. Max_WAL_Path_Len then
-         Delete_File_If_Exists (G_WAL_Path, WAL_Gone);
-         Delete_File_If_Exists (Checkpoint_Path (G_WAL_Path), Ckpt_Gone);
-      end if;
+      Remove_Scratch_Files (Removed);
       Reset_Runtime;
-      Out_Status :=
-        (if DB_Gone and then WAL_Gone and then Ckpt_Gone then C_Status_Ok
-         else C_Status_IO_Error);
+      Out_Status := (if Removed then C_Status_Ok else C_Status_IO_Error);
    end C_Close;
 
    procedure C_Checkpoint (Out_Status : out int) is
@@ -385,10 +395,14 @@ package body Nhe_O.C_API is
       Frame_Tx    : Valid_Tx_Id;
       Frame_Pg    : Valid_Page_Id;
       Frame_Page  : Page_Buffer;
+      Scratch_Gone : Boolean;
       pragma Warnings (Off, KV_Replayed);
       pragma Warnings (Off, Frame_Pg);
       pragma Warnings (Off, Frame_Page);
+      pragma Warnings (Off, Scratch_Gone);
    begin
+      --  Opening a database releases an nhe_o_init scratch database (best effort)
+      Remove_Scratch_Files (Scratch_Gone);
       Reset_Runtime;
 
       if DB_Path_Len <= 0 or else DB_Path_Len > int (Max_Text_Len)

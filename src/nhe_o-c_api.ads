@@ -102,7 +102,8 @@ package Nhe_O.C_API is
           External_Name => "nhe_o_init";
 
    --  Initialize embedded Nhe_O C runtime state with caller-specified DB/WAL paths
-   --  and embedding dimension Dim in 1 .. 4096, recovering existing state when present.
+   --  and embedding dimension Dim in 1 .. 4096, recovering existing state when present
+   --  (the scratch files of a previous nhe_o_init database are deleted first).
    --  Relative paths are resolved against the current directory once, here; after that
    --  resolution the WAL path must leave room for the 5-byte ".ckpt" checkpoint suffix
    --  (at most Max_Text_Len - 5 bytes) and the two paths must name different files (also
@@ -116,10 +117,9 @@ package Nhe_O.C_API is
       WAL_Path_Len : in     int;
       Dim          : in     int;
       Out_Status   :    out int)
-     with Global        => (Output => (G_Initialized, G_Ephemeral, G_Next_Tx, G_Next_KV_Seq, G_DB_Path,
-                                       G_WAL_Path, G_KV_Store, G_Broker, G_RAG_Engine,
-                                       G_Write_Fault),
-                            In_Out => G_Scratch_Engine),
+     with Global        => (In_Out => (G_Ephemeral, G_DB_Path, G_WAL_Path, G_Scratch_Engine),
+                            Output => (G_Initialized, G_Next_Tx, G_Next_KV_Seq, G_KV_Store,
+                                       G_Broker, G_RAG_Engine, G_Write_Fault)),
           Always_Terminates,
           Export        => True,
           Convention    => C,

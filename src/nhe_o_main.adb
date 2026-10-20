@@ -1739,11 +1739,23 @@ begin
    Check_File_Exists (Make_Text ("/tmp/nhe_o_capi_alias.db"), C_File_Found);
    Check (not C_File_Found);
 
-   --  Persistent database: checkpoint compacts the WAL, reopening recovers the same state
+   --  Persistent database: checkpoint compacts the WAL, reopening recovers the same state.
+   --  Opening it releases the scratch files of the preceding nhe_o_init database.
+   C_Init (C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   C_KV_Set (C_Key_Buf, 3, C_Val_Buf, 2, 1000, 0, C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   C_Saved_WAL := G_WAL_Path;
    Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_capi_persist.db"));
    Delete_File_If_Exists (Make_Text ("/tmp/nhe_o_capi_persist.wal"));
    C_Init_With_Paths (C_DB_Buf, 26, C_WAL_Buf, 27, 3, C_Rc);
-   Check (C_Rc = C_Status_Ok);
+   Check (C_Rc = C_Status_Ok and then not G_Ephemeral);
+   if C_Saved_WAL.Length > 0 then
+      Check_File_Exists (C_Saved_WAL, C_File_Found);
+      Check (not C_File_Found);
+   else
+      Check (False);
+   end if;
    C_KV_Set (C_Key_Buf, 3, C_Val_Buf, 2, 1000, 0, C_Rc);
    Check (C_Rc = C_Status_Ok);
    C_RAG_Ingest_ND (1, C_Val_Buf, 2, C_Vec_ND_A, 3, 2, C_Rc);
