@@ -302,6 +302,7 @@ procedure Nhe_O_Main is
    Field_Hit    : Boolean;
    Field_Val    : Bounded_Text;
    Field_Kind   : JSONB_Value_Kind;
+   Field_Null   : Boolean;
 
    --  4 & 5. ACID Transaction, MVCC, WAL Recovery & 4KB TOAST Overflow variables
    Next_Tx       : Valid_Tx_Id := 1;
@@ -924,8 +925,8 @@ begin
    Check (JSON_Stat = Status_Ok and then Doc_Parsed.Count = 4);
    Get_Field (Doc_Parsed, Make_Ident ("engine"), Field_Hit, Field_Val, Field_Kind);
    Check (Field_Hit and then Field_Kind = JSONB_String and then Equal_Text (Field_Val, Make_Text ("""Nhe_O""")));
-   Get_Field_Text (Doc_Parsed, Make_Ident ("engine"), Field_Hit, Field_Val);
-   Check (Field_Hit and then Equal_Text (Field_Val, Make_Text ("Nhe_O")));
+   Get_Field_Text (Doc_Parsed, Make_Ident ("engine"), Field_Hit, Field_Val, Field_Null);
+   Check (Field_Hit and then not Field_Null and then Equal_Text (Field_Val, Make_Text ("Nhe_O")));
 
    --  Verify strict delimiter checks in Parse_JSONB
    Parse_JSONB (Make_Text ("{,""a"":1}"), Doc_Parsed, JSON_Stat);
@@ -935,7 +936,7 @@ begin
    Parse_JSONB (Make_Text ("{""a"":1,,""b"":2}"), Doc_Parsed, JSON_Stat);
    Check (JSON_Stat = Status_Invalid_Syntax);
 
-   --  Verify >16 duplicate keys with 1 unique key succeed, and >16-element array @> fails closed
+   --  Verify >16 duplicate keys with 1 unique key succeed, and nested arrays of any width compare (JS-4)
    Parse_JSONB (Make_Text ("{""k"":1,""k"":2,""k"":3,""k"":4,""k"":5,""k"":6,""k"":7,""k"":8,""k"":9,""k"":10,""k"":11,""k"":12,""k"":13,""k"":14,""k"":15,""k"":16,""k"":17}"), Doc_Parsed, JSON_Stat);
    Check (JSON_Stat = Status_Ok and then Doc_Parsed.Count = 1);
    Parse_JSONB (Make_Text ("{""arr"":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]}"), Doc_Parsed, JSON_Stat);
@@ -943,7 +944,8 @@ begin
    Parse_JSONB (Make_Text ("{""arr"":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,999]}"), Doc_Filter, JSON_Stat);
    Check (JSON_Stat = Status_Ok
           and then not Contains (Doc_Parsed, Doc_Filter)
-          and then not Contains (Doc_Filter, Doc_Filter));
+          and then Contains (Doc_Filter, Doc_Parsed)
+          and then Contains (Doc_Filter, Doc_Filter));
 
    --  Verify RFC 8259 escape decoding (including \uXXXX) and depth-4 nested @> containment
    Parse_JSONB (Make_Text ("{""msg"":""a\nb\u0041"", ""num"":1.0, ""sub"":{""nested"":{""leaf"":{""y"":2,""x"":1.0}}}, ""arr"":[{""k"":1.0,""m"":2}]}"), Doc_Parsed, JSON_Stat);
@@ -968,9 +970,175 @@ begin
    Check (Has_Key (Doc_Main, Make_Ident ("engine")));
    Get_Field (Doc_Main, Make_Ident ("engine"), Field_Hit, Field_Val, Field_Kind);
    Check (Field_Hit and then Field_Kind = JSONB_String and then Equal_Text (Field_Val, Make_Text ("""Nhe_O""")));
-   Get_Field_Text (Doc_Main, Make_Ident ("engine"), Field_Hit, Field_Val);
-   Check (Field_Hit and then Equal_Text (Field_Val, Make_Text ("Nhe_O")));
+   Get_Field_Text (Doc_Main, Make_Ident ("engine"), Field_Hit, Field_Val, Field_Null);
+   Check (Field_Hit and then not Field_Null and then Equal_Text (Field_Val, Make_Text ("Nhe_O")));
    Check (Contains (Doc_Main, Doc_Filter));
+
+   --  Regression checks for the JSON engine audit findings JS-1 .. JS-8
+   declare
+      BS        : constant Character := '\';
+      Emoji     : constant String    :=
+        [Character'Val (16#F0#), Character'Val (16#9F#),
+         Character'Val (16#98#), Character'Val (16#80#)];
+      Esc_Emoji : constant String    := BS & "ud83d" & BS & "ude00";
+   begin
+      --  JS-1: a \uXXXX surrogate pair decodes to one 4-byte UTF-8 sequence (keys and values);
+      --  lone or reversed surrogates are rejected by the validator and the decoder alike
+      Check (Is_Valid_JSON (Make_Text ("""" & Esc_Emoji & """")));
+      Check (not Is_Valid_JSON (Make_Text ("""" & BS & "ud800""")));
+      Check (not Is_Valid_JSON (Make_Text ("""" & BS & "udc00" & BS & "ud83d""")));
+      Check (not Is_Valid_JSON (Make_Text ("""" & BS & "ud83dx""")));
+      Parse_JSONB (Make_Text ("{""" & Esc_Emoji & """:""" & Esc_Emoji & """}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Ok and then Has_Key (Doc_Parsed, Make_Ident (Emoji)));
+      Get_Field_Text (Doc_Parsed, Make_Ident (Emoji), Field_Hit, Field_Val, Field_Null);
+      Check (Field_Hit and then not Field_Null and then Equal_Text (Field_Val, Make_Text (Emoji)));
+      Parse_JSONB (Make_Text ("{""" & Emoji & """:""" & Emoji & """}"), Doc_Filter, JSON_Stat);
+      Check (JSON_Stat = Status_Ok
+             and then Contains (Doc_Parsed, Doc_Filter)
+             and then Contains (Doc_Filter, Doc_Parsed));
+      Parse_JSONB (Make_Text ("{""a"":[{""" & Emoji & """:""" & Emoji & """}]}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Ok);
+      Parse_JSONB (Make_Text ("{""a"":[{""" & Esc_Emoji & """:""" & Esc_Emoji & """}]}"), Doc_Filter, JSON_Stat);
+      Check (JSON_Stat = Status_Ok and then Contains (Doc_Parsed, Doc_Filter));
+      Parse_JSONB (Make_Text ("{""a"":""" & BS & "udc00" & BS & "ud83d""}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Invalid_Syntax);
+      Parse_JSONB (Make_Text ("{""a"":[""" & BS & "ud800""]}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Invalid_Syntax);
+
+      --  JS-5: strings must be well-formed UTF-8 (invalid lead, truncated, overlong,
+      --  surrogate and > U+10FFFF sequences rejected), in JSON text and Put_Field values
+      Check (not Is_Valid_JSON (Make_Text ("""" & Character'Val (16#FF#) & """")));
+      Check (not Is_Valid_JSON (Make_Text ("""" & Character'Val (16#C3#) & """")));
+      Check (not Is_Valid_JSON (Make_Text ("""" & Character'Val (16#C0#) & Character'Val (16#AF#) & """")));
+      Check (not Is_Valid_JSON (Make_Text ("""" & Character'Val (16#ED#) & Character'Val (16#A0#)
+                                           & Character'Val (16#80#) & """")));
+      Check (not Is_Valid_JSON (Make_Text ("""" & Character'Val (16#F4#) & Character'Val (16#90#)
+                                           & Character'Val (16#80#) & Character'Val (16#80#) & """")));
+      Check (Is_Valid_JSON (Make_Text ("""" & Emoji & Character'Val (16#C3#) & Character'Val (16#A9#) & """")));
+      Parse_JSONB (Make_Text ("{""a"":""" & Character'Val (16#C3#) & """}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Invalid_Syntax);
+      Check (not Is_Valid_Field_Value (Make_Text ("x" & Character'Val (16#C3#)), JSONB_String));
+
+      --  JS-2: `->` never truncates: a string is storable only if its quoted form fits
+      Check (Is_Valid_Field_Value (Make_Text ([1 .. 510 => 'a']), JSONB_String));
+      Check (not Is_Valid_Field_Value (Make_Text ([1 .. 511 => 'a']), JSONB_String));
+      Doc_Parsed := (others => <>);
+      Put_Field (Doc_Parsed, Make_Ident ("k"), Make_Text ([1 .. 509 => 'a'] & """bc"), JSONB_String, JSON_Stat);
+      Check (JSON_Stat = Status_Invalid_Syntax and then Doc_Parsed.Count = 0);
+      Put_Field (Doc_Parsed, Make_Ident ("k"), Make_Text ([1 .. 502 => 'x'] & ASCII.SOH & """"), JSONB_String,
+                 JSON_Stat);
+      Check (JSON_Stat = Status_Ok);
+      Get_Field (Doc_Parsed, Make_Ident ("k"), Field_Hit, Field_Val, Field_Kind);
+      Check (Field_Hit
+             and then Field_Val.Length = Max_Text_Len
+             and then Field_Val.Data (503) = 'x'
+             and then Field_Val.Data (504) = BS
+             and then Field_Val.Data (509) = '1'
+             and then Field_Val.Data (510) = BS
+             and then Field_Val.Data (511) = '"'
+             and then Field_Val.Data (Max_Text_Len) = '"');
+
+      --  JS-3: `@>` recurses structurally at every depth (no raw-text fallback)
+      Parse_JSONB (Make_Text ("{""a"":[[[[1,2]]]]}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Ok);
+      Parse_JSONB (Make_Text ("{""a"":[[[[1.0]]]]}"), Doc_Filter, JSON_Stat);
+      Check (JSON_Stat = Status_Ok and then Contains (Doc_Parsed, Doc_Filter));
+      Parse_JSONB (Make_Text ("{""a"":[[[[3]]]]}"), Doc_Filter, JSON_Stat);
+      Check (JSON_Stat = Status_Ok and then not Contains (Doc_Parsed, Doc_Filter));
+      Parse_JSONB (Make_Text ("{""a"":{""b"":{""c"":{""d"":[[1,2]]}}}}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Ok);
+      Parse_JSONB (Make_Text ("{""a"":{""b"":{""c"":{""d"":[[1]]}}}}"), Doc_Filter, JSON_Stat);
+      Check (JSON_Stat = Status_Ok and then Contains (Doc_Parsed, Doc_Filter));
+      Parse_JSONB (Make_Text ("{""a"":{""b"":{""c"":{""d"":{""e"":{""x"":1,""y"":2}}}}}}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Ok);
+      Parse_JSONB (Make_Text ("{""a"":{""b"":{""c"":{""d"":{""e"":{""y"":2,""x"":1}}}}}}"), Doc_Filter, JSON_Stat);
+      Check (JSON_Stat = Status_Ok
+             and then Contains (Doc_Parsed, Doc_Filter)
+             and then Contains (Doc_Filter, Doc_Parsed));
+      Parse_JSONB (Make_Text ("{""a"":[{""b"":{""c"":{""d"":{""e"":1}}}}]}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Ok);
+      Parse_JSONB (Make_Text ("{""a"":[{""b"":{""c"":{""d"":{}}}}]}"), Doc_Filter, JSON_Stat);
+      Check (JSON_Stat = Status_Ok
+             and then Contains (Doc_Parsed, Doc_Filter)
+             and then not Contains (Doc_Filter, Doc_Parsed));
+      --  Kinds must match at every depth (an array element never matches a nested array)
+      Parse_JSONB (Make_Text ("{""a"":[[1]]}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Ok);
+      Parse_JSONB (Make_Text ("{""a"":[1]}"), Doc_Filter, JSON_Stat);
+      Check (JSON_Stat = Status_Ok and then not Contains (Doc_Parsed, Doc_Filter));
+      --  Nested duplicate keys: the last occurrence wins on both sides (PostgreSQL jsonb)
+      Parse_JSONB (Make_Text ("{""a"":{""k"":1,""k"":2}}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Ok);
+      Parse_JSONB (Make_Text ("{""a"":{""k"":2}}"), Doc_Filter, JSON_Stat);
+      Check (JSON_Stat = Status_Ok
+             and then Contains (Doc_Parsed, Doc_Filter)
+             and then Contains (Doc_Filter, Doc_Parsed));
+      Parse_JSONB (Make_Text ("{""a"":{""k"":1}}"), Doc_Filter, JSON_Stat);
+      Check (JSON_Stat = Status_Ok and then not Contains (Doc_Parsed, Doc_Filter));
+
+      --  JS-4: every accepted document contains itself; nested width is unbounded and the
+      --  remaining structural limits (key length, nesting depth) are enforced at ingest
+      Parse_JSONB (Make_Text ("{""a"":{""k0"":0,""k1"":1,""k2"":2,""k3"":3,""k4"":4,""k5"":5,""k6"":6,"
+                              & """k7"":7,""k8"":8,""k9"":9,""k10"":10,""k11"":11,""k12"":12,""k13"":13,"
+                              & """k14"":14,""k15"":15,""k16"":16}}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Ok and then Contains (Doc_Parsed, Doc_Parsed));
+      Parse_JSONB (Make_Text ("{""a"":{""k16"":16.0}}"), Doc_Filter, JSON_Stat);
+      Check (JSON_Stat = Status_Ok and then Contains (Doc_Parsed, Doc_Filter));
+      Parse_JSONB (Make_Text ("{""a"":{""" & [1 .. Max_Ident_Len => 'k'] & """:1}}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Ok and then Contains (Doc_Parsed, Doc_Parsed));
+      Parse_JSONB (Make_Text ("{""a"":{""" & [1 .. Max_Ident_Len + 1 => 'k'] & """:1}}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Capacity_Exceeded and then Doc_Parsed.Count = 0);
+      Check (not Is_Valid_Field_Value (Make_Text ("{""" & [1 .. Max_Ident_Len + 1 => 'k'] & """:1}"),
+                                       JSONB_Object));
+      Parse_JSONB (Make_Text ("{""a"":" & [1 .. Max_JSONB_Depth - 1 => '['] & [1 .. Max_JSONB_Depth - 1 => ']']
+                              & "}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Ok and then Contains (Doc_Parsed, Doc_Parsed));
+      Parse_JSONB (Make_Text ("{""a"":" & [1 .. Max_JSONB_Depth => '['] & [1 .. Max_JSONB_Depth => ']']
+                              & "}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Capacity_Exceeded);
+      Check (Is_Valid_Field_Value
+               (Make_Text ([1 .. Max_JSONB_Depth - 1 => '['] & [1 .. Max_JSONB_Depth - 1 => ']']), JSONB_Array));
+      Check (not Is_Valid_Field_Value
+                   (Make_Text ([1 .. Max_JSONB_Depth => '['] & [1 .. Max_JSONB_Depth => ']']), JSONB_Array));
+
+      --  JS-6: numbers compare exactly; values PostgreSQL numeric rejects are rejected at ingest
+      Parse_JSONB (Make_Text ("{""a"":1e500000}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Capacity_Exceeded);
+      Check (Is_Valid_Field_Value (Make_Text ("1e131071"), JSONB_Number));
+      Check (not Is_Valid_Field_Value (Make_Text ("1e131072"), JSONB_Number));
+      Check (Is_Valid_Field_Value (Make_Text ("-1.5e-16382"), JSONB_Number));
+      Check (not Is_Valid_Field_Value (Make_Text ("1e-16384"), JSONB_Number));
+      Check (not Is_Valid_Field_Value (Make_Text ("[1,1e999999]"), JSONB_Array));
+      Parse_JSONB (Make_Text ("{""a"":1e131071,""b"":[0.5e-16382]}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Ok);
+      Parse_JSONB (Make_Text ("{""a"":10e131070,""b"":[5e-16383]}"), Doc_Filter, JSON_Stat);
+      Check (JSON_Stat = Status_Ok
+             and then Contains (Doc_Parsed, Doc_Filter)
+             and then Contains (Doc_Filter, Doc_Parsed));
+      Parse_JSONB (Make_Text ("{""a"":1e131070}"), Doc_Filter, JSON_Stat);
+      Check (JSON_Stat = Status_Ok and then not Contains (Doc_Parsed, Doc_Filter));
+
+      --  JS-7: `->>` maps JSON null to SQL NULL, distinct from the string "null"
+      Parse_JSONB (Make_Text ("{""a"":null,""b"":""null""}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Ok);
+      Get_Field_Text (Doc_Parsed, Make_Ident ("a"), Field_Hit, Field_Val, Field_Null);
+      Check (Field_Hit and then Field_Null and then Field_Val.Length = 0);
+      Get_Field_Text (Doc_Parsed, Make_Ident ("b"), Field_Hit, Field_Val, Field_Null);
+      Check (Field_Hit and then not Field_Null and then Equal_Text (Field_Val, Make_Text ("null")));
+      Get_Field_Text (Doc_Parsed, Make_Ident ("zz"), Field_Hit, Field_Val, Field_Null);
+      Check (not Field_Hit and then not Field_Null and then Field_Val.Length = 0);
+
+      --  JS-8: empty object keys are rejected at every depth (keys are 1 .. Max_Ident_Len bytes),
+      --  although `{"":1}` remains valid RFC 8259 JSON
+      Check (Is_Valid_JSON (Make_Text ("{"""":1}")));
+      Parse_JSONB (Make_Text ("{"""":1}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Invalid_Syntax);
+      Parse_JSONB (Make_Text ("{""a"":{""x"":1,"""":2}}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Invalid_Syntax);
+      Parse_JSONB (Make_Text ("{""a"":[{"""":1}]}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Invalid_Syntax);
+      Check (not Is_Valid_Field_Value (Make_Text ("[{"""":1}]"), JSONB_Array));
+   end;
    Print_Line ("  => Passed: RFC 8259 JSON validator, escape decoding, and `?`, `->`, `->>`, `@>` verified.");
 
    --  4. Verify ACID MVCC Visibility, CLOG, Slotted Page & Disk WAL/Page Persistence
