@@ -256,6 +256,9 @@ procedure Nhe_O_Main is
    Vec_Max       : constant Vector_Value := Make_Vector_3D (Max_Component, 0.0, 0.0);
    Vec_Small     : constant Vector_Value := Make_Vector_3D (1.0e-7, 0.0, 0.0);
    Vec_Zero      : constant Vector_Value := Make_Vector_3D (0.0, 0.0, 0.0);
+   Vec_Tiny      : constant Vector_Value := Make_Vector_3D (1.0e-10, 1.0e-10, 0.0);
+   Vec_Tiny_Neg  : constant Vector_Value := Make_Vector_3D (-1.0e-10, -1.0e-10, 0.0);
+   Vec_Micro     : constant Vector_Value := Make_Vector_3D (1.0e-37, 0.0, 0.0);
    Vec_4096_A    : constant Vector_Value := (Dim => 4096, Elements => [1 => 1.0, 2048 => -1.0, 4096 => 0.5, others => 0.25]);
    Vec_4096_B    : constant Vector_Value := (Dim => 4096, Elements => [1 => 1.0, 2048 =>  1.0, 4096 => -0.5, others => 0.25]);
    Q_Int8_A      : Quantized_Int8_Vector;
@@ -359,6 +362,10 @@ procedure Nhe_O_Main is
    BTree_Dec_Nd  : BTree_Node;
    BTree_Dec_Ok  : Boolean;
    Big_Key_Base  : constant Integer_64 := 5_000_000_000;
+   BTree_Trunc   : Boolean;
+   BTree_Nodes_0 : BTree_Node_Count;
+   BTree_Fill    : Natural;
+   Tree_Snap     : BTree_Index;
 
    --  7. Multi-Layer HNSW Graph Index variables
    Graph_Idx     : HNSW_Index;
@@ -366,6 +373,10 @@ procedure Nhe_O_Main is
    KNN_Float_Res : HNSW_Search_Result;
    KNN_Int8_Res  : HNSW_Search_Result;
    KNN_Bin_Res   : HNSW_Search_Result;
+   Graph_1D      : HNSW_Index;
+   HNSW_Snap     : HNSW_Node;
+   Vec_Q1        : constant Vector_Value := (Dim => 1, Elements => [1 => 1.0, others => 0.0]);
+   Vec_Q2        : constant Vector_Value := (Dim => 1, Elements => [1 => 2.0, others => 0.0]);
 
    --  8. Redis-Compatible Key-Value Cache variables
    Cache      : KV_Store;
@@ -864,6 +875,16 @@ begin
    Check (Cos_AB < 0.001 and then Cos_Max < 0.001 and then Cos_Small < 0.001);
    Check (NIP_AC >= -0.001 and then NIP_AC <= 0.001);
 
+   --  Verify scale-invariant Cosine_Distance (IDX-3): tiny vectors keep their
+   --  direction, only exact all-zero vectors map to the documented 1.0
+   Check (Cosine_Distance (Vec_Tiny, Vec_Tiny) < 0.001);
+   Check (Cosine_Distance (Vec_Tiny, Vec_Tiny_Neg) > 1.999);
+   Check (Cosine_Distance (Vec_Micro, Vec_Max) < 0.001);
+   Check (Cosine_Distance (Vec_Micro, Make_Vector_3D (0.0, 1.0e-37, 0.0)) in 0.999 .. 1.001);
+   Check (Cosine_Distance (Vec_Tiny, Make_Vector_3D (1.0e5, 1.0e5, 0.0)) < 0.001);
+   Check (Cosine_Distance (Vec_Zero, Vec_Zero) = 1.0
+          and then Cosine_Distance (Vec_Tiny, Vec_Zero) = 1.0);
+
    --  Verify 4096-D Scalar (Int8) and Binary (1-bit Hamming) quantization
    Q_Int8_A    := Quantize_To_Int8 (Vec_4096_A);
    Q_Int8_B    := Quantize_To_Int8 (Vec_4096_B);
@@ -1173,6 +1194,129 @@ begin
    --  Verify Is_Valid_Node rejects Node_Internal with Num_Keys = 0 and non-root leaf with Num_Keys < 2
    Check (not Is_Valid_Node ((Kind => Node_Internal, Page_Id => 1, Num_Keys => 0, Next_Leaf => 0, others => <>)));
    Check (not Is_Valid_Node ((Kind => Node_Leaf, Page_Id => 2, Num_Keys => 1, Next_Leaf => 0, others => <>)));
+
+   --  Verify Delete_Key underflow repair (IDX-1): descending fill 60 .. 1, then
+   --  Delete_Key (1), Delete_Key (2) keeps all 58 survivors, never grows
+   --  Node_Count, and leaves every node valid and page-encodable
+   Init_BTree (Tree_Idx);
+   for K in reverse 1 .. 60 loop
+      pragma Loop_Invariant
+        (Tree_Idx.Node_Count in 1 .. Max_BTree_Nodes
+         and then Tree_Idx.Root_Node in 1 .. Tree_Idx.Node_Count);
+      Insert_Key
+        (Tree   => Tree_Idx,
+         Key    => Integer_64 (K),
+         Ptr    => (Target_Page => K, Target_Slot => K, TOAST_Root => 0),
+         Status => BTree_Stat);
+      Check (BTree_Stat = Status_Ok);
+   end loop;
+   BTree_Nodes_0 := Tree_Idx.Node_Count;
+   Delete_Key (Tree_Idx, 1, BTree_Del_Ok);
+   Check (BTree_Del_Ok);
+   Delete_Key (Tree_Idx, 2, BTree_Del_Ok);
+   Check (BTree_Del_Ok
+          and then Tree_Idx.Total_Keys = 58
+          and then Tree_Idx.Node_Count <= BTree_Nodes_0);
+   for K in 3 .. 60 loop
+      pragma Loop_Invariant
+        (Tree_Idx.Node_Count in 1 .. Max_BTree_Nodes
+         and then Tree_Idx.Root_Node in 1 .. Tree_Idx.Node_Count);
+      Search_Key (Tree_Idx, Integer_64 (K), BTree_Hit, BTree_Ptr);
+      Check (BTree_Hit and then BTree_Ptr.Target_Page = K and then BTree_Ptr.Target_Slot = K);
+   end loop;
+   Range_Scan (Tree_Idx, 1, 60, BTree_Scan, BTree_Trunc);
+   Check (not BTree_Trunc
+          and then BTree_Scan.Count = 58
+          and then BTree_Scan.Items (1).Key = 3
+          and then BTree_Scan.Items (58).Key = 60);
+   for N in 1 .. Tree_Idx.Node_Count loop
+      pragma Loop_Invariant
+        (Tree_Idx.Node_Count in 1 .. Max_BTree_Nodes
+         and then Tree_Idx.Root_Node in 1 .. Tree_Idx.Node_Count);
+      Check (Is_Valid_Node (Tree_Idx.Nodes (N)));
+      Encode_Node_Page (Tree_Idx.Nodes (N), BTree_Page);
+      Decode_Node_Page (BTree_Page, BTree_Dec_Nd, BTree_Dec_Ok);
+      Check (BTree_Dec_Ok and then BTree_Dec_Nd = Tree_Idx.Nodes (N));
+   end loop;
+   Insert_Key (Tree_Idx, 1, (Target_Page => 1, Target_Slot => 1, TOAST_Root => 0), BTree_Stat);
+   Check (BTree_Stat = Status_Ok);
+   Insert_Key (Tree_Idx, 2, (Target_Page => 2, Target_Slot => 2, TOAST_Root => 0), BTree_Stat);
+   Check (BTree_Stat = Status_Ok and then Tree_Idx.Total_Keys = 60);
+
+   --  Drain all 60 keys in a scrambled order: exact Total_Keys accounting down
+   --  to an empty single-leaf tree
+   for I in 1 .. 60 loop
+      pragma Loop_Invariant
+        (Tree_Idx.Node_Count in 1 .. Max_BTree_Nodes
+         and then Tree_Idx.Root_Node in 1 .. Tree_Idx.Node_Count);
+      Delete_Key (Tree_Idx, Integer_64 ((I * 37) mod 60 + 1), BTree_Del_Ok);
+      Check (BTree_Del_Ok and then Tree_Idx.Total_Keys = 60 - I);
+   end loop;
+   Check (Tree_Idx.Total_Keys = 0 and then Tree_Idx.Node_Count = 1);
+
+   --  Ascending fill exhausts the 32-node pool with half-full leaves; the
+   --  failing insert is atomic, and one underflowing delete repacks the tree
+   --  densely so inserts succeed again without losing any key
+   Init_BTree (Tree_Idx);
+   BTree_Fill := 0;
+   for K in 1 .. 200 loop
+      pragma Loop_Invariant
+        (Tree_Idx.Node_Count in 1 .. Max_BTree_Nodes
+         and then Tree_Idx.Root_Node in 1 .. Tree_Idx.Node_Count
+         and then BTree_Fill = K - 1);
+      Tree_Snap := Tree_Idx;
+      Insert_Key
+        (Tree   => Tree_Idx,
+         Key    => Integer_64 (K),
+         Ptr    => (Target_Page => K, Target_Slot => K, TOAST_Root => 0),
+         Status => BTree_Stat);
+      if BTree_Stat /= Status_Ok then
+         Check (BTree_Stat = Status_Capacity_Exceeded and then Tree_Idx = Tree_Snap);
+         exit;
+      end if;
+      BTree_Fill := K;
+   end loop;
+   Check (BTree_Fill in 40 .. 60
+          and then Tree_Idx.Total_Keys = BTree_Fill
+          and then Tree_Idx.Node_Count = Max_BTree_Nodes);
+   Delete_Key (Tree_Idx, 1, BTree_Del_Ok);
+   Check (BTree_Del_Ok
+          and then Tree_Idx.Node_Count < Max_BTree_Nodes
+          and then Tree_Idx.Total_Keys = BTree_Fill - 1);
+   Insert_Key (Tree_Idx, 1_000, (Target_Page => 1, Target_Slot => 1, TOAST_Root => 0), BTree_Stat);
+   Check (BTree_Stat = Status_Ok and then Tree_Idx.Total_Keys = BTree_Fill);
+   for K in 2 .. BTree_Fill loop
+      pragma Loop_Invariant
+        (Tree_Idx.Node_Count in 1 .. Max_BTree_Nodes
+         and then Tree_Idx.Root_Node in 1 .. Tree_Idx.Node_Count);
+      Search_Key (Tree_Idx, Integer_64 (K), BTree_Hit, BTree_Ptr);
+      Check (BTree_Hit and then BTree_Ptr.Target_Page = K);
+   end loop;
+
+   --  Verify Range_Scan truncation reporting (IDX-4): 66 keys, 64-entry cap
+   Init_BTree (Tree_Idx);
+   for K in reverse 1 .. 66 loop
+      pragma Loop_Invariant
+        (Tree_Idx.Node_Count in 1 .. Max_BTree_Nodes
+         and then Tree_Idx.Root_Node in 1 .. Tree_Idx.Node_Count);
+      Insert_Key
+        (Tree   => Tree_Idx,
+         Key    => Integer_64 (K),
+         Ptr    => (Target_Page => K, Target_Slot => K, TOAST_Root => 0),
+         Status => BTree_Stat);
+      Check (BTree_Stat = Status_Ok);
+   end loop;
+   Range_Scan (Tree_Idx, 1, 66, BTree_Scan, BTree_Trunc);
+   Check (BTree_Trunc
+          and then BTree_Scan.Count = Max_Scan_Results
+          and then BTree_Scan.Items (Max_Scan_Results).Key = 64);
+   Range_Scan (Tree_Idx, 3, 66, BTree_Scan, BTree_Trunc);
+   Check (not BTree_Trunc
+          and then BTree_Scan.Count = Max_Scan_Results
+          and then BTree_Scan.Items (1).Key = 3
+          and then BTree_Scan.Items (Max_Scan_Results).Key = 66);
+   Range_Scan (Tree_Idx, 1, 66, BTree_Scan);
+   Check (BTree_Scan.Count = Max_Scan_Results and then BTree_Scan.Items (1).Key = 1);
    Print_Line ("  => Passed: 20-key multi-level B+Tree splits, Delete_Key compaction, 64-bit keys, and CRC32 page verified.");
 
    --  7. Verify Multi-Layer HNSW Graph Index (`Nhe_O.HNSW`)
@@ -1225,6 +1369,92 @@ begin
 
    Search_KNN (Graph_Idx, Make_Vector_3D (1.0, 0.0, 0.0), Encoding_Binary_1Bit, K => 2, Results => KNN_Bin_Res);
    Check (KNN_Bin_Res.Count = 2 and then KNN_Bin_Res.Items (1).Doc_Id in 1 .. 2);
+
+   --  Verify exact top-K (IDX-2): 1-D docs 1 .. 6 at x = 9, 14, 12, 1, 8, 10
+   --  leave doc 4 (x = 1) without incoming edges; it must still be found
+   Init_HNSW (Graph_1D, Dim => 1);
+   for D in 1 .. 6 loop
+      pragma Loop_Invariant
+        (Graph_1D.Dim = 1
+         and then Graph_1D.Node_Count <= Max_HNSW_Nodes);
+      Insert_Vector
+        (Graph_1D,
+         Doc_Id     => D,
+         Vec        => (Dim      => 1,
+                        Elements => [1      => (case D is
+                                                  when 1      => 9.0,
+                                                  when 2      => 14.0,
+                                                  when 3      => 12.0,
+                                                  when 4      => 1.0,
+                                                  when 5      => 8.0,
+                                                  when others => 10.0),
+                                     others => 0.0]),
+         TOAST_Root => 0,
+         Layer_Hint => 1,
+         Status     => HNSW_Stat);
+      Check (HNSW_Stat = Status_Ok);
+   end loop;
+   Search_KNN (Graph_1D, Vec_Q1, Encoding_Float32, K => 1, Results => KNN_Float_Res);
+   Check (KNN_Float_Res.Count = 1
+          and then KNN_Float_Res.Items (1).Doc_Id = 4
+          and then KNN_Float_Res.Items (1).Distance = 0.0);
+   Search_KNN (Graph_1D, Vec_Q1, Encoding_Int8_SQ8, K => 1, Results => KNN_Int8_Res);
+   Check (KNN_Int8_Res.Count = 1 and then KNN_Int8_Res.Items (1).Doc_Id = 4);
+   Search_KNN (Graph_1D, Vec_Q1, Encoding_Float32, K => 6, Results => KNN_Float_Res);
+   Check (KNN_Float_Res.Count = 6
+          and then KNN_Float_Res.Items (1).Doc_Id = 4
+          and then KNN_Float_Res.Items (2).Doc_Id = 5
+          and then KNN_Float_Res.Items (3).Doc_Id = 1
+          and then KNN_Float_Res.Items (4).Doc_Id = 6
+          and then KNN_Float_Res.Items (5).Doc_Id = 3
+          and then KNN_Float_Res.Items (6).Doc_Id = 2);
+
+   --  Verify Restore_Vector_Node status (IDX-5): restoring doc 1 into a full
+   --  index fails visibly, then succeeds once a slot is freed
+   Init_HNSW (Graph_1D, Dim => 1);
+   for D in 1 .. Max_HNSW_Nodes loop
+      pragma Loop_Invariant
+        (Graph_1D.Dim = 1
+         and then Graph_1D.Node_Count <= Max_HNSW_Nodes);
+      Insert_Vector
+        (Graph_1D,
+         Doc_Id     => D,
+         Vec        => (Dim => 1, Elements => [1 => Float (D), others => 0.0]),
+         TOAST_Root => 0,
+         Layer_Hint => 1,
+         Status     => HNSW_Stat);
+      Check (HNSW_Stat = Status_Ok);
+   end loop;
+   HNSW_Snap := Graph_1D.Nodes (1);
+   Remove_Vector (Graph_1D, Doc_Id => 1);
+   Insert_Vector (Graph_1D, Doc_Id => 33, Vec => (Dim => 1, Elements => [1 => 33.0, others => 0.0]),
+                  TOAST_Root => 0, Layer_Hint => 1, Status => HNSW_Stat);
+   Check (HNSW_Stat = Status_Ok and then Graph_1D.Node_Count = Max_HNSW_Nodes);
+   if HNSW_Snap.Active
+     and then HNSW_Snap.Doc_Id = 1
+     and then HNSW_Snap.Bin_Vec.Dim = Graph_1D.Dim
+   then
+      Restore_Vector_Node (Graph_1D, 1, HNSW_Snap, HNSW_Stat);
+      Check (HNSW_Stat = Status_Capacity_Exceeded);
+      Remove_Vector (Graph_1D, Doc_Id => 33);
+      Restore_Vector_Node (Graph_1D, 1, HNSW_Snap, HNSW_Stat);
+      Check (HNSW_Stat = Status_Ok);
+      Search_KNN (Graph_1D, Vec_Q1, Encoding_Float32, K => 1, Results => KNN_Float_Res);
+      Check (KNN_Float_Res.Count = 1
+             and then KNN_Float_Res.Items (1).Doc_Id = 1
+             and then KNN_Float_Res.Items (1).Distance = 0.0);
+      --  Restoring an inactive snapshot removes the document
+      HNSW_Snap.Active := False;
+      Restore_Vector_Node (Graph_1D, 2, HNSW_Snap, HNSW_Stat);
+      Check (HNSW_Stat = Status_Ok);
+      Search_KNN (Graph_1D, Vec_Q2, Encoding_Float32, K => Max_KNN_Results, Results => KNN_Float_Res);
+      Check (KNN_Float_Res.Count = Max_KNN_Results);
+      for I in 1 .. KNN_Float_Res.Count loop
+         Check (KNN_Float_Res.Items (I).Doc_Id /= 2);
+      end loop;
+   else
+      Check (False);
+   end if;
    Print_Line ("  => Passed: 10-node HNSW graph, Remove_Vector, Doc_Id dedup, and Float32/Int8-SQ8/Binary recall verified.");
 
    --  8. Verify Redis-Compatible Key-Value Cache, TTL & WAL Persistence (`Q-004`)

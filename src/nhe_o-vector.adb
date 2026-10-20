@@ -132,29 +132,173 @@ package body Nhe_O.Vector is
       return Sqrt_Bounded (L2_Distance_Squared (A, B));
    end L2_Distance;
 
+   -------------------------------------------------------------------------
+   --  Scale-Invariant Cosine Distance Helpers
+   -------------------------------------------------------------------------
+
+   --  Largest absolute component of V: 0.0 exactly for the all-zero vector,
+   --  otherwise the magnitude of some component. The loop invariant tracks the
+   --  arg-max index instead of quantifying over the visited prefix, so the
+   --  run-time assertion cost (-gnata) stays O(1) per component at 4096-D.
+   function Max_Abs_Component (V : Vector_Value) return Non_Negative_Float
+     with Global => null,
+          Post   => Max_Abs_Component'Result <= Max_Component
+                    and then (Max_Abs_Component'Result = 0.0
+                              or else (for some I in 1 .. V.Dim =>
+                                         abs V.Elements (I) = Max_Abs_Component'Result))
+   is
+      Max_Abs : Non_Negative_Float := 0.0;
+      Arg_Max : Vector_Dim         := 1;
+   begin
+      for I in 1 .. V.Dim loop
+         pragma Loop_Invariant (Max_Abs <= Max_Component);
+         pragma Loop_Invariant
+           (Max_Abs = 0.0
+            or else (Arg_Max < I and then abs V.Elements (Arg_Max) = Max_Abs));
+         if abs V.Elements (I) > Max_Abs then
+            Max_Abs := abs V.Elements (I);
+            Arg_Max := I;
+         end if;
+      end loop;
+      pragma Assert
+        (Max_Abs = 0.0
+         or else (Arg_Max <= V.Dim and then abs V.Elements (Arg_Max) = Max_Abs));
+      return Max_Abs;
+   end Max_Abs_Component;
+
+   --  A vector whose largest absolute component is below Tiny_Magnitude has
+   --  its components first multiplied by the exact power of two Tiny_Boost,
+   --  so the normalizing reciprocal never exceeds Tiny_Boost (no overflow)
+   Tiny_Magnitude : constant := 2.0 ** (-100);
+   Tiny_Boost     : constant := 2.0 ** 100;
+
+   subtype Unit_Float is Float range -1.0 .. 1.0;
+   subtype Unit_Recip is Float range 0.0 .. Tiny_Boost;
+
+   --  Normalization factors for a vector whose largest absolute component is
+   --  M > 0: component C maps to Unit_Component (C, Boosted, Recip), i.e.
+   --  C * Recip (after C * Tiny_Boost when Boosted), close to C / M.
+   procedure Unit_Scale
+     (M       : in     Non_Negative_Float;
+      Boosted :    out Boolean;
+      Recip   :    out Unit_Recip)
+     with Global => null,
+          Pre    => M > 0.0 and then M <= Max_Component,
+          Post   => Boosted = (M < Tiny_Magnitude)
+                    and then (if not Boosted then Recip > 0.0)
+   is
+      Den : Float;
+   begin
+      Boosted := M < Tiny_Magnitude;
+      if Boosted then
+         Den := M * Tiny_Boost;
+      else
+         Den := M;
+      end if;
+
+      if Den < Tiny_Magnitude then
+         --  Unreachable for IEEE single precision (2**-149 * 2**100 > 2**-100);
+         --  a zero factor makes the vector behave as the zero vector
+         Recip := 0.0;
+      else
+         Recip := Float'Min (1.0 / Den, Tiny_Boost);
+      end if;
+   end Unit_Scale;
+
+   --  Component C scaled into [-1.0, 1.0] with the Unit_Scale factors. For
+   --  the vector's own factors the clamps only absorb last-bit rounding.
+   function Unit_Component
+     (C       : Vector_Component;
+      Boosted : Boolean;
+      Recip   : Unit_Recip) return Unit_Float
+     with Global => null,
+          Post   => (if C = 0.0 then Unit_Component'Result = 0.0)
+   is
+      Num : Float := C;
+      Q   : Float;
+   begin
+      if Boosted then
+         --  abs C <= M < 2**-100, so the exact scaling stays within [-1, 1]
+         Num := Num * Tiny_Boost;
+         if Num > 1.0 then
+            Num := 1.0;
+         elsif Num < -1.0 then
+            Num := -1.0;
+         end if;
+      end if;
+
+      --  Num in [-1.0e6, 1.0e6] and Recip <= 2**100 on every path: no overflow
+      Q := Num * Recip;
+      if Q > 1.0 then
+         return 1.0;
+      elsif Q < -1.0 then
+         return -1.0;
+      else
+         return Q;
+      end if;
+   end Unit_Component;
+
    function Cosine_Distance
      (A, B : Vector_Value) return Float
    is
-      Dot    : constant Float              := Inner_Product (A, B);
-      Norm_A : Non_Negative_Float          :=
-        Sqrt_Bounded (L2_Distance_Squared (A, Vector_Value'(Dim => A.Dim, Elements => [others => 0.0])));
-      Norm_B : Non_Negative_Float          :=
-        Sqrt_Bounded (L2_Distance_Squared (B, Vector_Value'(Dim => B.Dim, Elements => [others => 0.0])));
-      Denom  : Float;
-      Sim    : Float;
-      Dist   : Float;
+      Max_A   : constant Non_Negative_Float := Max_Abs_Component (A);
+      Max_B   : constant Non_Negative_Float := Max_Abs_Component (B);
+      Boost_A : Boolean;
+      Boost_B : Boolean;
+      Recip_A : Unit_Recip;
+      Recip_B : Unit_Recip;
+      X       : Unit_Float;
+      Y       : Unit_Float;
+      Dot     : Float              := 0.0;
+      Sq_A    : Non_Negative_Float := 0.0;
+      Sq_B    : Non_Negative_Float := 0.0;
+      Norm_A  : Non_Negative_Float;
+      Norm_B  : Non_Negative_Float;
+      Denom   : Float;
+      Sim     : Float;
+      Dist    : Float;
    begin
-      if Norm_A <= 1.0e-9 or else Norm_B <= 1.0e-9 then
+      --  Documented convention: an exact all-zero vector has no direction
+      if Max_A = 0.0 or else Max_B = 0.0 then
          return 1.0;
       end if;
-      if Norm_A > 1.0e9 then
-         Norm_A := 1.0e9;
-      end if;
-      if Norm_B > 1.0e9 then
-         Norm_B := 1.0e9;
-      end if;
-      Denom := Norm_A * Norm_B;
-      if Denom <= 1.0e-18 then
+
+      --  Cosine similarity is scale-invariant: normalize each vector by its own
+      --  largest absolute component so every term lies in [-1.0, 1.0] and tiny
+      --  (even subnormal) or huge vectors neither underflow nor overflow
+      Unit_Scale (Max_A, Boost_A, Recip_A);
+      Unit_Scale (Max_B, Boost_B, Recip_B);
+      for I in 1 .. A.Dim loop
+         pragma Loop_Invariant (Dot in -Float (I - 1) .. Float (I - 1));
+         pragma Loop_Invariant (Sq_A <= Float (I - 1) and then Sq_B <= Float (I - 1));
+         X := Unit_Component (A.Elements (I), Boost_A, Recip_A);
+         Y := Unit_Component (B.Elements (I), Boost_B, Recip_B);
+
+         Dot := Dot + X * Y;
+         if Dot > Float (I) then
+            Dot := Float (I);
+         elsif Dot < -Float (I) then
+            Dot := -Float (I);
+         end if;
+
+         Sq_A := Sq_A + X * X;
+         if Sq_A > Float (I) then
+            Sq_A := Float (I);
+         end if;
+
+         Sq_B := Sq_B + Y * Y;
+         if Sq_B > Float (I) then
+            Sq_B := Float (I);
+         end if;
+      end loop;
+
+      Norm_A := Sqrt_Bounded (Sq_A);
+      Norm_B := Sqrt_Bounded (Sq_B);
+      Denom  := Norm_A * Norm_B;
+      --  Each normalized vector has a component of magnitude 1.0 (up to one
+      --  rounding), so both norms are ~>= 1.0; the guard only keeps the
+      --  quotient below provably bounded
+      if Denom < 0.5 then
          return 1.0;
       end if;
       if Dot >= Denom then

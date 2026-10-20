@@ -89,7 +89,9 @@ package Nhe_O.BTree is
                     and then Is_Valid_Tree (Tree);
 
    --  Insert or update a key -> record pointer in the B+Tree, splitting leaf
-   --  and internal nodes bottom-up and promoting a new root when full
+   --  and internal nodes bottom-up and promoting a new root when full.
+   --  A failed insert (capacity or malformed tree) leaves the tree unchanged;
+   --  a successful one adds at most one key and never releases nodes.
    procedure Insert_Key
      (Tree   : in out BTree_Index;
       Key    : in     Integer_64;
@@ -100,7 +102,15 @@ package Nhe_O.BTree is
           Pre    => Tree.Node_Count in 1 .. Max_BTree_Nodes
                     and then Tree.Root_Node in 1 .. Tree.Node_Count,
           Post   => Tree.Node_Count in 1 .. Max_BTree_Nodes
-                    and then Tree.Root_Node in 1 .. Tree.Node_Count;
+                    and then Tree.Root_Node in 1 .. Tree.Node_Count
+                    and then Status in Status_Ok
+                                     | Status_Capacity_Exceeded
+                                     | Status_Invalid_Syntax
+                    and then (if Status /= Status_Ok then Tree = Tree'Old)
+                    and then (if Status = Status_Ok then
+                                Tree.Node_Count >= Tree'Old.Node_Count
+                                and then Tree.Total_Keys >= Tree'Old.Total_Keys
+                                and then Tree.Total_Keys - Tree'Old.Total_Keys <= 1);
 
    --  Exact key lookup traversing internal separator keys down to the leaf node
    procedure Search_Key
@@ -113,7 +123,11 @@ package Nhe_O.BTree is
           Pre    => Tree.Node_Count in 1 .. Max_BTree_Nodes
                     and then Tree.Root_Node in 1 .. Tree.Node_Count;
 
-   --  Delete a key from its target leaf node and decrement Total_Keys
+   --  Delete a key from its target leaf node and decrement Total_Keys. When a
+   --  non-root leaf drops below 2 keys, every surviving entry is bulk-loaded
+   --  into a densely packed tree (leaves up to 4 keys, internal nodes up to
+   --  5 children, minimum occupancy kept) which is committed only if it holds
+   --  exactly the live keys and needs no more nodes than the current tree.
    procedure Delete_Key
      (Tree    : in out BTree_Index;
       Key     : in     Integer_64;
@@ -124,11 +138,37 @@ package Nhe_O.BTree is
                     and then Tree.Root_Node in 1 .. Tree.Node_Count,
           Post   => Tree.Node_Count in 1 .. Max_BTree_Nodes
                     and then Tree.Root_Node in 1 .. Tree.Node_Count
+                    and then Tree.Node_Count <= Tree'Old.Node_Count
+                    and then Tree.Split_Count = Tree'Old.Split_Count
+                    and then (if not Removed then Tree = Tree'Old)
                     and then (if Removed and then Tree'Old.Total_Keys > 0
                               then Tree.Total_Keys = Tree'Old.Total_Keys - 1
                               else Tree.Total_Keys = Tree'Old.Total_Keys);
 
-   --  Ordered range scan [Min_Key .. Max_Key] across linked leaf nodes
+   --  Ordered range scan [Min_Key .. Max_Key] across linked leaf nodes,
+   --  returning at most Max_Scan_Results strictly ascending entries.
+   --  Truncated is True iff a further matching key exists beyond the
+   --  Max_Scan_Results entries returned; when False, every matching key
+   --  reachable through the leaf chain is in Results.
+   procedure Range_Scan
+     (Tree      : in     BTree_Index;
+      Min_Key   : in     Integer_64;
+      Max_Key   : in     Integer_64;
+      Results   :    out BTree_Scan_Result;
+      Truncated :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Tree.Node_Count in 1 .. Max_BTree_Nodes
+                    and then Tree.Root_Node in 1 .. Tree.Node_Count
+                    and then Min_Key <= Max_Key,
+          Post   => (if Truncated then Results.Count = Max_Scan_Results)
+                    and then (for all I in 1 .. Results.Count =>
+                                Results.Items (I).Key in Min_Key .. Max_Key)
+                    and then (for all I in 2 .. Results.Count =>
+                                Results.Items (I - 1).Key < Results.Items (I).Key);
+
+   --  Range_Scan without the truncation flag (silently capped at
+   --  Max_Scan_Results entries; use the overload above to detect truncation)
    procedure Range_Scan
      (Tree    : in     BTree_Index;
       Min_Key : in     Integer_64;
@@ -139,7 +179,10 @@ package Nhe_O.BTree is
           Pre    => Tree.Node_Count in 1 .. Max_BTree_Nodes
                     and then Tree.Root_Node in 1 .. Tree.Node_Count
                     and then Min_Key <= Max_Key,
-          Post   => Results.Count <= Max_Scan_Results;
+          Post   => (for all I in 1 .. Results.Count =>
+                       Results.Items (I).Key in Min_Key .. Max_Key)
+                    and then (for all I in 2 .. Results.Count =>
+                                Results.Items (I - 1).Key < Results.Items (I).Key);
 
    --  Serialize a B+Tree node into a 4096-byte Slotted Page buffer with Magic "BTRE",
    --  full 64-bit keys, internal child pointers, and IEEE 802.3 CRC32
