@@ -103,8 +103,9 @@ package Nhe_O.C_API is
    --  Initialize / reset the embedded runtime as a scratch database (Dim = 3) on the
    --  per-process paths /tmp/nhe_o_c_api.<pid>.db / .wal: earlier contents of those
    --  files are deleted and both are recreated with O_EXCL, so a link planted at the
-   --  predictable names is refused, never followed (C_Status_IO_Error if a file cannot
-   --  be removed or created); nhe_o_close removes them again
+   --  predictable names is refused, never followed, then locked like any open database
+   --  (C_Status_IO_Error if a file cannot be removed, created or locked); nhe_o_close
+   --  removes them again
    procedure C_Init (Out_Status : out int)
      with Global        => (In_Out => (G_DB_Lock, G_WAL_Lock),
                             Output => (G_Initialized, G_Owner_Pid, G_Ephemeral, G_Next_Tx,
@@ -119,16 +120,21 @@ package Nhe_O.C_API is
    --  Initialize embedded Nhe_O C runtime state with caller-specified DB/WAL paths
    --  and embedding dimension Dim in 1 .. 4096, recovering existing state when present
    --  (the scratch files of a previous nhe_o_init database are deleted first).
-   --  Relative paths are resolved against the current directory once, here; after that
-   --  resolution the WAL path must leave room for the 5-byte ".ckpt" checkpoint suffix
-   --  (at most Max_Text_Len - 5 bytes). The database, the WAL and "<wal>.ckpt" must be
-   --  three different files, also through links, and an existing database must not
-   --  start with the WAL frame magic (swapped arguments) - C_Status_Invalid_Arg. Both
-   --  files are created when missing (with their directory fsynced). Recovery repairs a
-   --  torn WAL / database tail left by a crash (a WAL path naming a file that is not a
-   --  WAL fails with C_Status_IO_Error and is left untouched), replays KV and committed
-   --  RAG work, and finally checkpoints the WAL when it is past the automatic
-   --  thresholds (or its id space was exhausted by an older version).
+   --  Relative paths are resolved against the current directory and symbolic links
+   --  with realpath(3), once, here; the resolved WAL path must leave room for the
+   --  5-byte ".ckpt" checkpoint suffix (at most Max_Text_Len - 5 bytes). The database,
+   --  the WAL and "<wal>.ckpt" must be three different files, also through links; an
+   --  existing non-empty database must start with min (size, 4096) zero bytes (page 0
+   --  is never written, so swapped arguments and any other file are refused); and a
+   --  file at the reserved "<wal>.ckpt" must be a WAL (an interrupted checkpoint's
+   --  leftover, which is removed) - C_Status_Invalid_Arg otherwise, with the files
+   --  untouched. Both files are created when missing (with their directory fsynced) and
+   --  locked (Lock_File): a lock held by another open fails with C_Status_IO_Error.
+   --  Recovery repairs a torn WAL / database tail left by a crash (a WAL path naming a
+   --  file that is not a WAL fails with C_Status_IO_Error and is left untouched),
+   --  replays KV and committed RAG work (a database of another dimension fails with
+   --  C_Status_Dimension_Mismatch), and finally checkpoints the WAL when it is past the
+   --  automatic thresholds (or its id space was exhausted by an older version).
    procedure C_Init_With_Paths
      (DB_Path_Buf  : in     C_Text_Buf;
       DB_Path_Len  : in     int;
@@ -148,7 +154,9 @@ package Nhe_O.C_API is
    --  Release the runtime: a database opened with nhe_o_init_with_paths is first
    --  checkpointed (best effort, so the next open replays a compact WAL that also
    --  carries the current LRU recency) and its files are kept; the scratch files of an
-   --  nhe_o_init database are deleted. State is cleared and G_Initialized becomes False.
+   --  nhe_o_init database are deleted. State is cleared, the file locks are released and
+   --  G_Initialized becomes False. In a forked child (G_Owner_Pid is another process)
+   --  only the inherited copy is dropped: no checkpoint, no file removed.
    --  C_Status_IO_Error reports that a scratch file could not be removed; the runtime is
    --  released either way.
    procedure C_Close (Out_Status : out int)

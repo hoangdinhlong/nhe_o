@@ -217,7 +217,8 @@ package Nhe_O.RAG is
    --  MVCC logical delete of a document at transaction Ctx, whose snapshot (taken when
    --  it started, see Take_Snapshot) is Snapshot: sets Xmax := Ctx.Id and removes Doc_Id
    --  from PK_Tree and Vector_Graph. Deleting Ctx's own new version of a document that
-   --  has a prior version reverts the slot to that prior version, deleted by Ctx, so the
+   --  has a prior version reverts the slot to that prior version, deleted by Ctx unless
+   --  a committed transaction had already deleted it (that deleter is kept), so the
    --  single prior-version slot never holds a version no snapshot can see.
    --  Status_Not_Found when Doc_Id has no live version. Status_Tx_Aborted, with the
    --  engine unchanged, on a write conflict (Has_Write_Conflict), a Snapshot newer
@@ -311,7 +312,9 @@ package Nhe_O.RAG is
    --  Build_RAG_Slotted_Page, runs Commit_Tx, then either marks Ctx committed
    --  (Mark_Committed) and delivers its staged notifications, or rolls Engine back
    --  (Rollback_RAG_Tx) and discards them. A poisoned transaction (CLOG (Ctx.Id) =
-   --  Tx_Aborted after a failed Ingest/Delete) is rolled back without touching the WAL.
+   --  Tx_Aborted after a failed Ingest_Document whose frames could not be truncated) is
+   --  rolled back without touching the WAL; a failed Delete_Document never poisons, as
+   --  the commit page supersedes a Page 1 frame it could not truncate.
    --  If the commit barrier is durable but materializing pages failed, the database
    --  file is repaired in place with Redo_WAL_Recovery; Flush_Pending reports that the
    --  repair failed too (the commit stands and is replayed at the next recovery) and

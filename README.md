@@ -8,7 +8,7 @@
 
 **Nhé O** (Alire crate/repository `nhe_o`, Ada root package `Nhe_O`) is an embedded, disk-persistent, ACID-compliant multi-model database management system written in **Ada 2022 and SPARK 2022**:
 
-1. **Embedded & Persistent Like SQLite**: Runs in-process with zero external server daemons, storing data in 4096-byte slotted pages (`.nhe_o`) with non-overlapping PostgreSQL-style 4KB `"TOAS"` overflow chains (exact `"VTS2"` vectors, `"RMET"` metadata) placed first-fit on free pages, backed by a 4,120-byte CRC32-checksummed Write-Ahead Log (`.wal`) with crash-tail repair and automatic checkpoints (`ADR-009`, `ADR-011`, `ADR-019`).
+1. **Embedded & Persistent Like SQLite**: Runs in-process with zero external server daemons, storing data in 4096-byte slotted pages (`.nhe_o`) with non-overlapping PostgreSQL-style 4KB `"TOAS"` overflow chains (exact `"VTS2"` vectors, `"RMET"` metadata) placed first-fit on free pages, backed by a 4,120-byte CRC32-checksummed Write-Ahead Log (`.wal`) with crash-tail repair and automatic checkpoints (`ADR-009`, `ADR-011`, `ADR-019`). Unlike SQLite, a database belongs to one process at a time: the C ABI locks its files (`flock`), so a second process gets `NHE_O_STATUS_IO_ERROR` instead of corrupting it (`ADR-020`).
 2. **PostgreSQL Syntax & Data Types**: Native support for PostgreSQL types (`SMALLINT`/`INT2`, `INTEGER`/`INT4`, `BIGINT`/`INT8`, `REAL`/`FLOAT4`/`FLOAT(1..24)`, `DOUBLE PRECISION`/`FLOAT8`/`FLOAT(25..53)`, `NUMERIC`/`DECIMAL`, `BOOLEAN`, `TEXT`, `VARCHAR(n)`/`CHARACTER VARYING`, `BYTEA`, `UUID`, `TIMESTAMP`/`TIMESTAMPTZ`, `JSON`, `JSONB`, `VECTOR(d)`) and PostgreSQL SQL idioms (`$1` parameters, `::type` casts, `WITH` queries, joins, set operations, `CREATE TABLE IF NOT EXISTS` with constraints, `ON CONFLICT DO UPDATE`, `RETURNING`, `LISTEN`/`NOTIFY`) via `Nhe_O.Types` and `Nhe_O.SQL`: a PostgreSQL-faithful lexer and a fail-closed token-level validator for the dialect documented in `src/nhe_o-sql.ads` (`ADR-016`) *(stateful multi-table Page-0 Catalog, Clock-Sweep Buffer Pool, and DDL/DML Executor scheduled in **Epic 05**)*.
 3. **Native 4096-D Vector Database & Quantized HNSW (`pgvector` compatible)**: Built-in `VECTOR(d)` type (up to `4096` dimensions for local LLMs like `Qwen3-Embedding-8B`, `text-embedding-3-large`, `bge-m3`), `Float32`, scale-preserving `Int8` (SQ8), and `1-bit` Binary Hamming quantization, Multi-Layer HNSW graph indexing (`Insert_Vector`, `Remove_Vector`, `Restore_Vector_Node`, and `Search_KNN`, which returns the exact top-K by node distance at the engine's bounded capacity, over a 64-D prefix for `Float32` / `Int8` above 64 dimensions, `ADR-017`), and formally verified similarity operators:
    - `<->` Euclidean (L2) distance
@@ -22,7 +22,7 @@
 9. **100% SPARK Verification Mandate (`BR-001` / `ADR-002` / `ADR-005`)**:
    - **100% of specifications, bodies, and entrypoints** (all 26 files across 14 units in `src/`) operate under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)` and zero `pragma Assume` statements.
    - **4,246 / 4,246 Formal Checks Proved (100% SPARK Stone, Bronze, Silver & Gold Contracts)**: Verified by `gnatprove 16.1.0` (`Why3` + `Z3` + `cvc5` + `Alt-Ergo`) with `0 unproved` checks, `0 justified` checks, and `0 warnings` (max proof time `< 1s`).
-   - **Contract-Bound POSIX I/O (`src/nhe_o-io.adb`)**: Physical disk operations bypass exception-raising `Ada.Streams.Stream_IO` and bind directly in `SPARK_Mode (On)` to atomic POSIX kernel syscalls (`open` including `O_EXCL` creation, `pread`, `pwrite`, `lseek`, `fsync`, `ftruncate`, `close`, `unlink`, `rename`, `stat`, `getcwd`, `getpid`, `access`).
+   - **Contract-Bound POSIX I/O (`src/nhe_o-io.adb`)**: Physical disk operations bypass exception-raising `Ada.Streams.Stream_IO` and bind directly in `SPARK_Mode (On)` to atomic POSIX kernel syscalls (`open` including `O_EXCL` creation, `pread`, `pwrite`, `lseek`, `fsync`, `ftruncate`, `close`, `unlink`, `rename`, `stat`, `fstat`, `flock`, `realpath`, `getcwd`, `getpid`, `access`, `signal`).
 
 ---
 
@@ -32,7 +32,7 @@ Evaluated across all **14 compilation units (26 `.ads`/`.adb` files)** in `src/`
 
 | SPARK Level | Assurance Objective | Coverage / Proved % | Proved Checks (`gnatprove`) | Details |
 |---|---|---|---|---|
-| **Stone** | Valid SPARK 2022 Subset (`SPARK_Mode (On)`) | **100.0%** (`26 / 26` files) | `14 / 14` units (`257 / 257` Ada subprograms/packages + `10` POSIX C syscall bindings) | Zero `SPARK_Mode (Off)` anywhere in `src/` (`BR-001`). |
+| **Stone** | Valid SPARK 2022 Subset (`SPARK_Mode (On)`) | **100.0%** (`26 / 26` files) | `14 / 14` units (`257 / 257` Ada subprograms/packages at `v0.3.0` + `17` POSIX C bindings) | Zero `SPARK_Mode (Off)` anywhere in `src/` (`BR-001`). |
 | **Bronze** | Initialization & Correct Data Flow (`--mode=flow`) | **100.0%** | **`1,316 / 1,316`** (`0 unproved`) | `171` Data Dependencies, `920` Initialization, `2` Non-Aliasing, `223` Flow Termination. |
 | **Silver** | Absence of Run-Time Errors (AoRTE) & Termination | **100.0%** | **`1,587 / 1,587`** prover checks (`2,903 / 2,903` incl. Bronze) | `1,519` Run-time Checks (overflow, range, index, division, discriminant) + `68` Prover Termination checks (`0` `pragma Assume`). |
 | **Gold** | Proof of Key Integrity Properties & Functional Contracts | **100.0%** of specified contracts | **`1,343 / 1,343`** prover checks (`4,246 / 4,246` cumulative) | `807` Functional Contracts (`Pre`/`Post`) + `536` Inductive Loop Invariants & Assertions (`0 unproved`, `0 justified`, `0` `Post => True` tautologies). |
@@ -71,7 +71,7 @@ Following professional Ada Quality & Style Guide (`Mixed_Case_With_Underscores` 
 | `Nhe_O.SQL` | `src/nhe_o-sql.ad[sb]` | `SPARK_Mode (On)` | PostgreSQL SQL dialect tokenizer, parser, and statement classifier |
 | `Nhe_O.RAG` | `src/nhe_o-rag.ad[sb]` | `SPARK_Mode (On)` | Universal Local LLM Hybrid RAG & 1-hop GraphRAG query executor with MVCC snapshot isolation |
 | `Nhe_O.C_API` | `src/nhe_o-c_api.ad[sb]` | `SPARK_Mode (On)` | Precondition-free defensive C ABI / FFI boundary with checkpoints and write-fault latch (`include/nhe_o.h`, `lib/libnhe_o.so`) |
-| `Nhe_O.IO` | `src/nhe_o-io.ad[sb]` | `SPARK_Mode (On)` | Contract-bound POSIX syscall I/O (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `ftruncate`, `close`, `unlink`, `rename`, `stat`, `getcwd`, `getpid`, `access`) |
+| `Nhe_O.IO` | `src/nhe_o-io.ad[sb]` | `SPARK_Mode (On)` | Contract-bound POSIX syscall I/O (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `ftruncate`, `close`, `unlink`, `rename`, `stat`, `fstat`, `flock`, `realpath`, `getcwd`, `getpid`, `access`, `signal`) |
 | `Nhe_O_Main` | `src/nhe_o_main.adb` | `SPARK_Mode (On)` | 11-suite verification harness and interactive CLI (`--verify`, `--sql`, `--kv`, `--rag-demo`) |
 
 ---
@@ -106,7 +106,7 @@ gnatprove -P nhe_o.gpr --mode=all --level=2 -j24
 - [`docs/STATUS.md`](docs/STATUS.md) — Current project status, active epic, and next tasks.
 - [`docs/reference/VISION.md`](docs/reference/VISION.md) — Product vision, capabilities, and guiding principles.
 - [`docs/reference/ARCHITECTURE.md`](docs/reference/ARCHITECTURE.md) — Technical architecture and SPARK/Ada boundary design.
-- [`docs/DECISIONS.md`](docs/DECISIONS.md) — Authoritative Architectural Decision Records (`ADR-001`..`ADR-019`).
+- [`docs/DECISIONS.md`](docs/DECISIONS.md) — Authoritative Architectural Decision Records (`ADR-001`..`ADR-020`).
 - [`docs/domain/business-rules.md`](docs/domain/business-rules.md) — Core database and formal verification invariants (`BR-001`..`BR-008`).
 - [`docs/domain/storage-and-wal-format.md`](docs/domain/storage-and-wal-format.md) — Binary byte layouts for `"SLOT"` pages, `"TOAS"`/`"VTS2"`/`"RMET"` chains, `"BTRE"` nodes, `"KVMG"` KV WAL pages, and 4,120-byte WAL frames.
 - [`docs/learning/README.md`](docs/learning/README.md) — Teaching corpus (`swe/` & `ai/` lessons) explaining the concepts behind our ADRs.

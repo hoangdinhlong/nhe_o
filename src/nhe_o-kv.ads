@@ -275,9 +275,10 @@ package Nhe_O.KV is
    --  that slot, so the recovered store has the pre-crash keys, values, TTLs and slot
    --  layout, including silent LRU / expired-slot evictions; legacy frames without a hint
    --  fall back to slot selection at timestamp max (Now, Last_Access). Read recency is
-   --  not logged: each entry's Last_Access is the time of its last durable write (or of
-   --  the last checkpoint), so LRU choices after a reopen may differ from an
-   --  uninterrupted run that served GETs in between.
+   --  not logged per GET: each entry's Last_Access is the one saved by the last
+   --  checkpoint (Write_KV_Snapshot stores every slot's Last_Access), updated by later
+   --  durable writes, so LRU choices after a reopen may differ from an uninterrupted
+   --  run that served GETs since that checkpoint.
    procedure Recover_KV_From_WAL
      (Store        : in out KV_Store;
       WAL_Path     : in     Bounded_Text;

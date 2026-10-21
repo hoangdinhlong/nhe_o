@@ -105,10 +105,17 @@ Here is how `To_Bounded_Ident` and `C_KV_Set` in [`src/nhe_o-c_api.adb`](../../.
       Has_TTL : Boolean;
       TTL_Val : Epoch_Seconds;
    begin
+      --  0. An engine must be open, and opened by this process (not a forked child)
+      if not Engine_Ready then
+         Out_Status := C_Status_Not_Initialized;
+         return;
+      end if;
+
       --  1. Defensive validation of untrusted C integers
       if Key_Len <= 0 or else Key_Len > int (Max_Ident_Len)
         or else Val_Len < 0 or else Val_Len > int (Max_Text_Len)
         or else Now_Sec < 0
+        or else TTL_Sec < 0
       then
          Out_Status := C_Status_Invalid_Arg;
          return;
@@ -130,15 +137,46 @@ Here is how `To_Bounded_Ident` and `C_KV_Set` in [`src/nhe_o-c_api.adb`](../../.
       Key := To_Bounded_Ident (Key_Buf, Ident_Length (Key_Len));
       Val := To_Bounded_Text (Val_Buf, Text_Length (Val_Len));
 
-      --  3. Internal SPARK call (Pre => Key.Length > 0 is 100% proved!)
-      Set (G_KV_Store, Key, Val, Now_Sec, Has_TTL, TTL_Val);
-      Out_Status := C_Status_Ok;
+      --  3. Internal SPARK calls (Pre => Key.Length > 0 ... is proved)
+      if G_WAL_Path.Length > 0 then
+         --  Every C ABI database has a WAL: the durable path (ADR-012 write-fault latch)
+         if G_Write_Fault then
+            Out_Status := C_Status_IO_Error;
+            return;
+         end if;
+         if G_Next_KV_Seq = Max_Tx_Id then
+            Out_Status := C_Status_Capacity_Exceeded;
+            return;
+         end if;
+         declare
+            WAL_Stat : Engine_Status;
+         begin
+            Set_Durable
+              (Store    => G_KV_Store,
+               WAL_Path => G_WAL_Path,
+               Tx       => G_Next_KV_Seq,
+               Key      => Key,
+               Val      => Val,
+               Now      => Now_Sec,
+               Has_TTL  => Has_TTL,
+               TTL_Sec  => TTL_Val,
+               Status   => WAL_Stat);
+            if WAL_Stat = Status_Ok and then G_Next_KV_Seq < Max_Tx_Id then
+               G_Next_KV_Seq := G_Next_KV_Seq + 1;
+            end if;
+            After_Durable_Write (WAL_Stat);
+            Out_Status := To_C_Status (WAL_Stat);
+         end;
+      else
+         Set (G_KV_Store, Key, Val, Now_Sec, Has_TTL, TTL_Val);
+         Out_Status := C_Status_Ok;
+      end if;
    end C_KV_Set;
 ```
 
-Notice why `Post => To_Bounded_Ident'Result.Length = Len` on `To_Bounded_Ident` is essential: without that postcondition, `gnatprove` knows `Key_Len >= 1`, but would not know that `Key.Length >= 1` when checking `Nhe_O.KV.Set`'s precondition (`Pre => Key.Length > 0`)!
+Notice why `Post => To_Bounded_Ident'Result.Length = Len` on `To_Bounded_Ident` is essential: without that postcondition, `gnatprove` knows `Key_Len >= 1`, but would not know that `Key.Length >= 1` when checking the precondition of `Nhe_O.KV.Set_Durable` / `Set` (`Pre => Key.Length > 0 and then ...`)!
 
-> **Update (0.4):** Every database opened through the C ABI now has a WAL (`nhe_o_init` uses per-process scratch files, `ADR-013`), so the live path of `C_KV_Set` is its durable branch. After the same validation (plus a `G_Initialized` check and the rejection of a negative `TTL_Sec`), it refuses writes while the write-fault latch `G_Write_Fault` is set (`ADR-012`) and calls `Set_Durable`, whose `Pre => Key.Length > 0 and then ...` is discharged by exactly the same `To_Bounded_Ident` postcondition. The in-memory `Set` call shown above remains the branch for an engine without a WAL.
+Every database opened through the C ABI has a WAL (`nhe_o_init` uses per-process scratch files, `ADR-013`), so the live path is the durable branch: it refuses writes while the write-fault latch `G_Write_Fault` is set (`ADR-012`) and calls `Set_Durable`. The in-memory `Set` is the branch for an engine without a WAL. The `Engine_Ready` guard (an open engine, opened by this process: `ADR-020`) and the explicit rejection of a negative `TTL_Sec` are part of the same firewall: nothing the C caller passes reaches a precondition unchecked.
 
 ---
 

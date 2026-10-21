@@ -1,13 +1,13 @@
 # Adversarial System Review (`v0.3.0` → `v0.4.0` — Epics 01–03 Audit & Epic 04 Multi-Round Remediation Record)
 
-_Date: 2026-10-20 · Status: Rounds 1–11 (84 findings, `v0.3.0`) remediated and formally verified; Rounds 12–13 (89 findings, `v0.4.0`, Part V) remediated, compiled and regression-tested; convergence rounds continue until a full-system round finds nothing, after which the `gnatprove` gate re-measures the proof counts (Round 1: 24/24 · Round 2: 16/16 · Round 3: 18/18 · Round 4: 12/12 · Round 5: 3/3 · Round 6: Challenged by R7 · Round 7: 7/7 · Round 8: Initial Pass · Round 9: 3/3 · Round 10: 1/1 · Round 11: 0 Issues Found · Round 12: 55/55 · Round 13: 34/34)_
+_Date: 2026-10-21 · Status: Rounds 1–11 (84 findings, `v0.3.0`) remediated and formally verified; Rounds 12–14 (121 findings, `v0.4.0`, Part V) remediated, compiled and regression-tested; convergence rounds continue until a full-system round finds nothing, after which the `gnatprove` gate re-measures the proof counts (Round 1: 24/24 · Round 2: 16/16 · Round 3: 18/18 · Round 4: 12/12 · Round 5: 3/3 · Round 6: Challenged by R7 · Round 7: 7/7 · Round 8: Initial Pass · Round 9: 3/3 · Round 10: 1/1 · Round 11: 0 Issues Found · Round 12: 55/55 · Round 13: 34/34 · Round 14: 32/32)_
 
 This document records the full-system adversarial audits conducted on **Nhé O** in **Epic 04 (`04-post-epic-03-grooming-and-hardening`)**:
 - **Part I (Round 1 Audit — 24 Findings: `7 Critical, 9 High, 5 Medium, 3 Low`)**: All 24 findings remediated and formally verified in Tasks 1–6.
 - **Part II (Round 2 Deep System Audit — 16 Findings: `2 Critical, 5 High, 5 Medium, 4 Low`)**: All 16 semantic ACID/MVCC, FFI persistence, `"VTST"` `Float32` TOAST precision, parser boundary, and binary spec findings remediated and formally verified in Tasks 7–11.
 - **Part III (Round 3 Full-System Adversarial Audit — 18 Findings: `3 Critical, 5 High, 6 Medium, 4 Low`)**: All 18 protocol, allocator, recovery, index-lifecycle, parser, and documentation findings remediated and formally verified in Tasks 12–16.
 - **Part IV (Rounds 4–11 Convergence & Fast-Loop Audit — 26 Findings: `1 Critical, 9 High, 12 Medium, 4 Low` + Round 11 Zero-Defect Verification)**: All 12 Round-4 findings (`R4-CRIT-01`..`R4-LOW-02`), 3 Round-5 findings (`R5-HIGH-01`..`R5-LOW-01`), 7 Round-7 challenger findings (`R7-HIGH-01`..`R7-LOW-01`), and 4 Fast-Loop Rounds 9–10 findings (`R9-HIGH-01`, `R9-MED-01`, `R9-MED-02`, `R10-MED-01`) remediated, followed by a clean Round-11 full-system review (`0` issues found) and formal proof in Tasks 17–20 (`4,246 / 4,246` VCs proved, `0 unproved`, `0 warnings`).
-- **Part V (Rounds 12–13 Independent Full-System Re-Review — 89 unique findings: `3 Critical, 17 High, 26 Medium, 43 Low`)**: Reviewers with independent oracles (PostgreSQL 16, Redis semantics, fault injection, crash images, randomized models) found crash-safety, isolation, durability, JSON/SQL fidelity, index exactness and C ABI defects that the Round-11 review and the proofs had not covered (Rounds 1–11 rows above describe the `v0.3.0` code they fixed; several were later superseded, as Part V notes). All were fixed in Tasks 21–22 (`v0.4.0`, `ADR-009`..`ADR-019`).
+- **Part V (Rounds 12–14 Independent Full-System Re-Review — 121 unique findings: `4 Critical, 19 High, 29 Medium, 69 Low`)**: Reviewers with independent oracles (PostgreSQL 16, Redis semantics, fault injection, crash images, randomized models) found crash-safety, isolation, durability, JSON/SQL fidelity, index exactness and C ABI defects that the Round-11 review and the proofs had not covered (Rounds 1–11 rows above describe the `v0.3.0` code they fixed; several were later superseded, as Part V notes). All were fixed in Tasks 21–23 (`v0.4.0`, `ADR-009`..`ADR-020`).
 
 
 ---
@@ -203,9 +203,9 @@ Conducted on `2026-10-20` as an iterative fix-and-re-audit convergence loop acro
 
 ---
 
-# Part V — Rounds 12–13 Independent Full-System Re-Review (`R12-*`, `R13-*`, `v0.4.0`)
+# Part V — Rounds 12–14 Independent Full-System Re-Review (`R12-*`, `R13-*`, `R14-*`, `v0.4.0`)
 
-Round 12 re-reviewed every subsystem from scratch with independent oracles; Round 13 reviewed the Round-12 fixes and everything else again. IDs carry the reviewing area (`TX` storage / WAL / transactions, `RAG`, `KV`, `JS` JSON, `SQL`, `CA` C ABI / SDK / CLI / build, `IDX` B+Tree / HNSW / vector). Duplicates reported by several reviewers are listed once.
+Round 12 re-reviewed every subsystem from scratch with independent oracles; Rounds 13 and 14 reviewed the previous fixes and everything else again (Round 14 added a documentation-truthfulness reviewer, `DOC`). IDs carry the reviewing area (`TX` storage / WAL / transactions, `RAG`, `KV`, `JS` JSON, `SQL`, `CA` C ABI / SDK / CLI / build, `IDX` B+Tree / HNSW / vector). Duplicates reported by several reviewers are listed once.
 
 ## 14. Round 12 Findings (55)
 
@@ -311,3 +311,41 @@ Also fixed with Round 12: the RAG executor applies the SQL `OFFSET` window and r
 
 The SQL reviewer of Round 13 found no defect (PostgreSQL 16, `pglast` and `scan.l` as oracles over more than 500k inputs).
 
+## 16. Round 14 Findings (32)
+
+| ID | Severity | Subsystem | Finding | Remediation |
+|---|---|---|---|---|
+| `R14-SQL-01` | Critical | `SQL` | PostgreSQL string continuation (a literal, whitespace with a newline, another literal) was not handled; after an `E''` literal the continuation stays in escape mode, so `\'` smuggled a second statement past the single-statement check (`pglast` oracle: 89 smuggles in 40k fuzzed inputs). | ✅ A continuation after any string literal is rejected, fail closed (`567520c`; 0 smuggles in the same fuzz) |
+| `R14-TX-01` (= `R14-KV-01`, `R14-CA-01`) | High | `C_API` | Two processes could open one database; their commits overwrote each other's TOAST pages and Page 1, losing acknowledged writes or leaving the database unopenable, and a forked child shared the parent's engine. | ✅ Exclusive `flock` locks on both files with a checkpoint lock handover, per-process engine ownership, SDK at-fork hook (`ADR-020`, `9f5cde2`) |
+| `R14-CA-02` (= `R14-DOC-01`, `R14-TX-02`) | High | `C_API` / `Transaction` | A `db_path` naming a file that is not a database was truncated by `Repair_DB_Tail` and then overwritten by commits. | ✅ An existing non-empty database must start with zero bytes (page 0 is never written); refused untouched otherwise (`ADR-020`, `9f5cde2`) |
+| `R14-CA-03` (= `R14-DOC-02`) | Medium | `C_API` / build | The GNAT run time also took over `SIGABRT`: a host's `abort()` or failed `assert()` exited with status 1 and "raised PROGRAM_ERROR", without a core dump. | ✅ `SIGABRT` reset to its default action at elaboration; the SDK keeps the interpreter's handlers; documented (`ADR-013`, `9f5cde2`) |
+| `R14-TX-03` (= `R14-CA-04`) | Medium | `C_API` / `IO` | A checkpoint replaced a symlinked WAL with a regular file (commits were lost once the link was restored), and files created through links had their directory fsync on the link's directory. | ✅ Paths resolved once with `realpath(3)` at open (`ADR-020`, `9f5cde2`) |
+| `R14-RAG-01` | Medium | `RAG` | An update that dropped a prior version made a document silently disappear for older snapshots (`Status_Ok` with a result no committed state matches), also after a rollback. | ✅ `Read_Horizon`: a query at an older snapshot fails with `Status_Tx_Aborted` ("snapshot too old") (`ADR-010`, `9f5cde2`) |
+| `R14-RAG-02` | Low | `RAG` | `Freeze_RAG_Engine` succeeded after a commit left pages unmaterialized, so a checkpoint done as documented could replace their only copy. | ✅ `Pages_Pending` makes the freeze refuse (`ADR-011`, `9f5cde2`) |
+| `R14-RAG-03` | Low | `RAG` | The own-delete collapse comment misstated the deleter of the restored version. | ✅ (docs pass) |
+| `R14-RAG-04` | Low | `RAG` / `docs/` | `BR-002` and `Commit_RAG_Tx` said a failed delete poisons its transaction. | ✅ Only a failed ingest poisons (docs pass) |
+| `R14-RAG-05` | Low | `docs/` | Lesson 07 described the old TOAST allocator. | ✅ Already rewritten in `cf872f4` |
+| `R14-TX-04` | Low | `Transaction` | A torn first WAL frame whose first block never reached the disk made the database unopenable for good. | ✅ A lone torn frame with zero bytes up to the end of its first 4096-byte block is a torn append (`9f5cde2`) |
+| `R14-TX-05` | Low | `Transaction` | A short foreign file starting like the frame magic was truncated as a torn WAL. | ✅ A whole plausible frame header is required; all-zero short files are documented (`9f5cde2`) |
+| `R14-TX-06` | Low | `C_API` | Opening a database deleted any file at `"<wal>.ckpt"`. | ✅ Removed only when it classifies as a WAL (`Check_WAL_File`), refused otherwise (`9f5cde2`) |
+| `R14-CA-06` (= `R14-TX-07`) | Low | `RAG` / `C_API` | Reopening with another dimension returned `IO_ERROR`, which looks like corruption. | ✅ `DIMENSION_MISMATCH` (`9f5cde2`) |
+| `R14-CA-05` | Low | build | Without stack probes an undersized host stack was overrun past its guard page before the crash. | ✅ `-fstack-check` (`9f5cde2`) |
+| `R14-CA-07` | Low | CLI | `--kv` replaced an empty or over-long key with a default and stored after an invalid TTL. | ✅ Both are errors (`9f5cde2`) |
+| `R14-CA-08` | Low | Python SDK | `kv_get` / `pubsub_poll` raised `UnicodeDecodeError` on bytes that are not UTF-8 (the polled message was lost). | ✅ `surrogateescape` in both directions (`9f5cde2`) |
+| `R14-CA-09` (= `R14-DOC-05`) | Low | `docs/` | `BR-007` and the header said every export checks initialization; the stateless ones do not. | ✅ "Every stateful export" (docs pass) |
+| `R14-KV-02` | Low | `docs/` | The header and `BR-004` misstated when read recency becomes durable. | ✅ Saved by every checkpoint (docs pass) |
+| `R14-KV-03` | Low | `docs/` | The 16-message subscriber queue and its drop-newest policy were undocumented on the C and Python surface. | ✅ `NHE_O_PUBSUB_QUEUE_CAPACITY`, header and SDK docstrings (docs pass) |
+| `R14-KV-04` | Low | `docs/` | Lessons 02 and 03 quoted code that no longer exists. | ✅ Lesson 02 in `cf872f4`; lesson 03 refreshed (docs pass) |
+| `R14-JS-01` | Low | `JSON` | `Put_Field` accepted keys with a NUL or invalid UTF-8. | ✅ `Is_Valid_JSONB_Key` (`567520c`) |
+| `R14-JS-02` | Low | `JSON` | An empty key and a limit violation were reported in the wrong precedence. | ✅ Three-pass order (`567520c`) |
+| `R14-JS-03` | Low | `docs/` | "Documents of at most 512 bytes" was false for the Ada API. | ✅ (`567520c`) |
+| `R14-IDX-01` (= `R14-DOC-03`) | Low | `docs/` | "Exact top-K" claims omitted that `Node_Distance` uses the 64-D prefix above 64 dimensions. | ✅ (`567520c`) |
+| `R14-IDX-02` | Low | `docs/` | `ARCHITECTURE.md` labelled `L2_Distance_Squared` as `<->`. | ✅ (`567520c`) |
+| `R14-IDX-03` | Low | `Vector` | The SQ8 threshold comment was wrong. | ✅ (`567520c`) |
+| `R14-IDX-04` | Low | `Vector` | `Dequantize_Int8_Scalar` carried a tautological postcondition. | ✅ Removed (`567520c`) |
+| `R14-IDX-05` (= `R14-DOC-08`) | Low | `docs/` | The `ai/01` diagram put the binary vector in the tuple and showed wrong lengths. | ✅ (`567520c`) |
+| `R14-DOC-04` | Low | `docs/` | The `Repair_WAL_Tail` contract, the storage doc and lesson 05 misstated the single-frame rule. | ✅ (`9f5cde2`, docs pass) |
+| `R14-DOC-06` | Low | `docs/` | `ADR-007` still called Epic 04 complete. | ✅ Reopened note (docs pass) |
+| `R14-DOC-07` | Low | `IO` | The WAL header comment listed 16 of its 24 bytes. | ✅ (`9f5cde2`) |
+
+Round 14 also re-ran the earlier oracles: about 3,500 crash states, 8,200 crash points inside recovery, 3,500 single-fault runs, 30,753 C ABI crash images, a randomized snapshot-isolation model (39,800 operations, 11,809 recovery images), KV / Pub/Sub differential models and the documentation byte-layout checks; apart from the rows above, every one passed.

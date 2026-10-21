@@ -57,6 +57,7 @@ MAX_CLOG_ENTRIES = 8192
 MAX_WAL_FRAMES = 4096
 MAX_KV_KEYS = 64
 MAX_SUBSCRIBERS = 16
+PUBSUB_QUEUE_CAPACITY = 16  # messages queued per subscriber (drop-newest when full)
 MIN_TOP_K = 1
 MAX_TOP_K = 8
 MAX_PATH_LEN = 512
@@ -649,6 +650,11 @@ class NheOEngine:
             raise NheOError("nhe_o_pubsub_unsubscribe", status.value)
 
     def pubsub_publish(self, channel: str, payload: str) -> int:
+        """Publish now; returns the number of subscribers that queued the message.
+
+        Each subscriber queues at most PUBSUB_QUEUE_CAPACITY messages: one whose queue
+        is full drops this message (drop-newest), is not counted, and is not told.
+        """
         c_buf, c_len = _make_ident_buf(channel)
         p_buf, p_len = _make_text_buf(payload)
         delivered = c_int(0)
@@ -663,6 +669,7 @@ class NheOEngine:
         return int(delivered.value)
 
     def pubsub_poll(self, sub_id: int) -> tuple[str, str] | None:
+        """Dequeue the oldest queued (channel, payload) of sub_id, or None."""
         c_buf = IdentBuffer()
         c_len = c_int(0)
         p_buf = TextBuffer()

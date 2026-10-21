@@ -633,6 +633,12 @@ package body Nhe_O.C_API is
       if Ckpt_Exists then
          Check_WAL_File (Ckpt_P, Ckpt_Is_WAL);
          if not Ckpt_Is_WAL then
+            if not DB_Existed then
+               Delete_File_If_Exists (DB_P);
+            end if;
+            if not WAL_Existed then
+               Delete_File_If_Exists (WAL_P);
+            end if;
             Reset_Runtime;
             Out_Status := C_Status_Invalid_Arg;
             return;
