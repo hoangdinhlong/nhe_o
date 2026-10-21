@@ -351,7 +351,9 @@ package Nhe_O.Transaction is
           Post   => Status in Status_Ok | Status_IO_Error;
 
    --  Classify WAL_Path as Repair_WAL_Tail does, changing nothing: Is_WAL is True iff
-   --  it is missing, or a WAL that Repair_WAL_Tail accepts (torn tail included)
+   --  it is missing, or a WAL that Repair_WAL_Tail accepts (torn tail included). A
+   --  symbolic link as the last component of WAL_Path is never followed: it is not a
+   --  WAL (the reserved "<wal>.ckpt" of Nhe_O.C_API is probed this way)
    procedure Check_WAL_File
      (WAL_Path : in     Bounded_Text;
       Is_WAL   :    out Boolean)

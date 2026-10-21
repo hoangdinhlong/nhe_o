@@ -1126,9 +1126,10 @@ package body Nhe_O.RAG is
          return;
       end if;
 
+      --  A damaged Page 1 (CRC, magic or page id) is corruption like any other
       Decode_Slotted_Page (Raw_Page, Page_Rec, Page_Valid);
       if not Page_Valid or else Page_Rec.Page_Id /= 1 then
-         Status := Status_Invalid_Syntax;
+         Status := Status_IO_Error;
          return;
       end if;
       if Page_Rec.Page_LSN_Tx > Max_Seen_Tx then

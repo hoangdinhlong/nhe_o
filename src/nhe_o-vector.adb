@@ -238,6 +238,31 @@ package body Nhe_O.Vector is
       end if;
    end Unit_Component;
 
+   --  Square root in Long_Float of X in [0.25, 2**26] (bounded Newton-Raphson): exact
+   --  on a perfect square such as the product of two equal Floats, within an ulp else
+   function Sqrt_Long (X : Long_Float) return Long_Float
+     with Global => null,
+          Pre    => X in 0.25 .. 67_108_864.0,
+          Post   => Sqrt_Long'Result in 0.5 .. Long_Float'Max (X, 1.0)
+   is
+      Hi    : constant Long_Float := Long_Float'Max (X, 1.0);
+      Guess : Long_Float          := Long_Float'Max (X * 0.5, 1.0);
+      Next  : Long_Float;
+   begin
+      for Step in 1 .. 80 loop
+         pragma Loop_Invariant (Guess in 0.5 .. Hi);
+         Next := 0.5 * Guess + 0.5 * (X / Guess);
+         if Next < 0.5 then
+            Next := 0.5;
+         elsif Next > Hi then
+            Next := Hi;
+         end if;
+         exit when Next = Guess;
+         Guess := Next;
+      end loop;
+      return Guess;
+   end Sqrt_Long;
+
    function Cosine_Distance
      (A, B : Vector_Value) return Float
    is
@@ -252,10 +277,8 @@ package body Nhe_O.Vector is
       Dot     : Float              := 0.0;
       Sq_A    : Non_Negative_Float := 0.0;
       Sq_B    : Non_Negative_Float := 0.0;
-      Norm_A  : Non_Negative_Float;
-      Norm_B  : Non_Negative_Float;
-      Denom   : Float;
-      Sim     : Float;
+      Prod    : Long_Float;
+      Sim     : Long_Float;
       Dist    : Float;
    begin
       --  Documented convention: an exact all-zero vector has no direction
@@ -292,28 +315,22 @@ package body Nhe_O.Vector is
          end if;
       end loop;
 
-      Norm_A := Sqrt_Bounded (Sq_A);
-      Norm_B := Sqrt_Bounded (Sq_B);
-      Denom  := Norm_A * Norm_B;
-      --  Each normalized vector has a component of magnitude 1.0 (up to one
-      --  rounding), so both norms are ~>= 1.0; the guard only keeps the
-      --  quotient below provably bounded
-      if Denom < 0.5 then
+      --  One square root of the exact Long_Float product of the squared norms (a Float
+      --  product has at most 48 significant bits): for B = A, Dot = Sq_A = Sq_B, so the
+      --  root is exactly Sq_A and the distance exactly 0.0 (2.0 for B = -A). Each
+      --  normalized vector has a component of magnitude 1.0 (up to one rounding), so
+      --  Prod is ~>= 1.0; the guard only keeps the quotient below provably bounded.
+      Prod := Long_Float (Sq_A) * Long_Float (Sq_B);
+      if Prod < 0.25 then
          return 1.0;
       end if;
-      if Dot >= Denom then
-         Sim := 1.0;
-      elsif Dot <= -Denom then
-         Sim := -1.0;
-      else
-         Sim := Dot / Denom;
-      end if;
+      Sim := Long_Float (Dot) / Sqrt_Long (Prod);
       if Sim > 1.0 then
          Sim := 1.0;
       elsif Sim < -1.0 then
          Sim := -1.0;
       end if;
-      Dist := 1.0 - Sim;
+      Dist := Float (1.0 - Sim);
       if Dist < 0.0 then
          return 0.0;
       elsif Dist > 2.0 then

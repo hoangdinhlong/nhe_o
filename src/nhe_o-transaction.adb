@@ -1057,12 +1057,14 @@ package body Nhe_O.Transaction is
    --  Classify the WAL at WAL_Path before anything is truncated: Status_Ok when it is
    --  missing or a WAL whose only damage is a torn tail, with Cut telling whether
    --  New_Size must replace its size; Status_IO_Error for mid-log corruption or a file
-   --  that is not a WAL (see Repair_WAL_Tail)
+   --  that is not a WAL (see Repair_WAL_Tail), and, unless Follow_Link, for a symbolic
+   --  link as the last component of WAL_Path (never opened then)
    procedure Classify_WAL
-     (WAL_Path : in     Bounded_Text;
-      Cut      :    out Boolean;
-      New_Size :    out File_Size;
-      Status   :    out Engine_Status)
+     (WAL_Path    : in     Bounded_Text;
+      Follow_Link : in     Boolean;
+      Cut         :    out Boolean;
+      New_Size    :    out File_Size;
+      Status      :    out Engine_Status)
      with Global => null,
           Always_Terminates,
           Pre    => WAL_Path.Length > 0,
@@ -1078,17 +1080,26 @@ package body Nhe_O.Transaction is
       Got       : Natural;
       Read_Ok   : Boolean;
       Last_Torn : Boolean := False;
+      Is_Link   : Boolean;
    begin
       Status   := Status_Ok;
       Cut      := False;
       New_Size := 0;
+
+      if not Follow_Link then
+         Check_Symbolic_Link (WAL_Path, Is_Link);
+         if Is_Link then
+            Status := Status_IO_Error;
+            return;
+         end if;
+      end if;
 
       Check_File_Exists (WAL_Path, Exists);
       if not Exists then
          return;
       end if;
 
-      Get_File_Size (WAL_Path, Size, Size_Ok);
+      Get_File_Size (WAL_Path, Size, Size_Ok, Follow_Link);
       if not Size_Ok then
          Status := Status_IO_Error;
          return;
@@ -1112,7 +1123,8 @@ package body Nhe_O.Transaction is
       for Idx in 0 .. Natural (Full) - 1 loop
          pragma Loop_Invariant (Status = Status_Ok and then not Last_Torn and then not Cut);
          Read_File_Bytes
-           (WAL_Path, Integer_64 (Idx) * Integer_64 (WAL_Frame_Size), Frame, Got, Read_Ok);
+           (WAL_Path, Integer_64 (Idx) * Integer_64 (WAL_Frame_Size), Frame, Got, Read_Ok,
+            Follow_Link);
          if not Read_Ok or else Got /= WAL_Frame_Size then
             Status := Status_IO_Error;
             return;
@@ -1133,7 +1145,7 @@ package body Nhe_O.Transaction is
       --  2. Without any complete frame, the partial bytes must look like the start of a
       --     first append; anything else is a foreign file
       if Full = 0 and then Rem_Bytes > 0 then
-         Read_File_Bytes (WAL_Path, 0, Frame, Got, Read_Ok);
+         Read_File_Bytes (WAL_Path, 0, Frame, Got, Read_Ok, Follow_Link);
          if not Read_Ok
            or else Integer_64 (Got) /= Rem_Bytes
            or else not Is_Torn_First_Frame (Frame, Got)
@@ -1161,7 +1173,7 @@ package body Nhe_O.Transaction is
       New_Size : File_Size;
       Trunc_Ok : Boolean;
    begin
-      Classify_WAL (WAL_Path, Cut, New_Size, Status);
+      Classify_WAL (WAL_Path, True, Cut, New_Size, Status);
       if Cut then
          Truncate_File (WAL_Path, New_Size, Trunc_Ok);
          if not Trunc_Ok then
@@ -1180,7 +1192,7 @@ package body Nhe_O.Transaction is
       pragma Warnings (Off, Cut);
       pragma Warnings (Off, New_Size);
    begin
-      Classify_WAL (WAL_Path, Cut, New_Size, Status);
+      Classify_WAL (WAL_Path, False, Cut, New_Size, Status);
       Is_WAL := Status = Status_Ok;
    end Check_WAL_File;
 

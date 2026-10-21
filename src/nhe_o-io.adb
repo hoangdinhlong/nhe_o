@@ -1,8 +1,9 @@
 --  Formally Verified Physical I/O Implementation Body (BR-001 / ADR-002)
 --  Operates under pragma SPARK_Mode (On) by binding directly to exception-free
 --  POSIX kernel syscalls (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `ftruncate`,
---  `close`, `rename`, `stat`, `unlink`, `access`, `getcwd`, `getpid`) with explicit
---  return-code verification and bounded offset arithmetic.
+--  `close`, `rename`, `stat`, `fstat`, `unlink`, `access`, `readlink`, `flock`,
+--  `realpath`, `getcwd`, `getpid`, `signal`) with explicit return-code verification
+--  and bounded offset arithmetic.
 pragma SPARK_Mode (On);
 
 with Ada.Command_Line;
@@ -25,6 +26,10 @@ package body Nhe_O.IO is
    O_EXCL         : constant int      := 8#200#;
    O_NONBLOCK     : constant int      := 8#4000#;
    O_CLOEXEC      : constant int      := 8#2000000#;
+   --  O_NOFOLLOW is 8#400000# on x86_64 and 8#100000# on aarch64, and each value is the
+   --  other architecture's O_LARGEFILE, which a 64-bit kernel sets on every open anyway:
+   --  their sum refuses a symbolic link as the last path component (ELOOP) on both
+   O_NOFOLLOW_Any : constant int      := 8#400000# + 8#100000#;
    Mode_0600      : constant unsigned := 8#600#;
    SEEK_END       : constant int      := 2;
    Max_IO_Retries : constant Positive := 3;
@@ -245,6 +250,21 @@ package body Nhe_O.IO is
           Convention    => C,
           External_Name => "unlink";
 
+   --  readlink(2) into a one-byte buffer: only its success matters (the path is a
+   --  symbolic link), never the link's text
+   subtype Link_Probe_String is String (1 .. 1);
+
+   function Posix_Readlink
+     (Path : C_Path_String;
+      Buf  : in out Link_Probe_String;
+      Size : size_t) return Ssize_T
+     with Side_Effects,
+          Global        => null,
+          Always_Terminates,
+          Import        => True,
+          Convention    => C,
+          External_Name => "readlink";
+
    F_OK : constant int := 0;
 
    function Posix_Access
@@ -302,10 +322,29 @@ package body Nhe_O.IO is
       Exists := (Rc = 0);
    end Check_File_Exists;
 
-   procedure Get_File_Size
+   procedure Check_Symbolic_Link
      (File_Path : in     Bounded_Text;
-      Size      :    out File_Size;
-      Success   :    out Boolean)
+      Is_Link   :    out Boolean)
+   is
+      C_Path : C_Path_String;
+      Buf    : Link_Probe_String := [others => ASCII.NUL];
+      Rc     : Ssize_T;
+   begin
+      if Has_Embedded_NUL (File_Path) then
+         Is_Link := False;
+         return;
+      end if;
+
+      To_C_Path (File_Path, C_Path);
+      Rc      := Posix_Readlink (C_Path, Buf, size_t (Buf'Length));
+      Is_Link := Rc >= 0;
+   end Check_Symbolic_Link;
+
+   procedure Get_File_Size
+     (File_Path   : in     Bounded_Text;
+      Size        :    out File_Size;
+      Success     :    out Boolean;
+      Follow_Link : in     Boolean := True)
    is
       C_Path  : C_Path_String;
       Fd      : int;
@@ -321,7 +360,10 @@ package body Nhe_O.IO is
 
       --  O_RDWR refuses a directory (EISDIR); lseek refuses a FIFO (ESPIPE)
       To_C_Path (File_Path, C_Path);
-      Fd := Posix_Open (C_Path, O_RDWR + O_NONBLOCK + O_CLOEXEC, 0);
+      Fd := Posix_Open (C_Path,
+                        O_RDWR + O_NONBLOCK + O_CLOEXEC
+                        + (if Follow_Link then 0 else O_NOFOLLOW_Any),
+                        0);
       if Fd < 0 then
          return;
       end if;
@@ -473,6 +515,55 @@ package body Nhe_O.IO is
       Success := Sync_Rc = 0 and then Close_R = 0 and then Dir_Ok;
    end Create_File_Exclusive;
 
+   procedure Create_Locked_File
+     (File_Path : in     Bounded_Text;
+      Lock      :    out File_Lock;
+      Success   :    out Boolean)
+   is
+      C_Path  : C_Path_String;
+      Fd      : int;
+      Lock_Rc : int;
+      Sync_Rc : int;
+      Dir_Ok  : Boolean;
+      Rc      : int;
+      pragma Warnings (Off, Rc);
+   begin
+      Lock    := No_Lock;
+      Success := False;
+      if Has_Embedded_NUL (File_Path) then
+         return;
+      end if;
+
+      To_C_Path (File_Path, C_Path);
+      Fd := Posix_Open (C_Path, O_RDWR + O_CREAT + O_EXCL + O_NONBLOCK + O_CLOEXEC, Mode_0600);
+      if Fd < 0 then
+         return;
+      end if;
+
+      --  An open that locked the new file before this flock(2) owns it: leave it alone
+      Lock_Rc := Posix_Flock (Fd, LOCK_EX + LOCK_NB);
+      if Lock_Rc /= 0 then
+         pragma Warnings (GNATprove, Off, "statement has no effect");
+         Rc := Posix_Close (Fd);
+         pragma Warnings (GNATprove, On, "statement has no effect");
+         return;
+      end if;
+
+      Sync_Rc := Posix_Fsync (Fd);
+      Sync_Parent_Directory (File_Path, Dir_Ok);
+      if Sync_Rc /= 0 or else not Dir_Ok then
+         --  Still held by this call, so still its own file: remove it, then unlock
+         pragma Warnings (GNATprove, Off, "statement has no effect");
+         Rc := Posix_Unlink (C_Path);
+         Rc := Posix_Close (Fd);
+         pragma Warnings (GNATprove, On, "statement has no effect");
+         return;
+      end if;
+
+      Lock    := (Fd => Integer (Fd));
+      Success := True;
+   end Create_Locked_File;
+
    procedure Replace_File
      (Src_Path : in     Bounded_Text;
       Dst_Path : in     Bounded_Text;
@@ -565,7 +656,7 @@ package body Nhe_O.IO is
       end if;
 
       To_C_Path (File_Path, C_Path);
-      Fd := Posix_Open (C_Path, O_RDONLY + O_NONBLOCK + O_CLOEXEC, 0);
+      Fd := Posix_Open (C_Path, O_RDONLY + O_NONBLOCK + O_CLOEXEC + O_NOFOLLOW_Any, 0);
       if Fd < 0 then
          return;
       end if;
@@ -617,6 +708,7 @@ package body Nhe_O.IO is
       Buf     : Real_Path_String := [others => ASCII.NUL];
       Ptr     : size_t;
       Len     : Natural := 0;
+      Exists  : Boolean;
    begin
       Resolved := (Length => 0, Data => [others => ' ']);
       Success  := False;
@@ -628,6 +720,10 @@ package body Nhe_O.IO is
       To_C_Path (Path, C_Path);
       Ptr := Posix_Realpath (C_Path, Buf);
       if Ptr = 0 or else Buf (1) /= '/' then
+         --  realpath(3) fails on an existing path whose resolved form is longer than
+         --  PATH_MAX (ENAMETOOLONG), a limit the kernel's own path walk does not have
+         Check_File_Exists (Path, Exists);
+         Too_Long := Ptr = 0 and then Exists;
          return;
       end if;
 
@@ -655,10 +751,11 @@ package body Nhe_O.IO is
    end Resolve_Path;
 
    procedure Delete_Resolved_File (Path : in Bounded_Text) is
-      C_Path : C_Path_String;
-      Buf    : Real_Path_String := [others => ASCII.NUL];
-      Ptr    : size_t;
-      Rc     : int;
+      C_Path  : C_Path_String;
+      Buf     : Real_Path_String := [others => ASCII.NUL];
+      Ptr     : size_t;
+      Rc      : int;
+      Is_Link : Boolean;
       pragma Warnings (Off, Rc);
    begin
       if Has_Embedded_NUL (Path) then
@@ -670,6 +767,15 @@ package body Nhe_O.IO is
          pragma Warnings (GNATprove, Off, "statement has no effect");
          Rc := Posix_Unlink_Real (Buf);
          pragma Warnings (GNATprove, On, "statement has no effect");
+      else
+         --  Unresolvable: Path names the file itself unless its last component is a
+         --  link (unlink(2) would remove the link, not the file created through it)
+         Check_Symbolic_Link (Path, Is_Link);
+         if not Is_Link then
+            pragma Warnings (GNATprove, Off, "statement has no effect");
+            Rc := Posix_Unlink (C_Path);
+            pragma Warnings (GNATprove, On, "statement has no effect");
+         end if;
       end if;
    end Delete_Resolved_File;
 
@@ -960,11 +1066,12 @@ package body Nhe_O.IO is
    end Append_WAL_Frame;
 
    procedure Read_File_Bytes
-     (File_Path : in     Bounded_Text;
-      Offset    : in     File_Size;
-      Buffer    :    out WAL_Frame_Buffer;
-      Count     :    out Natural;
-      Success   :    out Boolean)
+     (File_Path   : in     Bounded_Text;
+      Offset      : in     File_Size;
+      Buffer      :    out WAL_Frame_Buffer;
+      Count       :    out Natural;
+      Success     :    out Boolean;
+      Follow_Link : in     Boolean := True)
    is
       C_Path  : C_Path_String;
       Fd      : int;
@@ -981,7 +1088,10 @@ package body Nhe_O.IO is
       end if;
 
       To_C_Path (File_Path, C_Path);
-      Fd := Posix_Open (C_Path, O_RDONLY + O_NONBLOCK + O_CLOEXEC, 0);
+      Fd := Posix_Open (C_Path,
+                        O_RDONLY + O_NONBLOCK + O_CLOEXEC
+                        + (if Follow_Link then 0 else O_NOFOLLOW_Any),
+                        0);
       if Fd < 0 then
          return;
       end if;

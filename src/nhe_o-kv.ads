@@ -217,7 +217,8 @@ package Nhe_O.KV is
                      else Store = Store'Old and then not Removed);
 
    --  Durable Redis DEL at timestamp Now: Removed is True iff Key was live at Now; a
-   --  WAL_Frame_KV record is appended whenever a stored entry (live or expired) is freed
+   --  WAL_Frame_KV record is appended whenever a stored entry (live or expired) is freed,
+   --  and Logged is True iff it was (a DEL of an absent key writes nothing)
    procedure Del_Durable
      (Store    : in out KV_Store;
       WAL_Path : in     Bounded_Text;
@@ -225,6 +226,7 @@ package Nhe_O.KV is
       Key      : in     Bounded_Ident;
       Now      : in     Epoch_Seconds;
       Removed  :    out Boolean;
+      Logged   :    out Boolean;
       Status   :    out Engine_Status)
      with Global => null,
           Always_Terminates,
@@ -232,7 +234,8 @@ package Nhe_O.KV is
           Post   => (if Status = Status_Ok then
                        not Exists (Store, Key, 0)
                        and then Removed = Exists (Store'Old, Key, Now)
-                     else Store = Store'Old and then not Removed);
+                     else Store = Store'Old and then not Removed and then not Logged)
+                    and then (if Removed then Logged);
 
    --  Durable EXPIRE: attaches a TTL to Key and appends a WAL_Frame_KV record when updated
    procedure Expire_Durable

@@ -455,6 +455,7 @@ procedure Nhe_O_Main is
    KV_Val     : Bounded_Text;
    KV_Status  : Engine_Status;
    KV_Removed : Boolean;
+   KV_Logged  : Boolean;
    Counter_V  : Integer_64;
    KV_Rec_Cnt : Natural;
    KV_Evict   : KV_Store;
@@ -1274,6 +1275,23 @@ procedure Nhe_O_Main is
       Recover_RAG_Engine (Rec, 3, DB_File, WAL_File, St);
       Check (St = Status_Ok and then Rec.Doc_Count = 1);
 
+      --  R16-RAG-02: a damaged Page 1 that no WAL can rebuild is an I/O error (like any
+      --  other corruption), not Status_Invalid_Syntax
+      declare
+         Page_1  : Page_Buffer;
+         Page_Ok : Boolean;
+         Byte_V  : constant Natural := Natural (Page_1'Length) / 2;
+      begin
+         Read_Page (DB_File, 1, Page_1, Page_Ok);
+         Check (Page_Ok);
+         Page_1 (Byte_V) := Page_1 (Byte_V) xor 16#5A#;
+         Write_Page (DB_File, 1, Page_1, Page_Ok);
+         Check (Page_Ok);
+         Delete_File_If_Exists (WAL_File);
+         Recover_RAG_Engine (Rec, 3, DB_File, WAL_File, St);
+         Check (St = Status_IO_Error);
+      end;
+
       --  R13-RAG-10 / R13-RAG-11: overlong UTF-8 never folds into a letter, and U+1E9B
       --  (long s with dot above) folds like U+1E60 / U+1E61
       Check (not Contains_Keyword
@@ -1738,6 +1756,32 @@ begin
    Check (Cosine_Distance (Vec_Tiny, Make_Vector_3D (1.0e5, 1.0e5, 0.0)) < 0.001);
    Check (Cosine_Distance (Vec_Zero, Vec_Zero) = 1.0
           and then Cosine_Distance (Vec_Tiny, Vec_Zero) = 1.0);
+
+   --  R16-IDX-01: a vector is at distance exactly 0.0 from itself and 2.0 from its
+   --  negation (one Long_Float root of the exact product of the squared norms)
+   declare
+      Neg_4096 : Vector_Value := Vec_4096_A;
+      Gen      : Vector_Value;
+      Gen_Neg  : Vector_Value;
+      Exact    : Boolean      := True;
+   begin
+      for I in 1 .. Neg_4096.Dim loop
+         Neg_4096.Elements (I) := -Neg_4096.Elements (I);
+      end loop;
+      for K in 1 .. 2000 loop
+         Gen     := Make_Vector_3D (Float (K mod 97) * 0.37 - 17.0,
+                                    Float (K mod 89) * 1.3e-3 + 0.5,
+                                    -Float (K) * 0.011);
+         Gen_Neg := Make_Vector_3D (-Gen.Elements (1), -Gen.Elements (2), -Gen.Elements (3));
+         Exact   := Exact
+                    and then Cosine_Distance (Gen, Gen) = 0.0
+                    and then Cosine_Distance (Gen, Gen_Neg) = 2.0;
+      end loop;
+      Check (Exact
+             and then Cosine_Distance (Vec_4096_A, Vec_4096_A) = 0.0
+             and then Cosine_Distance (Vec_4096_B, Vec_4096_B) = 0.0
+             and then Cosine_Distance (Vec_4096_A, Neg_4096) = 2.0);
+   end;
 
    --  Verify 4096-D Scalar (Int8) and Binary (1-bit Hamming) quantization
    Q_Int8_A    := Quantize_To_Int8 (Vec_4096_A);
@@ -2779,9 +2823,15 @@ begin
    --  DEL at timestamp Now frees an expired entry without reporting a removal
    Set_Durable (KV_Evict, KV_WAL_File, 71, Make_Ident ("ttl:short"), Make_Text ("x"), 6000, True, 5, KV_Status);
    Check (KV_Status = Status_Ok);
-   Del_Durable (KV_Evict, KV_WAL_File, 72, Make_Ident ("ttl:short"), 7000, KV_Removed, KV_Status);
-   Check (KV_Status = Status_Ok and then not KV_Removed
+   Del_Durable (KV_Evict, KV_WAL_File, 72, Make_Ident ("ttl:short"), 7000, KV_Removed,
+                KV_Logged, KV_Status);
+   Check (KV_Status = Status_Ok and then not KV_Removed and then KV_Logged
           and then not Exists (KV_Evict, Make_Ident ("ttl:short"), 0));
+
+   --  A DEL of an absent key writes no frame, so it takes no sequence number
+   Del_Durable (KV_Evict, KV_WAL_File, 73, Make_Ident ("ttl:short"), 7000, KV_Removed,
+                KV_Logged, KV_Status);
+   Check (KV_Status = Status_Ok and then not KV_Removed and then not KV_Logged);
 
    --  INCRBY follows Redis string2ll: no sign prefix "+", no leading zeros, no "-0"
    Set (Cache, Make_Ident ("num:plus"), Make_Text ("+5"), 3000);

@@ -715,6 +715,7 @@ package body Nhe_O.KV is
       Key      : in     Bounded_Ident;
       Now      : in     Epoch_Seconds;
       Removed  :    out Boolean;
+      Logged   :    out Boolean;
       Status   :    out Engine_Status)
    is
       Saved_Store : constant KV_Store := Store;
@@ -725,6 +726,7 @@ package body Nhe_O.KV is
       Del (Store, Key, Freed);
       if not Freed then
          Removed := False;
+         Logged  := False;
          Status  := Status_Ok;
          return;
       end if;
@@ -733,10 +735,12 @@ package body Nhe_O.KV is
       Append_Del_Frame (WAL_Path, Tx, Key, WAL_Ok);
       if WAL_Ok then
          Removed := Was_Live;
+         Logged  := True;
          Status  := Status_Ok;
       else
          Store   := Saved_Store;
          Removed := False;
+         Logged  := False;
          Status  := Status_IO_Error;
       end if;
    end Del_Durable;

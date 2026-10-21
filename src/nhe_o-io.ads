@@ -62,6 +62,15 @@ package Nhe_O.IO is
           Always_Terminates,
           Pre    => File_Path.Length > 0;
 
+   --  Is the last component of File_Path a symbolic link, dangling or not (readlink(2)
+   --  succeeds)? The link is never followed; a missing path is not a link.
+   procedure Check_Symbolic_Link
+     (File_Path : in     Bounded_Text;
+      Is_Link   :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => File_Path.Length > 0;
+
    --  Create File_Path as an empty regular file when it does not exist yet (an existing
    --  file is left untouched), fsync it and its directory. Success is True iff the path
    --  could be opened read-write (so it is not a directory) and every fsync succeeded.
@@ -85,11 +94,13 @@ package Nhe_O.IO is
 
    --  Report the current size in bytes of an existing regular file that can be opened
    --  read-write (open O_RDWR + lseek SEEK_END): a directory, FIFO or read-only file
-   --  reports failure
+   --  reports failure, and so does a symbolic link as the last component of File_Path
+   --  unless Follow_Link (O_NOFOLLOW otherwise)
    procedure Get_File_Size
-     (File_Path : in     Bounded_Text;
-      Size      :    out File_Size;
-      Success   :    out Boolean)
+     (File_Path   : in     Bounded_Text;
+      Size        :    out File_Size;
+      Success     :    out Boolean;
+      Follow_Link : in     Boolean := True)
      with Global => null,
           Always_Terminates,
           Pre    => File_Path.Length > 0,
@@ -145,10 +156,27 @@ package Nhe_O.IO is
 
    --  Open the existing file File_Path and take a non-blocking exclusive lock on it
    --  (flock LOCK_EX | LOCK_NB). Success is False when the file cannot be opened or
-   --  another open file description, in any process, holds the lock. The lock lives
-   --  until Unlock_File (or process exit) and follows the file, not its path: a file
-   --  renamed into place keeps the lock taken on it before the rename.
+   --  another open file description, in any process, holds the lock. A symbolic link
+   --  as the last component of File_Path is never followed: the call fails
+   --  (O_NOFOLLOW). The lock lives until Unlock_File (or process exit) and follows the
+   --  file, not its path: a file renamed into place keeps the lock taken on it before
+   --  the rename.
    procedure Lock_File
+     (File_Path : in     Bounded_Text;
+      Lock      :    out File_Lock;
+      Success   :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => File_Path.Length > 0,
+          Post   => Success = Is_Locked (Lock);
+
+   --  Create File_Path like Create_File_Exclusive and lock it like Lock_File through
+   --  the creating descriptor, so no other open can lock (and take as its own) the new
+   --  file first. Success is False, with no lock, when the path already exists in any
+   --  form (nothing is created); when another open locked the new file between the
+   --  open(2) and the flock(2) (the file is then left to that open); or when an fsync
+   --  fails (the new file is removed again).
+   procedure Create_Locked_File
      (File_Path : in     Bounded_Text;
       Lock      :    out File_Lock;
       Success   :    out Boolean)
@@ -166,7 +194,8 @@ package Nhe_O.IO is
    --  Canonical absolute path of the existing file Path (realpath(3): symbolic links,
    --  "." and ".." resolved), so directory fsyncs and checkpoint renames act on the
    --  real file; Success is False when it cannot be resolved or exceeds Max_Text_Len
-   --  (Too_Long: the resolved path exists but is longer than Max_Text_Len)
+   --  (Too_Long: the path exists but its resolved form is longer than Max_Text_Len,
+   --  or longer than the PATH_MAX of 4096 bytes realpath(3) can return)
    procedure Resolve_Path
      (Path     : in     Bounded_Text;
       Resolved :    out Bounded_Text;
@@ -181,7 +210,9 @@ package Nhe_O.IO is
 
    --  Delete the file Path resolves to (realpath(3)), never a symbolic link on the way:
    --  undoes a creation through a link even when the resolved path is longer than
-   --  Max_Text_Len. Nothing happens when Path cannot be resolved.
+   --  Max_Text_Len. When Path cannot be resolved (a resolved form beyond PATH_MAX),
+   --  Path itself is unlinked unless its last component is a symbolic link, which is
+   --  kept (the file created through it then stays).
    pragma Warnings (GNATprove, Off, "subprogram ""Delete_Resolved_File"" has no effect",
                     Reason => "Unlinks OS file on disk via contract-bound POSIX unlink syscall");
    procedure Delete_Resolved_File (Path : in Bounded_Text)
@@ -260,13 +291,16 @@ package Nhe_O.IO is
 
    --  Read up to WAL_Frame_Size bytes of an existing file starting at byte Offset,
    --  whatever its size or alignment (crash-repair needs to inspect torn tails that
-   --  Read_WAL_Frame refuses); Count is the number of bytes read, 0 at or past EOF
+   --  Read_WAL_Frame refuses); Count is the number of bytes read, 0 at or past EOF.
+   --  A symbolic link as the last component of File_Path fails the read unless
+   --  Follow_Link (O_NOFOLLOW otherwise).
    procedure Read_File_Bytes
-     (File_Path : in     Bounded_Text;
-      Offset    : in     File_Size;
-      Buffer    :    out WAL_Frame_Buffer;
-      Count     :    out Natural;
-      Success   :    out Boolean)
+     (File_Path   : in     Bounded_Text;
+      Offset      : in     File_Size;
+      Buffer      :    out WAL_Frame_Buffer;
+      Count       :    out Natural;
+      Success     :    out Boolean;
+      Follow_Link : in     Boolean := True)
      with Global => null,
           Always_Terminates,
           Pre    => File_Path.Length > 0,

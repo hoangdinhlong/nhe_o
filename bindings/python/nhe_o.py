@@ -1414,6 +1414,132 @@ def run_self_test() -> None:
         "Expected NheOError for a dimension mismatch",
     )
     _check(getattr(exc, "status", None) == STATUS_DIMENSION_MISMATCH, "dimension mismatch status")
+
+    # A symbolic link at the reserved "<wal>.ckpt" is never followed: its target, a FIFO
+    # whose writer stays blocked until something opens it, is never opened; the open
+    # and the checkpoint are refused, and the link is left in place
+    fifo = work_dir / "victim.fifo"
+    os.mkfifo(fifo)
+    fifo_released: list[bool] = []
+
+    def fifo_writer() -> None:
+        fd = os.open(fifo, os.O_WRONLY)
+        fifo_released.append(True)
+        os.close(fd)
+
+    writer = threading.Thread(target=fifo_writer, daemon=True)
+    writer.start()
+    time.sleep(0.1)
+    ckpt_link = real_dir / "s.wal.ckpt"
+    ckpt_link.symlink_to(fifo)
+    exc = _expect_error(
+        NheOError,
+        lambda: engine.init_with_paths(str(link_dir / "s.db"), str(link_dir / "s.wal"), dim=3),
+        "Expected NheOError for a link at the reserved checkpoint name",
+    )
+    _check(getattr(exc, "status", None) == STATUS_INVALID_ARG, "reserved-name link status")
+    _check(ckpt_link.is_symlink(), "reserved-name link left in place")
+    ckpt_link.unlink()
+    engine.init_with_paths(str(link_dir / "s.db"), str(link_dir / "s.wal"), dim=3)
+    ckpt_link.symlink_to(fifo)
+    exc = _expect_error(NheOError, engine.checkpoint, "Expected NheOError for a checkpoint over a link")
+    _check(getattr(exc, "status", None) == STATUS_IO_ERROR, "checkpoint refuses a reserved-name link")
+    _check(ckpt_link.is_symlink(), "checkpoint leaves the reserved-name link in place")
+    _check(not fifo_released, "a reserved-name link's target is never opened")
+    ckpt_link.unlink()
+    release_fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+    writer.join(5)
+    os.close(release_fd)
+
+    # A DEL or EXPIRE of an absent key writes nothing and takes no id, so 4200 of them
+    # never trigger the automatic checkpoint at id 4096 (which replaces the WAL file)
+    wal_stat = (real_dir / "s.wal").stat()
+    for _ in range(2100):
+        engine.kv_del("absent:key", now_sec=100)
+        engine.kv_expire("absent:key", ttl_sec=5, now_sec=100)
+    wal_after = (real_dir / "s.wal").stat()
+    _check(
+        (wal_after.st_ino, wal_after.st_mtime_ns) == (wal_stat.st_ino, wal_stat.st_mtime_ns),
+        "no-op DEL / EXPIRE take no id",
+    )
+
+    # A damaged page 1 that no WAL can rebuild fails the open with IO_ERROR
+    p1_db, p1_wal = work_dir / "p1.db", work_dir / "p1.wal"
+    engine.init_with_paths(str(p1_db), str(p1_wal), dim=3)
+    engine.rag_ingest_3d(1, "page one", (1.0, 0.0, 0.0))
+    engine.init_with_paths(str(link_dir / "s.db"), str(link_dir / "s.wal"), dim=3)
+    p1_wal.unlink()
+    raw = bytearray(p1_db.read_bytes())
+    raw[4096 + 200] ^= 0x5A
+    p1_db.write_bytes(bytes(raw))
+    exc = _expect_error(
+        NheOError,
+        lambda: engine.init_with_paths(str(p1_db), str(p1_wal), dim=3),
+        "Expected NheOError for a damaged page 1",
+    )
+    _check(getattr(exc, "status", None) == STATUS_IO_ERROR, "damaged page 1 status")
+
+    # A missing WAL created through a path whose resolved form exceeds PATH_MAX (4096
+    # bytes) is refused with INVALID_ARG and removed again
+    deep = work_dir / "deep"
+    deep.mkdir()
+    comp = "d" * 200
+    dir_fd = os.open(deep, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        for _ in range(24):
+            os.mkdir(comp, dir_fd=dir_fd)
+            next_fd = os.open(comp, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0), dir_fd=dir_fd)
+            os.close(dir_fd)
+            dir_fd = next_fd
+    finally:
+        os.close(dir_fd)
+    os.symlink(os.path.join(deep, *([comp] * 12)), deep / "l1")
+    os.symlink(os.path.join(*([comp] * 12)), deep / "l1" / "l2")
+    deep_wal = deep / "l1" / "l2" / "wal"
+    exc = _expect_error(
+        NheOError,
+        lambda: engine.init_with_paths(str(work_dir / "deep.db"), str(deep_wal), dim=3),
+        "Expected NheOError for a WAL resolving beyond PATH_MAX",
+    )
+    _check(getattr(exc, "status", None) == STATUS_INVALID_ARG, "over-long resolved WAL status")
+    _check(
+        not os.path.lexists(deep_wal) and not (work_dir / "deep.db").exists(),
+        "a refused open leaves no created file",
+    )
+
+    # nhe_o_init never follows a link planted at its predictable /tmp names: the links
+    # themselves are removed and their target (the FIFO, with a blocked writer) is never
+    # opened (in a child, whose pid names the files)
+    scratch_probe = (
+        "import os, sys, threading, time\n"
+        f"sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})\n"
+        "import nhe_o\n"
+        f"fifo = {str(fifo)!r}\n"
+        "released = []\n"
+        "def writer():\n"
+        "    fd = os.open(fifo, os.O_WRONLY)\n"
+        "    released.append(True)\n"
+        "    os.close(fd)\n"
+        "t = threading.Thread(target=writer, daemon=True)\n"
+        "t.start()\n"
+        "time.sleep(0.1)\n"
+        "base = '/tmp/nhe_o_c_api.%d' % os.getpid()\n"
+        "for suffix in ('.db', '.wal', '.wal.ckpt'):\n"
+        "    os.symlink(fifo, base + suffix)\n"
+        f"eng = nhe_o.NheOEngine(lib_path={lib_file!r})\n"
+        "regular = not os.path.islink(base + '.db') and not os.path.islink(base + '.wal')\n"
+        "gone = not os.path.lexists(base + '.wal.ckpt')\n"
+        "followed = bool(released)\n"
+        "eng.kv_set('k', 'v', now_sec=1)\n"
+        "eng.close()\n"
+        "fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)\n"
+        "t.join(5)\n"
+        "os.close(fd)\n"
+        "ok = regular and gone and not followed and not os.path.lexists(base + '.db')\n"
+        "sys.exit(0 if ok else 1)\n"
+    )
+    probe_rc = subprocess.run([sys.executable, "-I", "-c", scratch_probe], check=False).returncode
+    _check(probe_rc == 0, f"scratch-name links are removed, never followed (rc {probe_rc})")
     engine.init_with_paths(str(db_4096), str(wal_4096), dim=3)
 
     db_4096.unlink(missing_ok=True)
