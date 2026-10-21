@@ -497,7 +497,7 @@ package body Nhe_O.C_API is
       WAL_Ok      : Boolean;
       DB_Existed  : Boolean;
       DB_Ok       : Boolean;
-      Ckpt_P      : Bounded_Text;
+      Ckpt_P      : Bounded_Text := Empty_Text;
       Ckpt_Exists : Boolean;
       Ckpt_Is_WAL : Boolean;
       Head        : WAL_Frame_Buffer;
@@ -568,8 +568,7 @@ package body Nhe_O.C_API is
          return;
       end if;
 
-      if WAL_P.Length > Max_WAL_Path_Len
-        or else Has_Embedded_NUL (DB_P)
+      if Has_Embedded_NUL (DB_P)
         or else Has_Embedded_NUL (WAL_P)
         or else Equal_Text (DB_P, WAL_P)
       then
@@ -577,9 +576,12 @@ package body Nhe_O.C_API is
          return;
       end if;
 
-      --  The database may not be the checkpoint's temporary WAL either
-      Ckpt_P := Checkpoint_Path (WAL_P);
-      if Equal_Text (DB_P, Ckpt_P) then
+      --  The database may not be the checkpoint's temporary WAL either (checked early
+      --  on the text when possible; the WAL length limit itself applies to the
+      --  resolved path below)
+      if WAL_P.Length <= Max_WAL_Path_Len
+        and then Equal_Text (DB_P, Checkpoint_Path (WAL_P))
+      then
          Out_Status := C_Status_Invalid_Arg;
          return;
       end if;

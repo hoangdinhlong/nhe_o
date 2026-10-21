@@ -3114,6 +3114,34 @@ begin
    Delete_File_If_Exists (C_DB_Path);
    Delete_File_If_Exists (C_WAL_Path);
 
+   --  R15-TX-6: the 507-byte limit applies to the resolved WAL path, so a longer
+   --  spelling ("/tmp/./././...") that resolves short is accepted
+   if C_WAL_Path.Length in 6 .. 100 then
+      declare
+         Tail     : constant String  := C_WAL_Path.Data (5 .. C_WAL_Path.Length);
+         Dot_Len  : constant Natural := ((Max_Text_Len - 4 - Tail'Length) / 2) * 2;
+         Dots     : String (1 .. Dot_Len) := [others => '.'];
+      begin
+         for I in Dots'Range loop
+            if I mod 2 = 1 then
+               Dots (I) := '/';
+            end if;
+         end loop;
+         declare
+            Long_WAL : constant String     := "/tmp" & Dots & Tail;
+            Long_Buf : constant C_Text_Buf := To_C_Text (Long_WAL);
+         begin
+            Check (Long_WAL'Length > Max_Text_Len - 5);  --  past the 507-byte limit
+            C_Init_With_Paths (C_DB_Buf, C_DB_Len, Long_Buf, int (Long_WAL'Length), 3, C_Rc);
+            Check (C_Rc = C_Status_Ok and then G_Initialized);
+            C_Close (C_Rc);
+            Check (C_Rc = C_Status_Ok);
+         end;
+      end;
+      Delete_File_If_Exists (C_DB_Path);
+      Delete_File_If_Exists (C_WAL_Path);
+   end if;
+
    --  A refusal during recovery (here a WAL path naming a file that is not a WAL)
    --  removes the database file the call created and leaves the WAL path untouched
    Write_Page (C_WAL_Path, 0, Page_B, C_Size_Ok);
