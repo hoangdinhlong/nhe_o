@@ -345,7 +345,9 @@ package body Nhe_O.Vector is
       end loop;
 
       --  Per-vector scale for every non-zero vector; only a maximum so small that
-      --  Max_Abs / 127 underflows to zero (below about 1.8e-43) keeps all-zero codes
+      --  Max_Abs / 127 rounds to zero (below 63.5 * 2**(-149), about 8.9e-44) keeps
+      --  all-zero codes. A maximum below about 1.5e-36 gets a subnormal scale with
+      --  fewer significant bits, so its dequantized components are coarser.
       Scale := (if Max_Abs > 0.0 then Max_Abs / 127.0 else 0.0);
       Has_Scale := Scale > 0.0;
       if not Has_Scale then

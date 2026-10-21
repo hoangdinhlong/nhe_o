@@ -108,14 +108,20 @@ package Nhe_O.JSON is
                                             not (Doc.Fields (J).Active
                                                  and then Equal_Ident (Doc.Fields (J).Key, Key))));
 
-   --  A document whose every active field has a non-empty key that no earlier
-   --  active field repeats and a value valid for its kind (Is_Valid_Field_Value),
-   --  so that re-inserting its active fields with Put_Field (as RAG recovery does)
-   --  succeeds and keeps every key and kind
+   --  A key a JSON text can spell: 1 .. Max_Ident_Len bytes of well-formed UTF-8
+   --  without U+0000 (the rules Parse_JSONB applies to decoded keys)
+   function Is_Valid_JSONB_Key (Key : Bounded_Ident) return Boolean
+     with Global => null,
+          Post   => (if Is_Valid_JSONB_Key'Result then Key.Length > 0);
+
+   --  A document whose every active field has a valid key (Is_Valid_JSONB_Key)
+   --  that no earlier active field repeats and a value valid for its kind
+   --  (Is_Valid_Field_Value), so that re-inserting its active fields with
+   --  Put_Field (as RAG recovery does) succeeds and keeps every key and kind
    function Is_Valid_JSONB_Document (Doc : JSONB_Document) return Boolean is
      (for all I in 1 .. Doc.Count =>
         (if Doc.Fields (I).Active then
-           Doc.Fields (I).Key.Length > 0
+           Is_Valid_JSONB_Key (Doc.Fields (I).Key)
            and then Is_Valid_Field_Value (Doc.Fields (I).Val, Doc.Fields (I).Kind)
            and then (for all J in 1 .. I - 1 =>
                        not (Doc.Fields (J).Active
@@ -123,7 +129,8 @@ package Nhe_O.JSON is
      with Global => null;
 
    --  Put or update a field in a decomposed JSONB document (`jsonb_set`),
-   --  validating Val against Kind
+   --  validating Key (Is_Valid_JSONB_Key) and Val against Kind
+   --  (Status_Invalid_Syntax otherwise)
    procedure Put_Field
      (Doc    : in out JSONB_Document;
       Key    : in     Bounded_Ident;
@@ -143,8 +150,8 @@ package Nhe_O.JSON is
    --  (duplicate keys: the last occurrence wins, at every depth as in PostgreSQL).
    --  Status_Invalid_Syntax: not Is_Valid_JSON (incl. ill-formed UTF-8, lone or
    --  reversed `\u` surrogates, U+0000), not an object root, or an empty object
-   --  key at any depth. Syntax is checked first, so text that is not valid JSON
-   --  is Status_Invalid_Syntax even when it also breaks an ingest limit.
+   --  key at any depth. These Status_Invalid_Syntax rules are checked before
+   --  every ingest limit, so such text is never Status_Capacity_Exceeded.
    --  Status_Capacity_Exceeded: more than Max_JSON_Fields distinct top-level
    --  keys, a key longer than Max_Ident_Len decoded bytes (any depth), nesting
    --  deeper than Max_JSONB_Depth, or a number outside the PostgreSQL numeric

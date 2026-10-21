@@ -45,15 +45,18 @@ To coexist with memory-hungry local LLMs, a vector engine supports three represe
 +-----------------------------------------------------------------------+
 | Primary 4KB Slotted Page (Fast Metadata & Hybrid Filter Scan)         |
 | +-------------------------------------------------------------------+ |
-| | Tuple: id=42 | Xmin=10 | meta={"lang":"vi"} | Binary_Vec (512B)   | |
-| |        full_vec_ptr = [TOAST Page #105, Len=16384B, Chunks=5]     | |
+| | Tuple: id=42 | Xmin=10 | meta={"lang":"vi"} (208B inline area)   | |
+| |   parent_ptr, "RMET" meta_ptr,                                    | |
+| |   vec_ptr = [TOAST Page #105, Len = 8 + 4*4096 = 16392B, Chunks=5]| |
 | +-------------------------------------------------------------------+ |
 +-----------------------------------|-----------------------------------+
-                                    | (Only dereferenced for Stage-2 re-ranking!)
-                                    v
+   (in RAM, not on the page: HNSW   | (Only dereferenced for Stage-2 re-ranking!)
+    node with Binary signature,     v
+    64-D Float32 / Int8 prefixes)
         +-------------------+    +-------------------+    +-------------------+
         | TOAST Page #105   |--->| TOAST Page #106   |--->| TOAST Page #107.. |
-        | Float32[1..1020]  |    | Float32[1021..2040|    | ...               |
+        | "VTS2" + Dim +    |    | Float32[1019..2038|    | ...               |
+        | Float32[1..1018]  |    |                   |    |                   |
         +-------------------+    +-------------------+    +-------------------+
 ```
 

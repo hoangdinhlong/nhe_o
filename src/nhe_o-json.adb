@@ -144,6 +144,22 @@ package body Nhe_O.JSON is
       return Need = 0;
    end Is_Valid_UTF8;
 
+   function Is_Valid_JSONB_Key (Key : Bounded_Ident) return Boolean is
+      T : Bounded_Text := (Length => Key.Length, Data => [others => ' ']);
+   begin
+      if Key.Length = 0 then
+         return False;
+      end if;
+      for I in 1 .. Key.Length loop
+         pragma Loop_Invariant (T.Length = Key.Length);
+         if Key.Data (I) = ASCII.NUL then
+            return False;
+         end if;
+         T.Data (I) := Key.Data (I);
+      end loop;
+      return Is_Valid_UTF8 (T);
+   end Is_Valid_JSONB_Key;
+
    --  Append the UTF-8 encoding of Code to Dst
    procedure Append_Code_Point
      (Dst  : in out Bounded_Text;
@@ -403,14 +419,15 @@ package body Nhe_O.JSON is
    -------------------------------------------------------------------------
 
    --  Status_Ok, Status_Invalid_Syntax or Status_Capacity_Exceeded. With JSONB,
-   --  also enforce: object keys of 1 .. Max_Ident_Len decoded bytes (empty key
-   --  = Invalid_Syntax, longer = Capacity_Exceeded) and numbers within the
-   --  PostgreSQL numeric range (Capacity_Exceeded). Nesting deeper than
-   --  Max_Depth containers is Capacity_Exceeded.
+   --  an empty object key is Invalid_Syntax, and with JSONB and Limits also: keys
+   --  longer than Max_Ident_Len decoded bytes and numbers outside the PostgreSQL
+   --  numeric range are Capacity_Exceeded. Nesting deeper than Max_Depth
+   --  containers is Capacity_Exceeded.
    function Check_JSON_Text
      (Raw       : Bounded_Text;
       JSONB     : Boolean;
-      Max_Depth : Positive) return Engine_Status
+      Max_Depth : Positive;
+      Limits    : Boolean := True) return Engine_Status
      with Global => null,
           Pre    => Max_Depth <= Max_Text_Len,
           Post   => Check_JSON_Text'Result
@@ -530,7 +547,7 @@ package body Nhe_O.JSON is
                   if JSONB and then String_Is_Key then
                      if Str_Len = 0 then
                         return Status_Invalid_Syntax;
-                     elsif Str_Len > Max_Ident_Len then
+                     elsif Limits and then Str_Len > Max_Ident_Len then
                         return Status_Capacity_Exceeded;
                      end if;
                   end if;
@@ -595,7 +612,7 @@ package body Nhe_O.JSON is
                   Num_Has_Exp := True;
                   Lex         := Lex_Num_Exp_Sign;
                else
-                  if JSONB and then not Number_In_PG_Range (Raw, Num_Start) then
+                  if JSONB and then Limits and then not Number_In_PG_Range (Raw, Num_Start) then
                      return Status_Capacity_Exceeded;
                   end if;
                   Lex      := Lex_None;
@@ -626,7 +643,7 @@ package body Nhe_O.JSON is
                   Num_Has_Exp := True;
                   Lex         := Lex_Num_Exp_Sign;
                else
-                  if JSONB and then not Number_In_PG_Range (Raw, Num_Start) then
+                  if JSONB and then Limits and then not Number_In_PG_Range (Raw, Num_Start) then
                      return Status_Capacity_Exceeded;
                   end if;
                   Lex      := Lex_None;
@@ -728,7 +745,7 @@ package body Nhe_O.JSON is
       if Depth = 0
         and then (Lex = Lex_Num_Zero or else Lex = Lex_Num_Has_Digit)
       then
-         if JSONB and then not Number_In_PG_Range (Raw, Num_Start) then
+         if JSONB and then Limits and then not Number_In_PG_Range (Raw, Num_Start) then
             return Status_Capacity_Exceeded;
          end if;
          Lex   := Lex_None;
@@ -1221,7 +1238,7 @@ package body Nhe_O.JSON is
    is
       Norm_Val : Bounded_Text := Val;
    begin
-      if not Is_Valid_Field_Value (Val, Kind) then
+      if not Is_Valid_JSONB_Key (Key) or else not Is_Valid_Field_Value (Val, Kind) then
          Status := Status_Invalid_Syntax;
          return;
       end if;
@@ -1283,9 +1300,20 @@ package body Nhe_O.JSON is
    begin
       Doc := (others => <>);
 
-      --  Syntax first: an ingest limit met before a syntax error must not turn
-      --  invalid JSON into Status_Capacity_Exceeded
+      --  Every Status_Invalid_Syntax rule wins over the ingest limits, whatever
+      --  their order in the text: syntax, then an object root, then empty keys
       if not Is_Valid_JSON (Raw) then
+         Status := Status_Invalid_Syntax;
+         return;
+      end if;
+
+      Open := Skip_WS (Raw, 1);
+      if Open > Raw.Length or else Raw.Data (Open) /= '{' then
+         Status := Status_Invalid_Syntax;
+         return;
+      end if;
+
+      if Check_JSON_Text (Raw, True, Max_Text_Len, Limits => False) /= Status_Ok then
          Status := Status_Invalid_Syntax;
          return;
       end if;
@@ -1294,12 +1322,6 @@ package body Nhe_O.JSON is
       --  nested value can never be stored in a form `@>` cannot compare
       Status := Check_JSON_Text (Raw, True, Max_JSONB_Depth);
       if Status /= Status_Ok then
-         return;
-      end if;
-
-      Open := Skip_WS (Raw, 1);
-      if Open > Raw.Length or else Raw.Data (Open) /= '{' then
-         Status := Status_Invalid_Syntax;
          return;
       end if;
 

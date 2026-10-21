@@ -185,7 +185,9 @@ package Nhe_O.HNSW is
                                 and then Index.Entry_Node in 1 .. Index.Node_Count);
 
    --  Compute metric distance between a query vector and an HNSW node using the
-   --  selected encoding mode (Float32 L2, scale-aware Int8 SQ8 L2, or 1-bit Hamming)
+   --  selected encoding mode: Float32 L2 or scale-aware Int8 SQ8 L2 over the first
+   --  Prefix_Len = min (Dim, Matryoshka_Dim) components (the node keeps only that
+   --  prefix), or 1-bit Hamming over all Dim bits
    function Node_Distance
      (Node     : HNSW_Node;
       Q_Float  : Vector_Value;
@@ -202,7 +204,8 @@ package Nhe_O.HNSW is
    --  distances; a final exhaustive pass then evaluates every node the graph
    --  walk did not reach (graph edges may be pruned or removed, so a live node
    --  can be unreachable), and the result is the exact top-K of all active
-   --  nodes of matching dimension by Node_Distance (ties: lower Node_Id first),
+   --  nodes of matching dimension by Node_Distance (ties: lower Node_Id first; a
+   --  Matryoshka-prefix distance for Float32 / Int8 above Matryoshka_Dim dimensions),
    --  sorted by non-decreasing Distance, without duplicate nodes. Each node's
    --  distance is computed at most once per search. Visited_Nodes counts the
    --  distinct nodes evaluated.

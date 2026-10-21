@@ -1479,6 +1479,18 @@ begin
    Analyze_SQL (Make_Text ("SELECT 1 /* a /* b */ c */ FROM docs"), SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Ok and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("docs")));
 
+   --  R14-SQL-01: PostgreSQL continues a literal across a newline-separated quote in
+   --  the literal's own escape mode, so E'a' <newline> '\'' hides the ';' from a lexer
+   --  that restarts a plain string; any such continuation is rejected
+   Analyze_SQL (Make_Text ("SELECT E'a'" & ASCII.LF & "'\''; DROP TABLE docs; --'"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax and then SQL_Desc.Kind = Stmt_Unknown);
+   Analyze_SQL (Make_Text ("SELECT 'a' -- note" & ASCII.LF & " 'b' FROM docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT B'1'" & ASCII.CR & ASCII.LF & "'0' FROM docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT 'a'" & ASCII.LF & "FROM docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("docs")));
+
    --  SQL-2: multi-word key words match any whitespace / comment run
    Analyze_SQL (Make_Text ("SELECT id FROM docs ORDER  BY a ORDER  BY b"), SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Invalid_Syntax);
@@ -1961,6 +1973,31 @@ begin
       Check (JSON_Stat = Status_Invalid_Syntax);
       Parse_JSONB (Make_Text ("{""a"":1e500000,}"), Doc_Parsed, JSON_Stat);
       Check (JSON_Stat = Status_Invalid_Syntax);
+
+      --  R14-JS-02: every Invalid_Syntax rule (syntax, object root, empty keys) wins
+      --  over the ingest limits, whatever their order in the text
+      Parse_JSONB (Make_Text ("[1e999999999]"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Invalid_Syntax);
+      Parse_JSONB (Make_Text ("{""" & [1 .. Max_Ident_Len + 1 => 'k'] & """:1,"""":1}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Invalid_Syntax);
+      Parse_JSONB (Make_Text ("{""a"":1e999999999,"""":1}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Invalid_Syntax);
+      Parse_JSONB (Make_Text ("{""a"":1e999999999}"), Doc_Parsed, JSON_Stat);
+      Check (JSON_Stat = Status_Capacity_Exceeded);
+
+      --  R14-JS-01: a key no JSON text can spell (U+0000, ill-formed UTF-8) is refused
+      Doc_Parsed := (others => <>);
+      Put_Field (Doc_Parsed, Make_Ident ("a" & ASCII.NUL & "b"), Make_Text ("1"), JSONB_Number, JSON_Stat);
+      Check (JSON_Stat = Status_Invalid_Syntax and then Doc_Parsed.Count = 0);
+      Put_Field (Doc_Parsed, Make_Ident ([1 => Character'Val (16#C3#)]), Make_Text ("1"), JSONB_Number, JSON_Stat);
+      Check (JSON_Stat = Status_Invalid_Syntax and then Doc_Parsed.Count = 0);
+      Check (not Is_Valid_JSONB_Key (Make_Ident ([1 => Character'Val (16#C3#)])));
+      Check (Is_Valid_JSONB_Key (Make_Ident ([Character'Val (16#C3#), Character'Val (16#A9#)])));
+      Check (not Is_Valid_JSONB_Document
+                   ((Count  => 1,
+                     Fields => [1      => (Key => Make_Ident ("a" & ASCII.NUL), Val => Make_Text ("1"),
+                                           Kind => JSONB_Number, Active => True),
+                                others => (others => <>)])));
    end;
    Print_Line ("  => Passed: RFC 8259 JSON validator, escape decoding, and `?`, `->`, `->>`, `@>` verified.");
 

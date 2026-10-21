@@ -752,6 +752,34 @@ package body Nhe_O.SQL is
       OK := True;
    end Scan_Token;
 
+   --  Does the text from Pos (just after a string literal's closing quote) continue
+   --  that literal the way PostgreSQL's scan.l does ("quotecontinue": whitespace
+   --  and "--" comments holding at least one newline, then a quote)?  The scanner
+   --  then keeps the literal's escape mode, so an E'...' literal continued that way
+   --  can hide a statement separator from a lexer that restarts a plain string.
+   function Starts_String_Continuation (Q : Bounded_Text; Pos : Positive) return Boolean
+     with Global => null
+   is
+      P       : Positive := Pos;
+      Newline : Boolean  := False;
+   begin
+      while P <= Q.Length loop
+         pragma Loop_Invariant (P in Pos .. Q.Length);
+         pragma Loop_Variant (Increases => P);
+         if Q.Data (P) = ASCII.LF or else Q.Data (P) = ASCII.CR then
+            Newline := True;
+            P := P + 1;
+         elsif Is_WS_Char (Q.Data (P)) then
+            P := P + 1;
+         elsif Starts_Comment (Q, P) and then Q.Data (P) = '-' then
+            P := Line_Comment_End (Q, P);
+         else
+            return Newline and then Q.Data (P) = ''';
+         end if;
+      end loop;
+      return False;
+   end Starts_String_Continuation;
+
    --  Split Query into tokens, skipping whitespace and (nested) comments, and
    --  pair every ( / [ with its ) / ].  Valid is False on any lexical error,
    --  unterminated literal/comment, or unbalanced / mismatched bracket.
@@ -830,6 +858,13 @@ package body Nhe_O.SQL is
             Toks.Count := Toks.Count + 1;
             Toks.Items (Toks.Count) := Tok;
             Pos := Tok.Last + 1;
+
+            --  A literal continued on a later line is outside the dialect
+            if Tok.Kind in Tk_String | Tk_E_String | Tk_Bit_String
+              and then Starts_String_Continuation (Query, Pos)
+            then
+               return;
+            end if;
          end if;
       end loop;
 

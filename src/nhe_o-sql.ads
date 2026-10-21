@@ -10,7 +10,10 @@ with Nhe_O.Types; use Nhe_O.Types;
 --      nested "/* ... */"; unterminated comments / literals are rejected
 --    * '...' ('' doubles), E'...' (backslash escapes the next character, '' also
 --      doubles), N'...', B'...' / X'...', $tag$ ... $tag$ with an optional tag
---      [A-Za-z\200-\377_][A-Za-z\200-\377_0-9]* closed only by the same tag
+--      [A-Za-z\200-\377_][A-Za-z\200-\377_0-9]* closed only by the same tag;
+--      a quoted literal continued on a later line (closing quote, whitespace or
+--      "--" comments holding a newline, then a quote: scan.l "quotecontinue")
+--      is rejected
 --    * "..." delimited identifiers ("" doubles; "" is rejected), unquoted
 --      identifiers [A-Za-z\200-\377_][A-Za-z\200-\377_0-9$]*
 --    * $n positional parameters with n >= 1 ($01 = $1); $0, a stray '$' and

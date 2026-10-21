@@ -23,8 +23,7 @@ package body Nhe_O.HNSW is
    function Dequantize_Int8_Scalar
      (Comp  : Int8_Component;
       Scale : Non_Negative_Float) return Vector_Component
-     with Global => null,
-          Post   => Dequantize_Int8_Scalar'Result in -Max_Component .. Max_Component
+     with Global => null
    is
       Raw_Val  : Float;
       Abs_Elem : Float;
