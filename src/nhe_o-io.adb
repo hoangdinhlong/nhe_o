@@ -29,6 +29,10 @@ package body Nhe_O.IO is
    SEEK_END       : constant int      := 2;
    Max_IO_Retries : constant Positive := 3;
 
+   --  First sector of a WAL frame (holds the whole 24-byte header), written and synced
+   --  on its own for the first frame of a WAL (see Append_WAL_Frame)
+   Header_Sector_Size : constant := 512;
+
    --  Contract-bound POSIX kernel syscall bindings (never raise Ada exceptions)
    function Posix_Open
      (Path  : C_Path_String;
@@ -869,7 +873,8 @@ package body Nhe_O.IO is
       End_Pos        : Off_T;
       Frame_Count    : Off_T;
       Aligned_Offset : Off_T;
-      Written        : Ssize_T;
+      Written        : Ssize_T := -1;
+      Head_Ok        : Boolean;
       Sync_Rc        : int;
       Trunc_R        : int;
       Close_R        : int;
@@ -908,10 +913,32 @@ package body Nhe_O.IO is
       end if;
 
       Aligned_Offset := Frame_Count * Off_T (WAL_Frame_Size);
-      for Attempt in 1 .. Max_IO_Retries loop
-         Written := Posix_Pwrite_WAL (Fd, Frame, size_t (WAL_Frame_Size), Aligned_Offset);
-         exit when Written = Ssize_T (WAL_Frame_Size);
-      end loop;
+
+      --  The first frame of a WAL is preceded by a durable write of its first sector
+      --  (rewritten unchanged by the whole frame below), so a crash leaves it torn
+      --  either as a prefix of that sector or with its whole header: recovery can
+      --  always tell a torn first append from a foreign file
+      Head_Ok := True;
+      if Frame_Count = 0 then
+         for Attempt in 1 .. Max_IO_Retries loop
+            Written := Posix_Pwrite_WAL (Fd, Frame, size_t (Header_Sector_Size), 0);
+            exit when Written = Ssize_T (Header_Sector_Size);
+         end loop;
+         if Written = Ssize_T (Header_Sector_Size) then
+            Sync_Rc := Posix_Fsync (Fd);
+            Head_Ok := Sync_Rc = 0;
+         else
+            Head_Ok := False;
+         end if;
+      end if;
+
+      Written := -1;
+      if Head_Ok then
+         for Attempt in 1 .. Max_IO_Retries loop
+            Written := Posix_Pwrite_WAL (Fd, Frame, size_t (WAL_Frame_Size), Aligned_Offset);
+            exit when Written = Ssize_T (WAL_Frame_Size);
+         end loop;
+      end if;
 
       Sync_Rc := Posix_Fsync (Fd);
       Success := (Written = Ssize_T (WAL_Frame_Size)) and then (Sync_Rc = 0);

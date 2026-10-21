@@ -79,7 +79,9 @@ package Nhe_O.RAG is
       Read_Horizon    : Commit_Seq_Number  := 0;
       --  A commit left pages of the WAL unmaterialized in the database file (its
       --  in-place redo failed, see Commit_RAG_Tx): Freeze_RAG_Engine refuses until a
-      --  later in-place redo succeeds or the engine is recovered
+      --  later in-place redo succeeds or the engine is recovered, and a query whose
+      --  candidates need those pages fails with Status_IO_Error meanwhile (Stage 2 and
+      --  the parent chunk are read from the database file)
       Pages_Pending   : Boolean            := False;
       PK_Tree         : BTree_Index        := (others => <>);
       Vector_Graph    : HNSW_Index         := (others => <>);

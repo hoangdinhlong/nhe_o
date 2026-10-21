@@ -141,7 +141,8 @@ void nhe_o_init(int *out_status);
  *    checkpoint replaced the WAL.
  *  - A WAL path naming a file that is not a WAL fails with NHE_O_STATUS_IO_ERROR and
  *    is never truncated; only a file of at most 4120 bytes that starts with a frame
- *    header, or with zero bytes up to its first 4096, is taken as a torn first append.
+ *    header (or is a shorter prefix of one), or with zero bytes up to its first 4096,
+ *    is taken as a torn first append.
  *  - A database written with another dimension fails with
  *    NHE_O_STATUS_DIMENSION_MISMATCH (an empty database takes the new dim). */
 void nhe_o_init_with_paths(

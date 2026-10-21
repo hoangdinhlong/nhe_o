@@ -1022,8 +1022,10 @@ package body Nhe_O.Transaction is
    --  True iff the first Len bytes of Frame can be what a crash left of the very first
    --  append to an empty WAL: a whole frame header that a valid frame could carry (the
    --  "NHEO" magic, a valid transaction id, page id and frame kind, zero reserved bytes)
-   --  followed by any payload bytes, or zero bytes up to the end of the first 4096-byte
-   --  block (an extension whose first block never reached the disk)
+   --  followed by any payload bytes; fewer than WAL_Header_Size bytes that begin such a
+   --  header (Append_WAL_Frame syncs the first sector of a first frame before the rest,
+   --  so a tear inside the header leaves only a prefix of it); or zero bytes up to the
+   --  end of the first 4096-byte block (an extension whose data never reached the disk)
    function Is_Torn_First_Frame
      (Frame : WAL_Frame_Buffer;
       Len   : WAL_Frame_Offset) return Boolean
@@ -1034,6 +1036,21 @@ package body Nhe_O.Transaction is
        and then Get_U32_BE (Frame, 9) <= Unsigned_32 (Max_Page_Id)
        and then Frame (17) <= 2
        and then (for all I in 18 .. WAL_Header_Size => Frame (I) = 0))
+      or else
+      (Len < WAL_Header_Size
+       and then Frame (1) = Magic_0
+       and then (Len < 2 or else Frame (2) = Magic_1)
+       and then (Len < 3 or else Frame (3) = Magic_2)
+       and then (Len < 4 or else Frame (4) = Magic_3)
+       --  Tx_Id in 1 .. Max_Tx_Id = 16#2000#, Page_Id <= Max_Page_Id = 16#F_FFFF#
+       and then (Len < 5 or else Frame (5) = 0)
+       and then (Len < 6 or else Frame (6) = 0)
+       and then (Len < 7 or else Frame (7) <= 16#20#)
+       and then (Len < 8 or else Get_U32_BE (Frame, 5) in 1 .. Unsigned_32 (Max_Tx_Id))
+       and then (Len < 9 or else Frame (9) = 0)
+       and then (Len < 10 or else Frame (10) <= 16#0F#)
+       and then (Len < 17 or else Frame (17) <= 2)
+       and then (for all I in 18 .. Len => Frame (I) = 0))
       or else (for all I in 1 .. Natural'Min (Len, Nhe_O.Page_Size) => Frame (I) = 0))
      with Global => null;
 

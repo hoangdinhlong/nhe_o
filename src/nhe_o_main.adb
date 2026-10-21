@@ -414,6 +414,9 @@ procedure Nhe_O_Main is
    Size_Ok       : Boolean;
    Trunc_Ok      : Boolean;
    Is_WAL_File   : Boolean;
+   --  The first bytes of a valid frame header: "NHEO", Tx_Id 1, Page_Id 0, zeros
+   Header_Prefix : constant Page_Buffer :=
+     [1 => 16#4E#, 2 => 16#48#, 3 => 16#45#, 4 => 16#4F#, 8 => 16#01#, others => 0];
    --  "NHEO meet" followed by text: starts like the frame magic, but no frame header
    Magic_Text    : constant Page_Buffer :=
      [1 => 16#4E#, 2 => 16#48#, 3 => 16#45#, 4 => 16#4F#, 5 => 16#20#, 6 => 16#6D#,
@@ -2326,6 +2329,15 @@ begin
    Repair_WAL_Tail (Foreign_File, Tx_Status);
    Get_File_Size (Foreign_File, Tail_Size, Size_Ok);
    Check (Is_WAL_File and then Tx_Status = Status_Ok and then Size_Ok and then Tail_Size = 0);
+   --  A tear inside the header of a first frame leaves a prefix of it (the first
+   --  sector of a first frame is synced before the rest): still a torn append
+   Delete_File_If_Exists (Foreign_File);
+   Write_Page (Foreign_File, 0, Header_Prefix, WAL_App_Ok);
+   Truncate_File (Foreign_File, 10, Trunc_Ok);
+   Check (WAL_App_Ok and then Trunc_Ok);
+   Repair_WAL_Tail (Foreign_File, Tx_Status);
+   Get_File_Size (Foreign_File, Tail_Size, Size_Ok);
+   Check (Tx_Status = Status_Ok and then Size_Ok and then Tail_Size = 0);
    --  ... but text that merely starts like the magic is not a WAL, and stays as it is
    Delete_File_If_Exists (Foreign_File);
    Write_Page (Foreign_File, 0, Magic_Text, WAL_App_Ok);
@@ -3065,6 +3077,22 @@ begin
    Delete_File_If_Exists (C_Ckpt_Path);
    Create_File_Exclusive (C_Ckpt_Path, C_Size_Ok);
    Check (C_Size_Ok);
+   --  R15-RAG-01: an interrupted checkpoint whose first frame tore inside its header
+   --  leaves a header prefix there, which is recognized as a leftover and removed
+   Delete_File_If_Exists (C_Ckpt_Path);
+   Write_Page (C_Ckpt_Path, 0, Header_Prefix, C_Size_Ok);
+   Check (C_Size_Ok);
+   Truncate_File (C_Ckpt_Path, 23, C_Size_Ok);
+   Check (C_Size_Ok);
+   C_Init_With_Paths (C_DB_Buf, C_DB_Len, C_WAL_Buf, C_WAL_Len, 3, C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   Check_File_Exists (C_Ckpt_Path, C_File_Found);
+   Check (not C_File_Found);
+   C_Close (C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   Create_File_Exclusive (C_Ckpt_Path, C_Size_Ok);
+   Check (C_Size_Ok);
+
    --  R15-CA-03: a WAL-like file there that another open holds (another database's
    --  WAL or database file) is refused untouched as well
    Lock_File (C_Ckpt_Path, C_Lock, C_Locked);

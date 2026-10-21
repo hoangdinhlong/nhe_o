@@ -337,10 +337,11 @@ package Nhe_O.Transaction is
    --  is truncated: an invalid complete frame that is not the last one, a bad final
    --  frame followed by a partial one, or a torn frame with no valid frame before it
    --  (a lone partial frame, or a lone bad complete frame) that neither starts with a
-   --  whole frame header a valid frame could carry nor holds zero bytes up to the end
-   --  of its first 4096-byte block, mean mid-log corruption or a file that is not a
-   --  WAL, and fail closed with Status_IO_Error leaving the file untouched; so does a
-   --  WAL holding more than Max_WAL_Frames frames. A missing WAL is not an error.
+   --  whole frame header a valid frame could carry, nor is a shorter prefix of one,
+   --  nor holds zero bytes up to the end of its first 4096-byte block, mean mid-log
+   --  corruption or a file that is not a WAL, and fail closed with Status_IO_Error
+   --  leaving the file untouched; so does a WAL holding more than Max_WAL_Frames
+   --  frames. A missing WAL is not an error.
    procedure Repair_WAL_Tail
      (WAL_Path : in     Bounded_Text;
       Status   :    out Engine_Status)

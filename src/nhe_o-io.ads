@@ -242,7 +242,10 @@ package Nhe_O.IO is
           Post   => not (Success and Is_EOF);
 
    --  Append a CRC32-framed WAL record at the frame-aligned end of the WAL via
-   --  positional pwrite + fsync (plus a directory fsync when the WAL was empty). Success
+   --  positional pwrite + fsync (plus a directory fsync when the WAL was empty; the
+   --  first frame of an empty WAL is preceded by a synced write of its first 512-byte
+   --  sector, so a crash can tear it only to a prefix of that sector or after its
+   --  whole header, see Nhe_O.Transaction.Repair_WAL_Tail). Success
    --  is True iff the whole frame was written and made durable. On failure the WAL is
    --  truncated back to its previous length and fsynced. That rollback is best effort:
    --  if it fails too, the complete frame may survive and be replayed by recovery, so a
