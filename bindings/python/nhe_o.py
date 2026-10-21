@@ -1525,6 +1525,8 @@ def run_self_test() -> None:
         "time.sleep(0.1)\n"
         "base = '/tmp/nhe_o_c_api.%d' % os.getpid()\n"
         "for suffix in ('.db', '.wal', '.wal.ckpt'):\n"
+        "    if os.path.lexists(base + suffix):\n"
+        "        os.unlink(base + suffix)\n"
         "    os.symlink(fifo, base + suffix)\n"
         f"eng = nhe_o.NheOEngine(lib_path={lib_file!r})\n"
         "regular = not os.path.islink(base + '.db') and not os.path.islink(base + '.wal')\n"

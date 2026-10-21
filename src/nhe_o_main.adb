@@ -2868,6 +2868,29 @@ begin
    C_Init (C_Rc);
    Check (C_Rc = C_Status_Ok);
 
+   --  R16-CA-03: closing a scratch database never unlinks a file that another open
+   --  holds at its "<wal>.ckpt" scratch name (here a second descriptor of this process)
+   declare
+      Ckpt_Name : constant Bounded_Text :=
+        Make_Text (G_WAL_Path.Data (1 .. G_WAL_Path.Length) & ".ckpt");
+      Held      : File_Lock;
+      Held_Ok   : Boolean;
+      Still     : Boolean;
+   begin
+      Create_File_Exclusive (Ckpt_Name, Held_Ok);
+      Check (Held_Ok);
+      Lock_File (Ckpt_Name, Held, Held_Ok);
+      Check (Held_Ok);
+      C_Close (C_Rc);
+      Check_File_Exists (Ckpt_Name, Still);
+      Check (C_Rc = C_Status_IO_Error and then Still);
+      Unlock_File (Held);
+      C_Init (C_Rc);
+      Check (C_Rc = C_Status_Ok);
+      Check_File_Exists (Ckpt_Name, Still);
+      Check (not Still);
+   end;
+
    C_Analyze_SQL (C_Val_Buf, -5, C_Stmt_Kind, C_Has_Vec, C_Has_JSONB, C_Rc);
    Check (C_Rc = C_Status_Invalid_Arg);
 

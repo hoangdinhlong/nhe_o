@@ -168,8 +168,9 @@ void nhe_o_init_with_paths(
 /* Release the runtime and its file locks (later stateful calls return
  * NHE_O_STATUS_NOT_INITIALIZED; closing twice is harmless). A database opened with
  * nhe_o_init_with_paths is checkpointed first (best effort) and its files are kept;
- * the scratch files of nhe_o_init are deleted. In a forked child it only drops the
- * inherited copy (no checkpoint, no file removed). */
+ * the scratch files of nhe_o_init are deleted (NHE_O_STATUS_IO_ERROR if one could not
+ * be: a file another open holds at the scratch "<wal>.ckpt" name is never removed).
+ * In a forked child it only drops the inherited copy (no checkpoint, no file removed). */
 void nhe_o_close(int *out_status);
 
 /* Compact the WAL: create "<wal>.ckpt" (O_EXCL, locked from its creation on), write the

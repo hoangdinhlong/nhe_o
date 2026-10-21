@@ -170,7 +170,8 @@ package Nhe_O.C_API is
    --  nhe_o_init database are deleted. State is cleared, the file locks are released and
    --  G_Initialized becomes False. In a forked child (G_Owner_Pid is another process)
    --  only the inherited copy is dropped: no checkpoint, no file removed.
-   --  C_Status_IO_Error reports that a scratch file could not be removed; the runtime is
+   --  C_Status_IO_Error reports that a scratch file could not be removed (a file that
+   --  another open holds at the scratch "<wal>.ckpt" name never is); the runtime is
    --  released either way.
    procedure C_Close (Out_Status : out int)
      with Global        => (In_Out => (G_Initialized, G_Owner_Pid, G_Ephemeral, G_DB_Path, G_WAL_Path,

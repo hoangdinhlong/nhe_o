@@ -201,28 +201,6 @@ package body Nhe_O.C_API is
       Unlock_File (G_Ckpt_Lock);
    end Reset_Runtime;
 
-   --  Delete the scratch files of an nhe_o_init database opened by this process (no-op
-   --  otherwise); Removed is True iff none of them is left on disk
-   procedure Remove_Scratch_Files (Removed : out Boolean)
-     with Global => (Input => (G_Ephemeral, G_Owner_Pid, G_DB_Path, G_WAL_Path)),
-          Always_Terminates
-   is
-      --  The scratch files of a forked child's inherited engine are the parent's
-      Mine      : constant Boolean := G_Ephemeral and then G_Owner_Pid = Get_Process_Id;
-      DB_Gone   : Boolean := True;
-      WAL_Gone  : Boolean := True;
-      Ckpt_Gone : Boolean := True;
-   begin
-      if Mine and then G_DB_Path.Length > 0 then
-         Delete_File_If_Exists (G_DB_Path, DB_Gone);
-      end if;
-      if Mine and then G_WAL_Path.Length in 1 .. Max_WAL_Path_Len then
-         Delete_File_If_Exists (G_WAL_Path, WAL_Gone);
-         Delete_File_If_Exists (Checkpoint_Path (G_WAL_Path), Ckpt_Gone);
-      end if;
-      Removed := DB_Gone and then WAL_Gone and then Ckpt_Gone;
-   end Remove_Scratch_Files;
-
    --  Remove File_Path unless an open database holds it: a scratch file of this pid
    --  can belong to a live engine of a process with the same pid in another PID
    --  namespace sharing /tmp. A file is removed only while this call holds its lock
@@ -273,6 +251,30 @@ package body Nhe_O.C_API is
          Unlock_File (Lock);
       end if;
    end Remove_Created_File;
+
+   --  Delete the scratch files of an nhe_o_init database opened by this process (no-op
+   --  otherwise); Removed is True iff none of them is left on disk. The database and the
+   --  WAL are this engine's own locked files; "<wal>.ckpt" is removed like an earlier
+   --  scratch file (Remove_Unused_File), since another open may hold a file there
+   procedure Remove_Scratch_Files (Removed : out Boolean)
+     with Global => (Input => (G_Ephemeral, G_Owner_Pid, G_DB_Path, G_WAL_Path)),
+          Always_Terminates
+   is
+      --  The scratch files of a forked child's inherited engine are the parent's
+      Mine      : constant Boolean := G_Ephemeral and then G_Owner_Pid = Get_Process_Id;
+      DB_Gone   : Boolean := True;
+      WAL_Gone  : Boolean := True;
+      Ckpt_Gone : Boolean := True;
+   begin
+      if Mine and then G_DB_Path.Length > 0 then
+         Delete_File_If_Exists (G_DB_Path, DB_Gone);
+      end if;
+      if Mine and then G_WAL_Path.Length in 1 .. Max_WAL_Path_Len then
+         Delete_File_If_Exists (G_WAL_Path, WAL_Gone);
+         Remove_Unused_File (Checkpoint_Path (G_WAL_Path), Ckpt_Gone);
+      end if;
+      Removed := DB_Gone and then WAL_Gone and then Ckpt_Gone;
+   end Remove_Scratch_Files;
 
    procedure C_Init (Out_Status : out int) is
       Pid       : constant Natural := Get_Process_Id;
