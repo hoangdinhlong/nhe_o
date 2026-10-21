@@ -3,7 +3,7 @@
 > **Start here.** Entry point for any session (per `../AGENTS.md`).
 > States where the project stands, the active epic, and the next task.
 
-_Last updated: 2026-10-20_
+_Last updated: 2026-10-21_
 
 ---
 
