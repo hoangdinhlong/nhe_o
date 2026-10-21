@@ -43,7 +43,8 @@ package Nhe_O.Types is
       Data   : String (Text_Index) := [others => ' '];
    end record;
 
-   --  Epoch timestamp in seconds (used for TIMESTAMPTZ and Redis KV TTL)
+   --  Epoch timestamp in seconds: the caller's clock, access times and TTL deadlines of
+   --  the KV store (Nhe_O.KV, Nhe_O.C_API); no SQL value uses it
    subtype Epoch_Seconds is Interfaces.Integer_64 range 0 .. Interfaces.Integer_64'Last;
 
    --  Engine operation status

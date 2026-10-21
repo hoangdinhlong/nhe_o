@@ -3083,6 +3083,18 @@ begin
    Check (C_Rc = C_Status_Ok);
    Delete_File_If_Exists (C_DB_Path);
    Delete_File_If_Exists (C_WAL_Path);
+
+   --  A refusal during recovery (here a WAL path naming a file that is not a WAL)
+   --  removes the database file the call created and leaves the WAL path untouched
+   Write_Page (C_WAL_Path, 0, Page_B, C_Size_Ok);
+   Check (C_Size_Ok);
+   C_Init_With_Paths (C_DB_Buf, C_DB_Len, C_WAL_Buf, C_WAL_Len, 3, C_Rc);
+   Check (C_Rc = C_Status_IO_Error and then not G_Initialized);
+   Check_File_Exists (C_DB_Path, C_File_Found);
+   Check (not C_File_Found);
+   Get_File_Size (C_WAL_Path, C_WAL_Size, C_Size_Ok);
+   Check (C_Size_Ok and then C_WAL_Size = File_Size (Nhe_O.Page_Size));
+   Delete_File_If_Exists (C_WAL_Path);
    Print_Line ("  => Passed: C ABI / FFI exports, N-D vector/RAG/Delete FFI, checkpoint, recovery, and defensive boundary guards verified.");
 
    Print_Blank_Line;

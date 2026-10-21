@@ -834,7 +834,7 @@ class NheOEngine:
         if status.value != STATUS_OK:
             raise NheOError("nhe_o_rag_query_full_nd", status.value)
         copy_len = min(MAX_TOAST_BYTES, int(parent_bytes.value))
-        parent_text = bytes(parent_buf[:copy_len]).decode("utf-8", errors="replace")
+        parent_text = bytes(parent_buf[:copy_len]).decode("utf-8", "surrogateescape")
         return {
             "hit_count": int(hit_count.value),
             "top_doc_id": int(top_doc_id.value),
@@ -901,7 +901,7 @@ class NheOEngine:
             "hit_count": int(hit_count.value),
             "top_doc_id": int(top_doc_id.value),
             "top_parent_len": int(parent_len.value),
-            "top_parent_prefix": bytes(parent_buf[:written]).decode("utf-8", errors="replace"),
+            "top_parent_prefix": bytes(parent_buf[:written]).decode("utf-8", "surrogateescape"),
             "graph_neighbor_hit": bool(graph_hit.value),
         }
 

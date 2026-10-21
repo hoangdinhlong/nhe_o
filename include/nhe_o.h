@@ -9,9 +9,10 @@
  *    state, so the library is NOT thread-safe: serialize all calls (one mutex around
  *    every call). Two "handles" in one process are the same engine.
  *  - One process per database. An open database holds exclusive flock(2) locks on its
- *    database and WAL files; opening either file again, from any process or a second
- *    time in this one, fails with NHE_O_STATUS_IO_ERROR until nhe_o_close (or another
- *    open) releases them. The locks are advisory: tools that ignore flock can still
+ *    database and WAL files: opening either file from another process (or flock on
+ *    another descriptor of it) fails with NHE_O_STATUS_IO_ERROR until nhe_o_close
+ *    releases them. In this process, a new nhe_o_init / nhe_o_init_with_paths first
+ *    releases the open database (without a checkpoint), so reopening it succeeds. The locks are advisory: tools that ignore flock can still
  *    change the files. The engine belongs to the process that opened it: in a forked
  *    child every stateful call returns NHE_O_STATUS_NOT_INITIALIZED, and nhe_o_close
  *    there only releases the child's inherited copies of the lock descriptors (no
@@ -123,8 +124,9 @@ void nhe_o_init(int *out_status);
  *    "<wal>.ckpt", a name reserved for the checkpoint, holds a file that is not a WAL
  *    (a leftover of an interrupted checkpoint is removed).
  *  - Missing files are created (directory fsynced) and both files are locked (see
- *    "One process per database"); a file created by a refused call is removed, except
- *    when the refusal is a lock held elsewhere.
+ *    "One process per database"); a refused call removes the files it created, except
+ *    when the refusal is a lock held elsewhere or comes after the open's own
+ *    checkpoint replaced the WAL.
  *  - A WAL path naming a file that is not a WAL fails with NHE_O_STATUS_IO_ERROR and
  *    is never truncated; only a file of at most 4120 bytes that starts with a frame
  *    header, or with zero bytes up to its first 4096, is taken as a torn first append.

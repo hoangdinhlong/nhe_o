@@ -30,8 +30,9 @@ library project Nhe_O_Lib is
    --  and an exception path that cannot cross the C ABI. Run-time checks stay enabled.
    --  The verification executable (nhe_o.gpr) keeps -gnata.
    --  -fstack-check probes large frames page by page, so overflowing the calling
-   --  thread's stack always hits its guard page (the process terminates with
-   --  Storage_Error) instead of skipping past it into adjacent memory.
+   --  thread's stack always hits its guard page instead of skipping past it into
+   --  adjacent memory: the process then terminates (Storage_Error in the thread that
+   --  loaded the library, SIGSEGV in other host threads).
    package Compiler is
       for Default_Switches ("Ada") use (
          "-O2",

@@ -53,7 +53,7 @@ Status legend: ☐ todo · ◐ in progress · ☑ done
 
 ## Notes / sequencing
 - Follows the **Feature Epic → Grooming Epic** cadence codified in `AGENTS.md` and `docs/epics/README.md`.
-- See [`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md) for Round 1 (24 findings, `✅ Remediated`), Round 2 (16 findings, `✅ Remediated`), Round 3 (18 findings, `✅ Remediated`), Round 4 (12 findings, `✅ Remediated`), Round 5 (3 findings, `✅ Remediated`), Round 6 (initial convergence pass challenged by Round 7), Round 7 (7 findings, `✅ Remediated`), Round 8 (initial convergence pass), Round 9 (3 findings, `✅ Remediated`), Round 10 (1 finding, `✅ Remediated`), and Round 11 (`0 issues found`); Part V records Round 12 (55 findings) and Round 13 (34 findings), all remediated.
+- See [`ADVERSARIAL-REVIEW.md`](ADVERSARIAL-REVIEW.md) for Round 1 (24 findings, `✅ Remediated`), Round 2 (16 findings, `✅ Remediated`), Round 3 (18 findings, `✅ Remediated`), Round 4 (12 findings, `✅ Remediated`), Round 5 (3 findings, `✅ Remediated`), Round 6 (initial convergence pass challenged by Round 7), Round 7 (7 findings, `✅ Remediated`), Round 8 (initial convergence pass), Round 9 (3 findings, `✅ Remediated`), Round 10 (1 finding, `✅ Remediated`), and Round 11 (`0 issues found`); Part V records Round 12 (55 findings), Round 13 (34 findings) and Round 14 (32 findings), all remediated.
 
 ## Open questions
 - `Q-003` and `Q-004` resolved and marked `Answered` in `docs/OPEN-QUESTIONS.md` (`ADR-006`, `ADR-007`).

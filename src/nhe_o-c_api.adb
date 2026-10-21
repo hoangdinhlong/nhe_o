@@ -478,6 +478,23 @@ package body Nhe_O.C_API is
       pragma Warnings (Off, Frame_Pg);
       pragma Warnings (Off, Frame_Page);
       pragma Warnings (Off, Scratch_Gone);
+
+      --  Refuse the open once both files are locked: remove the files this call
+      --  created, so the refusal leaves the file system as it found it, then release
+      --  the runtime and its locks
+      procedure Refuse (Code : int)
+        with Pre => DB_P.Length > 0 and then WAL_P.Length > 0
+      is
+      begin
+         if not DB_Existed then
+            Delete_File_If_Exists (DB_P);
+         end if;
+         if not WAL_Existed then
+            Delete_File_If_Exists (WAL_P);
+         end if;
+         Reset_Runtime;
+         Out_Status := Code;
+      end Refuse;
    begin
       --  Opening a database releases an nhe_o_init scratch database (best effort)
       Remove_Scratch_Files (Scratch_Gone);
@@ -633,14 +650,7 @@ package body Nhe_O.C_API is
       if Ckpt_Exists then
          Check_WAL_File (Ckpt_P, Ckpt_Is_WAL);
          if not Ckpt_Is_WAL then
-            if not DB_Existed then
-               Delete_File_If_Exists (DB_P);
-            end if;
-            if not WAL_Existed then
-               Delete_File_If_Exists (WAL_P);
-            end if;
-            Reset_Runtime;
-            Out_Status := C_Status_Invalid_Arg;
+            Refuse (C_Status_Invalid_Arg);
             return;
          end if;
          Delete_File_If_Exists (Ckpt_P);
@@ -655,8 +665,7 @@ package body Nhe_O.C_API is
          Replayed_Ops => KV_Replayed,
          Status       => Status);
       if Status /= Status_Ok then
-         Reset_Runtime;
-         Out_Status := To_C_Status (Status);
+         Refuse (To_C_Status (Status));
          return;
       end if;
 
@@ -669,8 +678,7 @@ package body Nhe_O.C_API is
          Max_Seen_Tx => Max_Seen_Tx,
          Status      => Status);
       if Status /= Status_Ok then
-         Reset_Runtime;
-         Out_Status := To_C_Status (Status);
+         Refuse (To_C_Status (Status));
          return;
       end if;
 
@@ -680,8 +688,7 @@ package body Nhe_O.C_API is
          Read_WAL_Frame (WAL_P, Idx, Frame, Frame_Ok, Frame_EOF);
          exit when Frame_EOF;
          if not Frame_Ok or else not Verify_WAL_Frame (Frame) then
-            Reset_Runtime;
-            Out_Status := C_Status_IO_Error;
+            Refuse (C_Status_IO_Error);
             return;
          end if;
          if Get_WAL_Frame_Kind (Frame) = WAL_Frame_KV then

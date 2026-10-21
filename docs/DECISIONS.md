@@ -16,10 +16,10 @@ ADR-xxx** (or remove it if it was never built on and has no re-read value — ow
 ---
 
 ## ADR-001 — Unified Multi-Model Engine (PostgreSQL SQL/JSONB/Vector + Redis KV & Pub/Sub over Shared MVCC/WAL)
-- **Date:** 2026-10-16
+- **Status:** Partially superseded — KV entries are WAL-logged slots without MVCC (`ADR-007`, `ADR-014`), and MVCC visibility belongs to the RAG engine by commit sequence numbers (`ADR-010`); the shared WAL and the one-engine design stand.
 - **Decision:** Build Nhé O (crate `nhe_o`, Ada root package `Nhe_O`) as a single in-process multi-model engine where PostgreSQL relational tables, `VECTOR(d)` embeddings, `JSONB` documents, and Redis-compatible Key-Value cache entries share a unified 4096-byte slotted-page layout, header-and-payload CRC32-verified Write-Ahead Log (WAL), and MVCC snapshot isolation (`xmin`/`xmax`), paired with a bounded ring-buffer Pub/Sub broker.
 - **Why:** Running separate SQLite, `pgvector`, and Redis processes for embedded or local-first workloads adds operational overhead and cross-store consistency bugs. Sharing one ACID storage and WAL engine guarantees crash-safe durability across relational, vector, document, and KV mutations while allowing direct KV and Pub/Sub calls to bypass SQL parsing overhead.
-- **Consequences:** `Nhe_O.Types` defines the canonical PostgreSQL type tags shared across SQL, KV, and JSONB subsystems; `Nhe_O.Transaction` governs monotonic transaction IDs (`Tx_Id`), WAL frame encoding/decoding/verification, and MVCC visibility across all models.
+- **Consequences:** `Nhe_O.Types` defines the canonical PostgreSQL type tags (used by the SQL validator) and the bounded text types every subsystem shares; `Nhe_O.Transaction` governs transaction IDs (`Tx_Id`), the CLOG and WAL frame encoding/decoding/verification for every model. As built in `v0.4.0`, KV entries live in in-memory slots logged as `"KVMG"` WAL frames with their own sequence ids and no MVCC (`ADR-007`, `ADR-014`), and MVCC snapshot visibility is `Nhe_O.RAG.Is_Version_Visible` (`ADR-010`).
 
 ## ADR-002 — 100% SPARK_Mode (On) Mandate via Statically Bounded Memory and Contract-Bound POSIX Syscall I/O
 - **Date:** 2026-10-16

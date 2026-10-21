@@ -1483,8 +1483,8 @@ package body Nhe_O.RAG is
          return;
       end if;
 
-      --  A poisoned transaction (failed Ingest/Delete with orphan WAL frames) must not
-      --  reach Commit_Tx, which would materialize those frames
+      --  A poisoned transaction (a failed Ingest_Document whose orphan WAL frames could
+      --  not be truncated) must not reach Commit_Tx, which would materialize them
       if Engine.CLOG (Ctx.Id) = Tx_Aborted then
          Rollback_RAG_Tx (Engine, Ctx.Id);
          Rollback_Tx (Ctx);
