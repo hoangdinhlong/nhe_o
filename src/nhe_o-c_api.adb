@@ -168,15 +168,24 @@ package body Nhe_O.C_API is
       return Res;
    end Checkpoint_Path;
 
-   --  Return every runtime global except G_Scratch_Engine to its uninitialized state
+   --  True iff an engine is open and this process opened it (not a forked child)
+   function Engine_Ready return Boolean is
+     (G_Initialized and then G_Owner_Pid = Get_Process_Id)
+     with Global => (Input => (G_Initialized, G_Owner_Pid));
+
+   --  Return every runtime global except G_Scratch_Engine to its uninitialized state,
+   --  releasing the database and WAL locks
    procedure Reset_Runtime
-     with Global => (Output => (G_Initialized, G_Ephemeral, G_Next_Tx, G_Next_KV_Seq,
-                                G_DB_Path, G_WAL_Path, G_KV_Store, G_Broker,
+     with Global => (In_Out => (G_DB_Lock, G_WAL_Lock),
+                     Output => (G_Initialized, G_Owner_Pid, G_Ephemeral, G_Next_Tx,
+                                G_Next_KV_Seq, G_DB_Path, G_WAL_Path, G_KV_Store, G_Broker,
                                 G_RAG_Engine, G_Write_Fault)),
-          Always_Terminates
+          Always_Terminates,
+          Post   => not Is_Locked (G_DB_Lock) and then not Is_Locked (G_WAL_Lock)
    is
    begin
       G_Initialized := False;
+      G_Owner_Pid   := 0;
       G_Ephemeral   := False;
       G_Next_Tx     := 1;
       G_Next_KV_Seq := 1;
@@ -186,22 +195,26 @@ package body Nhe_O.C_API is
       G_Broker      := Empty_Broker;
       Init_RAG_Engine (G_RAG_Engine, 3);
       G_Write_Fault := False;
+      Unlock_File (G_DB_Lock);
+      Unlock_File (G_WAL_Lock);
    end Reset_Runtime;
 
-   --  Delete the scratch files of an nhe_o_init database (no-op otherwise); Removed is
-   --  True iff none of them is left on disk
+   --  Delete the scratch files of an nhe_o_init database opened by this process (no-op
+   --  otherwise); Removed is True iff none of them is left on disk
    procedure Remove_Scratch_Files (Removed : out Boolean)
-     with Global => (Input => (G_Ephemeral, G_DB_Path, G_WAL_Path)),
+     with Global => (Input => (G_Ephemeral, G_Owner_Pid, G_DB_Path, G_WAL_Path)),
           Always_Terminates
    is
+      --  The scratch files of a forked child's inherited engine are the parent's
+      Mine      : constant Boolean := G_Ephemeral and then G_Owner_Pid = Get_Process_Id;
       DB_Gone   : Boolean := True;
       WAL_Gone  : Boolean := True;
       Ckpt_Gone : Boolean := True;
    begin
-      if G_Ephemeral and then G_DB_Path.Length > 0 then
+      if Mine and then G_DB_Path.Length > 0 then
          Delete_File_If_Exists (G_DB_Path, DB_Gone);
       end if;
-      if G_Ephemeral and then G_WAL_Path.Length in 1 .. Max_WAL_Path_Len then
+      if Mine and then G_WAL_Path.Length in 1 .. Max_WAL_Path_Len then
          Delete_File_If_Exists (G_WAL_Path, WAL_Gone);
          Delete_File_If_Exists (Checkpoint_Path (G_WAL_Path), Ckpt_Gone);
       end if;
@@ -213,6 +226,7 @@ package body Nhe_O.C_API is
       DB_Gone   : Boolean;
       WAL_Gone  : Boolean;
       Ckpt_Gone : Boolean;
+      Ready     : Boolean := False;
    begin
       Reset_Runtime;
       G_DB_Path  := Scratch_Path (Pid, ".db");
@@ -223,19 +237,26 @@ package body Nhe_O.C_API is
       if DB_Gone and then WAL_Gone and then Ckpt_Gone then
          --  Recreate both files with O_EXCL: a link planted at a predictable /tmp name
          --  after the unlink makes the creation fail instead of being followed
-         Create_File_Exclusive (G_DB_Path, DB_Gone);
-         if DB_Gone then
-            Create_File_Exclusive (G_WAL_Path, WAL_Gone);
+         Create_File_Exclusive (G_DB_Path, Ready);
+         if Ready then
+            Create_File_Exclusive (G_WAL_Path, Ready);
+         end if;
+         --  Locked like any open database, so no other open can share them
+         if Ready then
+            Lock_File (G_DB_Path, G_DB_Lock, Ready);
+         end if;
+         if Ready then
+            Lock_File (G_WAL_Path, G_WAL_Lock, Ready);
          end if;
       end if;
-      if not (DB_Gone and then WAL_Gone and then Ckpt_Gone) then
-         --  Never adopt a scratch file this process cannot remove or create itself
-         G_DB_Path  := Empty_Text;
-         G_WAL_Path := Empty_Text;
+      if not Ready then
+         --  Never adopt a scratch file this process cannot remove, create or lock itself
+         Reset_Runtime;
          Out_Status := C_Status_IO_Error;
          return;
       end if;
       G_Ephemeral   := True;
+      G_Owner_Pid   := Pid;
       G_Initialized := True;
       Out_Status    := C_Status_Ok;
    end C_Init;
@@ -245,7 +266,7 @@ package body Nhe_O.C_API is
       Ckpt_Status : int;
       pragma Warnings (Off, Ckpt_Status);
    begin
-      if G_Initialized and then not G_Ephemeral then
+      if Engine_Ready and then not G_Ephemeral then
          C_Checkpoint (Ckpt_Status);
       end if;
       Remove_Scratch_Files (Removed);
@@ -264,9 +285,12 @@ package body Nhe_O.C_API is
       Frozen_Page : Page_Buffer;
       Frame       : WAL_Frame_Buffer;
       Frame_CRC   : Unsigned_32;
+      Tmp_Lock    : File_Lock;
+      Tmp_Is_WAL  : Boolean;
+      Locked      : Boolean;
       pragma Warnings (Off, Frame_CRC);
    begin
-      if not G_Initialized
+      if not Engine_Ready
         or else G_DB_Path.Length = 0
         or else G_WAL_Path.Length = 0
       then
@@ -297,12 +321,30 @@ package body Nhe_O.C_API is
       --  2. Write the replacement WAL next to the live one: the KV snapshot, then the
       --     commit frame of the frozen transaction 1 carrying the frozen Page 1
       Tmp_Path := Checkpoint_Path (G_WAL_Path);
-      Delete_File_If_Exists (Tmp_Path, Tmp_Gone);
+      --  A leftover of a failed checkpoint is replaced; any other file is left alone
+      Check_File_Exists (Tmp_Path, Tmp_Exists);
+      if Tmp_Exists then
+         Check_WAL_File (Tmp_Path, Tmp_Is_WAL);
+      else
+         Tmp_Is_WAL := True;
+      end if;
+      if Tmp_Is_WAL then
+         Delete_File_If_Exists (Tmp_Path, Tmp_Gone);
+      else
+         Tmp_Gone := False;
+      end if;
       if Tmp_Gone then
          --  O_EXCL: the rename below must move a file this call created, never a link
          Create_File_Exclusive (Tmp_Path, Tmp_Gone);
       end if;
       if not Tmp_Gone then
+         Out_Status := C_Status_IO_Error;
+         return;
+      end if;
+      --  Lock the new WAL before it becomes live, so the WAL lock never lapses
+      Lock_File (Tmp_Path, Tmp_Lock, Locked);
+      if not Locked then
+         Delete_File_If_Exists (Tmp_Path);
          Out_Status := C_Status_IO_Error;
          return;
       end if;
@@ -317,6 +359,7 @@ package body Nhe_O.C_API is
       end if;
       if not Append_Ok then
          Delete_File_If_Exists (Tmp_Path);
+         Unlock_File (Tmp_Lock);
          Out_Status := C_Status_IO_Error;
          return;
       end if;
@@ -328,6 +371,7 @@ package body Nhe_O.C_API is
          if Tmp_Exists then
             --  The rename did not happen: the live WAL is untouched
             Delete_File_If_Exists (Tmp_Path);
+            Unlock_File (Tmp_Lock);
             Out_Status := C_Status_IO_Error;
             return;
          end if;
@@ -335,6 +379,10 @@ package body Nhe_O.C_API is
          --  writes until a reopen re-derives the durable state from disk
          G_Write_Fault := True;
       end if;
+
+      --  The old WAL is unlinked; the lock taken on the new one replaces its lock
+      Unlock_File (G_WAL_Lock);
+      G_WAL_Lock := Tmp_Lock;
 
       --  4. The live WAL now describes the frozen engine; Page 1 of G_DB_Path is
       --     rewritten by the next commit, or by the redo of a recovery
@@ -346,9 +394,10 @@ package body Nhe_O.C_API is
 
    --  Run C_Checkpoint once the WAL or an id space is past its automatic threshold
    procedure Maybe_Checkpoint
-     with Global => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path, G_KV_Store),
+     with Global => (Input  => (G_Initialized, G_Owner_Pid, G_DB_Path, G_WAL_Path,
+                                G_KV_Store),
                      In_Out => (G_Next_Tx, G_Next_KV_Seq, G_RAG_Engine, G_Scratch_Engine,
-                                G_Write_Fault)),
+                                G_Write_Fault, G_WAL_Lock)),
           Always_Terminates
    is
       WAL_Size    : File_Size;
@@ -356,7 +405,7 @@ package body Nhe_O.C_API is
       Ckpt_Status : int;
       pragma Warnings (Off, Ckpt_Status);
    begin
-      if not G_Initialized or else G_Write_Fault or else G_WAL_Path.Length = 0 then
+      if not Engine_Ready or else G_Write_Fault or else G_WAL_Path.Length = 0 then
          return;
       end if;
 
@@ -373,9 +422,10 @@ package body Nhe_O.C_API is
    --  write-fault state; any other outcome may still have consumed a transaction or
    --  sequence id (an aborted or refused transaction), so the thresholds are checked
    procedure After_Durable_Write (Status : in Engine_Status)
-     with Global => (Input  => (G_Initialized, G_DB_Path, G_WAL_Path, G_KV_Store),
+     with Global => (Input  => (G_Initialized, G_Owner_Pid, G_DB_Path, G_WAL_Path,
+                                G_KV_Store),
                      In_Out => (G_Next_Tx, G_Next_KV_Seq, G_RAG_Engine, G_Scratch_Engine,
-                                G_Write_Fault)),
+                                G_Write_Fault, G_WAL_Lock)),
           Always_Terminates
    is
    begin
@@ -398,6 +448,9 @@ package body Nhe_O.C_API is
       Raw_WAL     : Bounded_Text;
       DB_P        : Bounded_Text;
       WAL_P       : Bounded_Text;
+      DB_R        : Bounded_Text;
+      WAL_R       : Bounded_Text;
+      Locked      : Boolean;
       Abs_Ok      : Boolean;
       WAL_Existed : Boolean;
       WAL_Ok      : Boolean;
@@ -405,6 +458,7 @@ package body Nhe_O.C_API is
       DB_Ok       : Boolean;
       Ckpt_P      : Bounded_Text;
       Ckpt_Exists : Boolean;
+      Ckpt_Is_WAL : Boolean;
       Head        : WAL_Frame_Buffer;
       Head_Len    : Natural;
       Head_Ok     : Boolean;
@@ -472,59 +526,119 @@ package body Nhe_O.C_API is
          return;
       end if;
 
-      --  Swapped arguments: an existing database that starts like a WAL frame is a WAL
-      --  (Nhe_O.RAG never writes page 0, so a database file starts with zero bytes)
+      --  An existing database must look like one. The engine never writes page 0, so a
+      --  database file starts with min (size, 4096) zero bytes; any other file (a WAL
+      --  passed as the database, or an unrelated file) is refused and left untouched,
+      --  before recovery could cut its tail or a commit overwrite its pages
       Check_File_Exists (DB_P, DB_Existed);
       if DB_Existed then
          Read_File_Bytes (DB_P, 0, Head, Head_Len, Head_Ok);
          if not Head_Ok then
             Out_Status := C_Status_IO_Error;
             return;
-         elsif Head_Len >= 4 and then Has_WAL_Magic (Head) then
+         elsif not (for all I in 1 .. Natural'Min (Head_Len, Nhe_O.Page_Size) =>
+                      Head (I) = 0)
+         then
             Out_Status := C_Status_Invalid_Arg;
             return;
          end if;
       end if;
 
-      --  Create missing files now: their directory entries become durable before any
-      --  commit, and stat(2) can then compare the paths. The database, the WAL and the
-      --  checkpoint's "<wal>.ckpt" must be three different files, also through links
-      --  or aliases ("x" vs "./x"); files created by this call are removed on refusal.
+      --  Create missing files now, so their directory entries are durable before any
+      --  commit and realpath(3) / stat(2) can resolve and compare them
       Check_File_Exists (WAL_P, WAL_Existed);
       Create_File_If_Missing (WAL_P, WAL_Ok);
       if WAL_Ok then
-         Create_File_If_Missing (DB_P, DB_Ok);
-      else
-         DB_Ok := False;
-      end if;
-      if not (WAL_Ok and then DB_Ok) then
-         if not WAL_Existed then
+         Resolve_Path (WAL_P, WAL_R, WAL_Ok);
+         if not WAL_Ok and then not WAL_Existed then
             Delete_File_If_Exists (WAL_P);
+         end if;
+      end if;
+      if not WAL_Ok then
+         Out_Status := C_Status_IO_Error;
+         return;
+      end if;
+      Create_File_If_Missing (DB_P, DB_Ok);
+      if DB_Ok then
+         Resolve_Path (DB_P, DB_R, DB_Ok);
+         if not DB_Ok and then not DB_Existed then
+            Delete_File_If_Exists (DB_P);
+         end if;
+      end if;
+      if not DB_Ok then
+         if not WAL_Existed then
+            Delete_File_If_Exists (WAL_R);
          end if;
          Out_Status := C_Status_IO_Error;
          return;
       end if;
-      Check_Same_File (DB_P, WAL_P, Same);
-      Check_File_Exists (Ckpt_P, Ckpt_Exists);
-      if not Same and then Ckpt_Exists then
-         Check_Same_File (DB_P, Ckpt_P, Same);
-         if not Same then
-            Check_Same_File (WAL_P, Ckpt_P, Same);
-         end if;
+
+      --  From here on the engine works on the real files: a symbolic link is resolved
+      --  once, so directory fsyncs reach the directory holding the file and the
+      --  checkpoint renames over the WAL itself, not over the link. A file created
+      --  through a link lives in the link target's directory, which is fsynced too.
+      if not Equal_Text (WAL_R, WAL_P) and then not WAL_Existed then
+         Create_File_If_Missing (WAL_R, WAL_Ok);
       end if;
-      if Same then
+      if not Equal_Text (DB_R, DB_P) and then not DB_Existed then
+         Create_File_If_Missing (DB_R, DB_Ok);
+      end if;
+
+      --  The database, the WAL and the checkpoint's "<wal>.ckpt" must be three
+      --  different files, also through links or aliases ("x" vs "./x"); files created
+      --  by this call are removed on refusal
+      if WAL_R.Length <= Max_WAL_Path_Len then
+         Ckpt_P := Checkpoint_Path (WAL_R);
+         Check_Same_File (DB_R, WAL_R, Same);
+         Same := Same or else Equal_Text (DB_R, Ckpt_P);
+         Check_File_Exists (Ckpt_P, Ckpt_Exists);
+         if not Same and then Ckpt_Exists then
+            Check_Same_File (DB_R, Ckpt_P, Same);
+            if not Same then
+               Check_Same_File (WAL_R, Ckpt_P, Same);
+            end if;
+         end if;
+      else
+         Same := True; --  the resolved WAL path leaves no room for ".ckpt"
+      end if;
+      if Same or else not (WAL_Ok and then DB_Ok) then
          if not DB_Existed then
-            Delete_File_If_Exists (DB_P);
+            Delete_File_If_Exists (DB_R);
          end if;
          if not WAL_Existed then
-            Delete_File_If_Exists (WAL_P);
+            Delete_File_If_Exists (WAL_R);
          end if;
-         Out_Status := C_Status_Invalid_Arg;
+         Out_Status := (if Same then C_Status_Invalid_Arg else C_Status_IO_Error);
          return;
       end if;
 
-      --  A checkpoint interrupted before its rename leaves a stale "<wal>.ckpt"
-      Delete_File_If_Exists (Ckpt_P);
+      --  Exclusive locks: another process (or a second open in this one) holding either
+      --  file refuses this open before recovery touches anything. A file created by
+      --  this call is left in place: it is an empty file, i.e. an empty database / WAL.
+      Lock_File (DB_R, G_DB_Lock, Locked);
+      if Locked then
+         Lock_File (WAL_R, G_WAL_Lock, Locked);
+      end if;
+      if not Locked then
+         Reset_Runtime;
+         Out_Status := C_Status_IO_Error;
+         return;
+      end if;
+      DB_P  := DB_R;
+      WAL_P := WAL_R;
+
+      --  A checkpoint interrupted before its rename leaves a stale "<wal>.ckpt". The
+      --  name is reserved, yet a file there that is not a WAL is refused, not deleted.
+      Check_File_Exists (Ckpt_P, Ckpt_Exists);
+      if Ckpt_Exists then
+         Check_WAL_File (Ckpt_P, Ckpt_Is_WAL);
+         if not Ckpt_Is_WAL then
+            Reset_Runtime;
+            Out_Status := C_Status_Invalid_Arg;
+            return;
+         end if;
+         Delete_File_If_Exists (Ckpt_P);
+      end if;
 
       --  KV replay (repairs a torn WAL tail first)
       Recover_KV_From_WAL
@@ -535,7 +649,7 @@ package body Nhe_O.C_API is
          Replayed_Ops => KV_Replayed,
          Status       => Status);
       if Status /= Status_Ok then
-         G_KV_Store := Empty_KV_Store;
+         Reset_Runtime;
          Out_Status := To_C_Status (Status);
          return;
       end if;
@@ -549,8 +663,7 @@ package body Nhe_O.C_API is
          Max_Seen_Tx => Max_Seen_Tx,
          Status      => Status);
       if Status /= Status_Ok then
-         G_KV_Store := Empty_KV_Store;
-         Init_RAG_Engine (G_RAG_Engine, 3);
+         Reset_Runtime;
          Out_Status := To_C_Status (Status);
          return;
       end if;
@@ -561,8 +674,7 @@ package body Nhe_O.C_API is
          Read_WAL_Frame (WAL_P, Idx, Frame, Frame_Ok, Frame_EOF);
          exit when Frame_EOF;
          if not Frame_Ok or else not Verify_WAL_Frame (Frame) then
-            G_KV_Store := Empty_KV_Store;
-            Init_RAG_Engine (G_RAG_Engine, 3);
+            Reset_Runtime;
             Out_Status := C_Status_IO_Error;
             return;
          end if;
@@ -581,6 +693,7 @@ package body Nhe_O.C_API is
       G_Next_KV_Seq := (if Max_KV_Seq = Max_Tx_Id then Max_Tx_Id else Max_KV_Seq + 1);
       G_DB_Path     := DB_P;
       G_WAL_Path    := WAL_P;
+      G_Owner_Pid   := Get_Process_Id;
       G_Initialized := True;
 
       Maybe_Checkpoint;
@@ -738,7 +851,7 @@ package body Nhe_O.C_API is
       Has_TTL : Boolean;
       TTL_Val : Epoch_Seconds;
    begin
-      if not G_Initialized then
+      if not Engine_Ready then
          Out_Status := C_Status_Not_Initialized;
          return;
       end if;
@@ -815,7 +928,7 @@ package body Nhe_O.C_API is
    begin
       Out_Val_Len := 0;
 
-      if not G_Initialized then
+      if not Engine_Ready then
          Out_Status := C_Status_Not_Initialized;
          return;
       end if;
@@ -848,7 +961,7 @@ package body Nhe_O.C_API is
    begin
       Out_Removed := 0;
 
-      if not G_Initialized then
+      if not Engine_Ready then
          Out_Status := C_Status_Not_Initialized;
          return;
       end if;
@@ -908,7 +1021,7 @@ package body Nhe_O.C_API is
    begin
       Out_Exists := 0;
 
-      if not G_Initialized then
+      if not Engine_Ready then
          Out_Status := C_Status_Not_Initialized;
          return;
       end if;
@@ -940,7 +1053,7 @@ package body Nhe_O.C_API is
    begin
       Out_Updated := 0;
 
-      if not G_Initialized then
+      if not Engine_Ready then
          Out_Status := C_Status_Not_Initialized;
          return;
       end if;
@@ -998,7 +1111,7 @@ package body Nhe_O.C_API is
    begin
       Out_TTL := -2;
 
-      if not G_Initialized then
+      if not Engine_Ready then
          Out_Status := C_Status_Not_Initialized;
          return;
       end if;
@@ -1029,7 +1142,7 @@ package body Nhe_O.C_API is
    begin
       Out_New_Val := 0;
 
-      if not G_Initialized then
+      if not Engine_Ready then
          Out_Status := C_Status_Not_Initialized;
          return;
       end if;
@@ -1084,7 +1197,7 @@ package body Nhe_O.C_API is
    begin
       Out_Sub_Id := 0;
 
-      if not G_Initialized then
+      if not Engine_Ready then
          Out_Status := C_Status_Not_Initialized;
          return;
       end if;
@@ -1107,7 +1220,7 @@ package body Nhe_O.C_API is
       Out_Status :    out int)
    is
    begin
-      if not G_Initialized then
+      if not Engine_Ready then
          Out_Status := C_Status_Not_Initialized;
          return;
       end if;
@@ -1135,7 +1248,7 @@ package body Nhe_O.C_API is
    begin
       Out_Delivered := 0;
 
-      if not G_Initialized then
+      if not Engine_Ready then
          Out_Status := C_Status_Not_Initialized;
          return;
       end if;
@@ -1170,7 +1283,7 @@ package body Nhe_O.C_API is
       Out_Payload_Len := 0;
       Out_Found       := 0;
 
-      if not G_Initialized then
+      if not Engine_Ready then
          Out_Status := C_Status_Not_Initialized;
          return;
       end if;
@@ -1242,7 +1355,7 @@ package body Nhe_O.C_API is
       Flush_Pending  : Boolean;
       pragma Warnings (Off, Delivered);
    begin
-      if not G_Initialized
+      if not Engine_Ready
         or else G_DB_Path.Length = 0
         or else G_WAL_Path.Length = 0
       then
@@ -1405,7 +1518,7 @@ package body Nhe_O.C_API is
       Flush_Pending : Boolean;
       pragma Warnings (Off, Delivered);
    begin
-      if not G_Initialized
+      if not Engine_Ready
         or else G_DB_Path.Length = 0
         or else G_WAL_Path.Length = 0
       then
@@ -1553,7 +1666,7 @@ package body Nhe_O.C_API is
       Out_Parent_Len   := 0;
       Out_Graph_Hit    := 0;
 
-      if not G_Initialized or else G_DB_Path.Length = 0 then
+      if not Engine_Ready or else G_DB_Path.Length = 0 then
          Out_Status := C_Status_Not_Initialized;
          return;
       end if;
@@ -1699,4 +1812,7 @@ package body Nhe_O.C_API is
       end if;
    end C_RAG_Query_ND;
 
+begin
+   --  Leave SIGABRT to the host (see Nhe_O.IO.Restore_Default_Abort_Signal)
+   Restore_Default_Abort_Signal;
 end Nhe_O.C_API;

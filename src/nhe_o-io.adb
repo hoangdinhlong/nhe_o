@@ -178,6 +178,60 @@ package body Nhe_O.IO is
           Convention    => C,
           External_Name => "getpid";
 
+   LOCK_EX : constant int := 2;
+   LOCK_NB : constant int := 4;
+
+   function Posix_Flock
+     (Fd        : int;
+      Operation : int) return int
+     with Side_Effects,
+          Global        => null,
+          Always_Terminates,
+          Import        => True,
+          Convention    => C,
+          External_Name => "flock";
+
+   function Posix_Fstat
+     (Fd  : int;
+      Buf : in out Stat_Buffer) return int
+     with Side_Effects,
+          Global        => null,
+          Always_Terminates,
+          Import        => True,
+          Convention    => C,
+          External_Name => "fstat";
+
+   --  realpath(3) writes at most PATH_MAX (4096) bytes including the NUL and returns
+   --  a char * (NULL on failure), bound like getcwd as a pointer-sized integer
+   Max_Real_Path : constant := 4096;
+   subtype Real_Path_Index is Positive range 1 .. Max_Real_Path;
+   subtype Real_Path_String is String (Real_Path_Index);
+
+   function Posix_Realpath
+     (Path     : C_Path_String;
+      Resolved : in out Real_Path_String) return size_t
+     with Side_Effects,
+          Global        => null,
+          Always_Terminates,
+          Import        => True,
+          Convention    => C,
+          External_Name => "realpath";
+
+   --  signal(2) takes and returns a handler pointer, bound as a pointer-sized integer;
+   --  SIG_DFL is the null handler
+   SIGABRT : constant int    := 6; --  Linux and macOS
+   SIG_DFL : constant size_t := 0;
+
+   function Posix_Signal
+     (Signum  : int;
+      Handler : size_t) return size_t
+     with Side_Effects,
+          Global        => null,
+          Always_Terminates,
+          Import        => True,
+          Convention    => C,
+          External_Name => "signal";
+
    F_OK : constant int := 0;
 
    function Posix_Access
@@ -466,6 +520,123 @@ package body Nhe_O.IO is
          return 0;
       end if;
    end Get_Process_Id;
+
+   procedure Restore_Default_Abort_Signal is
+      Previous : size_t;
+      pragma Warnings (Off, Previous);
+   begin
+      pragma Warnings (GNATprove, Off, "statement has no effect");
+      Previous := Posix_Signal (SIGABRT, SIG_DFL);
+      pragma Warnings (GNATprove, On, "statement has no effect");
+   end Restore_Default_Abort_Signal;
+
+   procedure Lock_File
+     (File_Path : in     Bounded_Text;
+      Lock      :    out File_Lock;
+      Success   :    out Boolean)
+   is
+      C_Path   : C_Path_String;
+      Fd       : int;
+      Lock_Rc  : int;
+      Fstat_Rc : int;
+      Stat_Rc  : int;
+      Fd_Buf   : Stat_Buffer := [others => 0];
+      Path_Buf : Stat_Buffer := [others => 0];
+      Close_R  : int;
+      pragma Warnings (Off, Close_R);
+   begin
+      Lock    := No_Lock;
+      Success := False;
+      if Has_Embedded_NUL (File_Path) then
+         return;
+      end if;
+
+      To_C_Path (File_Path, C_Path);
+      Fd := Posix_Open (C_Path, O_RDONLY + O_NONBLOCK + O_CLOEXEC, 0);
+      if Fd < 0 then
+         return;
+      end if;
+
+      --  The lock must cover the file the path names now: a file renamed over the path
+      --  (a checkpoint elsewhere) or unlinked between open(2) and flock(2) leaves the
+      --  descriptor on a file the path no longer names, so st_dev / st_ino must agree
+      Lock_Rc := Posix_Flock (Fd, LOCK_EX + LOCK_NB);
+      if Lock_Rc = 0 then
+         Fstat_Rc := Posix_Fstat (Fd, Fd_Buf);
+         Stat_Rc  := Posix_Stat (C_Path, Path_Buf);
+      else
+         Fstat_Rc := -1;
+         Stat_Rc  := -1;
+      end if;
+      if Lock_Rc /= 0 or else Fstat_Rc /= 0 or else Stat_Rc /= 0
+        or else not (for all I in 1 .. 16 => Fd_Buf (I) = Path_Buf (I))
+      then
+         pragma Warnings (GNATprove, Off, "statement has no effect");
+         Close_R := Posix_Close (Fd);
+         pragma Warnings (GNATprove, On, "statement has no effect");
+         return;
+      end if;
+
+      Lock    := (Fd => Integer (Fd));
+      Success := True;
+   end Lock_File;
+
+   procedure Unlock_File (Lock : in out File_Lock) is
+      Close_R : int;
+      pragma Warnings (Off, Close_R);
+   begin
+      if Is_Locked (Lock) then
+         --  Closing the only descriptor of the open file description drops the lock
+         pragma Warnings (GNATprove, Off, "statement has no effect");
+         Close_R := Posix_Close (int (Lock.Fd));
+         pragma Warnings (GNATprove, On, "statement has no effect");
+      end if;
+      Lock := No_Lock;
+   end Unlock_File;
+
+   procedure Resolve_Path
+     (Path     : in     Bounded_Text;
+      Resolved :    out Bounded_Text;
+      Success  :    out Boolean)
+   is
+      C_Path  : C_Path_String;
+      Buf     : Real_Path_String := [others => ASCII.NUL];
+      Ptr     : size_t;
+      Len     : Natural := 0;
+   begin
+      Resolved := (Length => 0, Data => [others => ' ']);
+      Success  := False;
+      if Has_Embedded_NUL (Path) then
+         return;
+      end if;
+
+      To_C_Path (Path, C_Path);
+      Ptr := Posix_Realpath (C_Path, Buf);
+      if Ptr = 0 or else Buf (1) /= '/' then
+         return;
+      end if;
+
+      --  Length of the NUL-terminated result
+      for I in Real_Path_Index loop
+         pragma Loop_Invariant (Len = I - 1);
+         exit when Buf (I) = ASCII.NUL;
+         Len := I;
+      end loop;
+
+      if Len = 0 or else Len > Max_Text_Len then
+         return;
+      end if;
+
+      Resolved.Length := Len;
+      for I in 1 .. Len loop
+         pragma Loop_Invariant (Resolved.Length = Len);
+         Resolved.Data (I) := Buf (I);
+      end loop;
+      Success := Resolved.Data (1) = '/';
+      if not Success then
+         Resolved := (Length => 0, Data => [others => ' ']);
+      end if;
+   end Resolve_Path;
 
    procedure Make_Absolute_Path
      (Path     : in     Bounded_Text;

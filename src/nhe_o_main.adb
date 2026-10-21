@@ -182,24 +182,33 @@ procedure Nhe_O_Main is
          end if;
 
          --  Support both `--kv SET <key> <val> [ttl]` and `--kv <key> <val> [ttl]`
+         TTL_Valid := True;
          if Has_Arg2 and then (Equal_Text (Arg2, Make_Text ("SET")) or else Equal_Text (Arg2, Make_Text ("set"))) then
             Key_Arg := (if Has_Arg3 then Arg3 else Make_Text ("cli:default:key"));
             Val_Arg := (if Has_Arg4 then Arg4 else Make_Text ("verified_spark_value"));
             if Has_Arg5 then
                Parse_Positive_Int (Arg5, 300, TTL_Val, TTL_Valid);
-               Check (TTL_Valid);
             end if;
          else
             Key_Arg := (if Has_Arg2 then Arg2 else Make_Text ("cli:default:key"));
             Val_Arg := (if Has_Arg3 then Arg3 else Make_Text ("verified_spark_value"));
             if Has_Arg4 then
                Parse_Positive_Int (Arg4, 300, TTL_Val, TTL_Valid);
-               Check (TTL_Valid);
             end if;
          end if;
 
+         --  An invalid key or TTL is an error: nothing is stored
+         if not TTL_Valid then
+            Print_Line ("[CLI --kv] Error: TTL must be a whole number of seconds in 1 .. 999999999.");
+            Check (False);
+            Done := True;
+            return;
+         end if;
          if Key_Arg.Length = 0 or else Key_Arg.Length > Max_Ident_Len then
-            Key_Arg := Make_Text ("cli:default:key");
+            Print_Line ("[CLI --kv] Error: key must be 1 .. 64 bytes.");
+            Check (False);
+            Done := True;
+            return;
          end if;
          for I in 1 .. Key_Arg.Length loop
             K_Buf (size_t (I)) := To_C (Key_Arg.Data (I));
@@ -404,6 +413,11 @@ procedure Nhe_O_Main is
    Foreign_File  : constant Bounded_Text := Test_Path ("verify_foreign.bin");
    Size_Ok       : Boolean;
    Trunc_Ok      : Boolean;
+   Is_WAL_File   : Boolean;
+   --  "NHEO meet" followed by text: starts like the frame magic, but no frame header
+   Magic_Text    : constant Page_Buffer :=
+     [1 => 16#4E#, 2 => 16#48#, 3 => 16#45#, 4 => 16#4F#, 5 => 16#20#, 6 => 16#6D#,
+      7 => 16#65#, 8 => 16#65#, 9 => 16#74#, others => 16#2E#];
 
    --  6. Multi-Page B+Tree Index variables
    Tree_Idx      : BTree_Index;
@@ -1193,11 +1207,52 @@ procedure Nhe_O_Main is
          Check (St = Status_Ok);
       end if;
 
+      --  R14-RAG-01: an update over a version that already has a prior drops that
+      --  prior, so a snapshot older than the version kept is refused ("snapshot too
+      --  old") instead of silently missing the document, also after a rollback
+      Delete_File_If_Exists (DB_File);
+      Delete_File_If_Exists (WAL_File);
+      Init_RAG_Engine (Eng, Dim => 3);
+      Begin_Tx (Next_Tx_Id, T1);
+      Put_Doc (T1, Take_Snapshot (Eng), Stg_1, 1, No_Meta, "doc1 v1", 1.0, St);
+      Check (St = Status_Ok);
+      Put_Doc (T1, Take_Snapshot (Eng), Stg_1, 2, No_Meta, "doc2 v1", 5.0, St);
+      Check (St = Status_Ok);
+      Commit (T1, Stg_1, St);
+      Check (St = Status_Ok);
+      Snap_Old := Take_Snapshot (Eng);
+      Begin_Tx (Next_Tx_Id, T2);
+      Put_Doc (T2, Take_Snapshot (Eng), Stg_2, 1, No_Meta, "doc1 v2", 1.0, St);
+      Check (St = Status_Ok);
+      Commit (T2, Stg_2, St);
+      Check (St = Status_Ok);
+      Query_At (Snap_Old, 1.0, St);
+      Check (St = Status_Ok and then Res.Count = 2 and then Eng.Read_Horizon = 0);
+      Begin_Tx (Next_Tx_Id, T1);
+      Put_Doc (T1, Take_Snapshot (Eng), Stg_1, 1, No_Meta, "doc1 v3", 1.0, St);
+      Check (St = Status_Ok and then Eng.Read_Horizon > Snap_Old);
+      Query_At (Snap_Old, 1.0, St);
+      Check (St = Status_Tx_Aborted);
+      Rollback_Tx (T1);
+      if Eng.CLOG (T1.Id) /= Tx_Committed then
+         Rollback_RAG_Tx (Eng, T1.Id);
+      end if;
+      Discard_Staged_Notifications (T1, Stg_1);
+      Query_At (Snap_Old, 1.0, St);
+      Check (St = Status_Tx_Aborted);
+      Query_At (Take_Snapshot (Eng), 1.0, St);
+      Check (St = Status_Ok and then Res.Count = 2);
+
       --  R13-RAG-05: pages freed below the high-water mark are reused (first fit), so a
       --  document updated once per checkpoint no longer grows the database file
       Delete_File_If_Exists (DB_File);
       Delete_File_If_Exists (WAL_File);
       Init_RAG_Engine (Eng, Dim => 3);
+      --  R14-RAG-02: pages a commit left unmaterialized block the freeze
+      Eng.Pages_Pending := True;
+      Freeze_RAG_Engine (Eng, St);
+      Check (St = Status_IO_Error and then Eng.Pages_Pending);
+      Eng.Pages_Pending := False;
       for Cycle in 1 .. 6 loop
          pragma Loop_Invariant (Next_Tx_Id <= Next_Tx_Id'Loop_Entry + Tx_Id (Cycle - 1));
          pragma Loop_Invariant
@@ -1230,7 +1285,7 @@ procedure Nhe_O_Main is
 
       Delete_File_If_Exists (DB_File);
       Delete_File_If_Exists (WAL_File);
-      Print_Line ("  => Passed: Snapshot-isolation write conflicts, staged TOAST page reservation, first-fit page reuse, and own-delete collapse verified.");
+      Print_Line ("  => Passed: Snapshot-isolation write conflicts, snapshot-too-old refusal, staged TOAST page reservation, first-fit page reuse, and own-delete collapse verified.");
    end Verify_RAG_Isolation_And_Pages;
 
    --  Copy S into a NUL-padded C text buffer
@@ -1297,6 +1352,8 @@ procedure Nhe_O_Main is
    C_File_Found  : Boolean;
    C_Abs_Path    : Bounded_Text;
    C_Abs_Ok      : Boolean;
+   C_Lock        : File_Lock;
+   C_Locked      : Boolean;
 
 begin
    Read_CLI_Arg (1, CLI_Arg1, Has_CLI_Arg1, Long_Arg1);
@@ -2243,6 +2300,33 @@ begin
    Repair_WAL_Tail (Foreign_File, Tx_Status);
    Get_File_Size (Foreign_File, Tail_Size, Size_Ok);
    Check (Tx_Status = Status_Ok and then Size_Ok and then Tail_Size = 0);
+   --  A lone frame whose first 4096-byte block never reached the disk is a torn first
+   --  append as well, and so is a partial first frame with a valid header ...
+   Delete_File_If_Exists (Foreign_File);
+   Write_Page (Foreign_File, 1, Page_B, WAL_App_Ok);
+   Truncate_File (Foreign_File, File_Size (WAL_Frame_Size), Trunc_Ok);
+   Check (WAL_App_Ok and then Trunc_Ok);
+   Repair_WAL_Tail (Foreign_File, Tx_Status);
+   Get_File_Size (Foreign_File, Tail_Size, Size_Ok);
+   Check (Tx_Status = Status_Ok and then Size_Ok and then Tail_Size = 0);
+   Delete_File_If_Exists (Foreign_File);
+   Append_WAL_Frame (Foreign_File, WAL_Uncomm, WAL_App_Ok);
+   Truncate_File (Foreign_File, 3000, Trunc_Ok);
+   Check (WAL_App_Ok and then Trunc_Ok);
+   Check_WAL_File (Foreign_File, Is_WAL_File);
+   Repair_WAL_Tail (Foreign_File, Tx_Status);
+   Get_File_Size (Foreign_File, Tail_Size, Size_Ok);
+   Check (Is_WAL_File and then Tx_Status = Status_Ok and then Size_Ok and then Tail_Size = 0);
+   --  ... but text that merely starts like the magic is not a WAL, and stays as it is
+   Delete_File_If_Exists (Foreign_File);
+   Write_Page (Foreign_File, 0, Magic_Text, WAL_App_Ok);
+   Truncate_File (Foreign_File, 800, Trunc_Ok);
+   Check (WAL_App_Ok and then Trunc_Ok);
+   Check_WAL_File (Foreign_File, Is_WAL_File);
+   Repair_WAL_Tail (Foreign_File, Tx_Status);
+   Get_File_Size (Foreign_File, Tail_Size, Size_Ok);
+   Check (not Is_WAL_File and then Tx_Status = Status_IO_Error
+          and then Size_Ok and then Tail_Size = 800);
 
    --  Exclusive creation refuses an existing path; sizes are only reported for
    --  regular files
@@ -2921,6 +3005,82 @@ begin
    Check (C_Size_Ok and then C_Rem_TTL = C_WAL_Size);
    C_Init_With_Paths (C_Ckpt_Buf, int (C_Ckpt_Path.Length), C_WAL_Buf, C_WAL_Len, 3, C_Rc);
    Check (C_Rc = C_Status_Invalid_Arg and then not G_Initialized);
+
+   --  Exclusive locks: a descriptor holding the database lock refuses the open; an open
+   --  database holds both files, and a checkpoint moves the WAL lock to the new WAL
+   Lock_File (C_DB_Path, C_Lock, C_Locked);
+   Check (C_Locked);
+   C_Init_With_Paths (C_DB_Buf, C_DB_Len, C_WAL_Buf, C_WAL_Len, 3, C_Rc);
+   Check (C_Rc = C_Status_IO_Error and then not G_Initialized);
+   Get_File_Size (C_WAL_Path, C_Rem_TTL, C_Size_Ok);
+   Check (C_Size_Ok and then C_Rem_TTL = C_WAL_Size);
+   Unlock_File (C_Lock);
+   C_Init_With_Paths (C_DB_Buf, C_DB_Len, C_WAL_Buf, C_WAL_Len, 3, C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   Lock_File (C_DB_Path, C_Lock, C_Locked);
+   Check (not C_Locked);
+   Lock_File (C_WAL_Path, C_Lock, C_Locked);
+   Check (not C_Locked);
+   C_Checkpoint (C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   Lock_File (C_WAL_Path, C_Lock, C_Locked);
+   Check (not C_Locked);
+   C_Close (C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   Lock_File (C_WAL_Path, C_Lock, C_Locked);
+   Check (C_Locked);
+   Unlock_File (C_Lock);
+   Check (not Is_Locked (C_Lock));
+
+   --  "<wal>.ckpt" is reserved: a leftover there (an empty file, as a checkpoint
+   --  interrupted right after creating it leaves) is removed at open, while any other
+   --  file refuses the open and is left untouched
+   Write_Page (C_Ckpt_Path, 0, Page_B, C_Size_Ok);
+   Check (C_Size_Ok);
+   C_Init_With_Paths (C_DB_Buf, C_DB_Len, C_WAL_Buf, C_WAL_Len, 3, C_Rc);
+   Check (C_Rc = C_Status_Invalid_Arg and then not G_Initialized);
+   Get_File_Size (C_Ckpt_Path, C_WAL_Size, C_Size_Ok);
+   Check (C_Size_Ok and then C_WAL_Size = File_Size (Nhe_O.Page_Size));
+   Delete_File_If_Exists (C_Ckpt_Path);
+   Create_File_Exclusive (C_Ckpt_Path, C_Size_Ok);
+   Check (C_Size_Ok);
+   C_Init_With_Paths (C_DB_Buf, C_DB_Len, C_WAL_Buf, C_WAL_Len, 3, C_Rc);
+   Check (C_Rc = C_Status_Ok);
+   Check_File_Exists (C_Ckpt_Path, C_File_Found);
+   Check (not C_File_Found);
+   C_Close (C_Rc);
+   Check (C_Rc = C_Status_Ok);
+
+   --  A database file whose first page is not zero is not a database: it is refused
+   --  untouched (and no WAL is created), whether it holds a page of data or a short text
+   Delete_File_If_Exists (C_DB_Path);
+   Delete_File_If_Exists (C_WAL_Path);
+   Write_Page (C_DB_Path, 0, Page_B, C_Size_Ok);
+   Check (C_Size_Ok);
+   C_Init_With_Paths (C_DB_Buf, C_DB_Len, C_WAL_Buf, C_WAL_Len, 3, C_Rc);
+   Check (C_Rc = C_Status_Invalid_Arg and then not G_Initialized);
+   Get_File_Size (C_DB_Path, C_WAL_Size, C_Size_Ok);
+   Check (C_Size_Ok and then C_WAL_Size = File_Size (Nhe_O.Page_Size));
+   Check_File_Exists (C_WAL_Path, C_File_Found);
+   Check (not C_File_Found);
+   Truncate_File (C_DB_Path, 100, C_Size_Ok);
+   Check (C_Size_Ok);
+   C_Init_With_Paths (C_DB_Buf, C_DB_Len, C_WAL_Buf, C_WAL_Len, 3, C_Rc);
+   Check (C_Rc = C_Status_Invalid_Arg and then not G_Initialized);
+   Get_File_Size (C_DB_Path, C_WAL_Size, C_Size_Ok);
+   Check (C_Size_Ok and then C_WAL_Size = 100);
+   --  Zero bytes are what a database starts with: the torn tail is dropped
+   Delete_File_If_Exists (C_DB_Path);
+   Write_Page (C_DB_Path, 0, [others => 0], C_Size_Ok);
+   Check (C_Size_Ok);
+   Truncate_File (C_DB_Path, 100, C_Size_Ok);
+   Check (C_Size_Ok);
+   C_Init_With_Paths (C_DB_Buf, C_DB_Len, C_WAL_Buf, C_WAL_Len, 3, C_Rc);
+   Check (C_Rc = C_Status_Ok and then G_Initialized);
+   Get_File_Size (C_DB_Path, C_WAL_Size, C_Size_Ok);
+   Check (C_Size_Ok and then C_WAL_Size = 0);
+   C_Close (C_Rc);
+   Check (C_Rc = C_Status_Ok);
    Delete_File_If_Exists (C_DB_Path);
    Delete_File_If_Exists (C_WAL_Path);
    Print_Line ("  => Passed: C ABI / FFI exports, N-D vector/RAG/Delete FFI, checkpoint, recovery, and defensive boundary guards verified.");

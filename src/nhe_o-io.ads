@@ -20,7 +20,9 @@ package Nhe_O.IO is
    type Page_Buffer is array (Page_Offset) of Byte
      with Convention => C;
 
-   --  WAL Frame: 24-byte header (Magic + Tx_Id + Page_Id + CRC32) + 4096-byte payload
+   --  WAL Frame: 24-byte header + 4096-byte payload. Header bytes 1..4 magic "NHEO",
+   --  5..8 Tx_Id, 9..12 Page_Id, 13..16 CRC32 (over Tx_Id, Page_Id, the kind byte and
+   --  the payload), 17 frame kind (data, commit or KV), 18..24 reserved zero bytes
    WAL_Header_Size : constant := 24;
    WAL_Frame_Size  : constant := WAL_Header_Size + Nhe_O.Page_Size;
    Max_WAL_Frames  : constant := 4096;
@@ -127,6 +129,49 @@ package Nhe_O.IO is
    --  per-process default database paths
    function Get_Process_Id return Natural
      with Global => null;
+
+   --  An exclusive advisory lock (flock LOCK_EX) held through an open descriptor
+   type File_Lock is record
+      Fd : Integer := -1;
+   end record;
+
+   No_Lock : constant File_Lock := (Fd => -1);
+
+   function Is_Locked (Lock : File_Lock) return Boolean is (Lock.Fd >= 0)
+     with Global => null;
+
+   --  Open the existing file File_Path and take a non-blocking exclusive lock on it
+   --  (flock LOCK_EX | LOCK_NB). Success is False when the file cannot be opened or
+   --  another open file description, in any process, holds the lock. The lock lives
+   --  until Unlock_File (or process exit) and follows the file, not its path: a file
+   --  renamed into place keeps the lock taken on it before the rename.
+   procedure Lock_File
+     (File_Path : in     Bounded_Text;
+      Lock      :    out File_Lock;
+      Success   :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => File_Path.Length > 0,
+          Post   => Success = Is_Locked (Lock);
+
+   --  Release a lock taken by Lock_File (no-op for No_Lock)
+   procedure Unlock_File (Lock : in out File_Lock)
+     with Global => null,
+          Always_Terminates,
+          Post   => not Is_Locked (Lock);
+
+   --  Canonical absolute path of the existing file Path (realpath(3): symbolic links,
+   --  "." and ".." resolved), so directory fsyncs and checkpoint renames act on the
+   --  real file; Success is False when it cannot be resolved or exceeds Max_Text_Len
+   procedure Resolve_Path
+     (Path     : in     Bounded_Text;
+      Resolved :    out Bounded_Text;
+      Success  :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Path.Length > 0,
+          Post   => (if Success then Resolved.Length > 0 and then Resolved.Data (1) = '/'
+                     else Resolved.Length = 0);
 
    --  Prefix a relative Path with the current working directory (getcwd) so later
    --  calls are immune to chdir(2); absolute paths are returned unchanged
@@ -279,6 +324,17 @@ package Nhe_O.IO is
           Always_Terminates,
           Post   => not (Found and Too_Long);
    pragma Warnings (GNATprove, On, "subprogram ""Read_CLI_Arg"" has no effect");
+
+   --  Give SIGABRT back its default action. The GNAT run time installs its own handler
+   --  for it when the shared library is initialized, which would turn a host's abort()
+   --  or failed assert() into "raised PROGRAM_ERROR" and exit status 1; Nhe_O.C_API
+   --  calls this when it is elaborated.
+   pragma Warnings (GNATprove, Off, "subprogram ""Restore_Default_Abort_Signal"" has no effect",
+                    Reason => "Sets the process signal disposition via signal(2)");
+   procedure Restore_Default_Abort_Signal
+     with Global => null,
+          Always_Terminates;
+   pragma Warnings (GNATprove, On, "subprogram ""Restore_Default_Abort_Signal"" has no effect");
 
    --  Mark process exit status as Failure (non-zero) on runtime verification failure
    pragma Warnings (GNATprove, Off, "subprogram ""Set_Exit_Failure"" has no effect",

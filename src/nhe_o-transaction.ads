@@ -335,11 +335,12 @@ package Nhe_O.Transaction is
    --  not a multiple of WAL_Frame_Size) or as a final complete frame that fails
    --  Verify_WAL_Frame. Both are truncated away. The file is classified before anything
    --  is truncated: an invalid complete frame that is not the last one, a bad final
-   --  frame followed by a partial one, or (with no complete frame at all) bytes that do
-   --  not start like a frame (neither the "NHEO" magic nor zeros) mean mid-log
-   --  corruption or a file that is not a WAL, and fail closed with Status_IO_Error
-   --  leaving the file untouched; so does a WAL holding more than Max_WAL_Frames
-   --  frames. A missing WAL is not an error.
+   --  frame followed by a partial one, or a torn frame with no valid frame before it
+   --  (a lone partial frame, or a lone bad complete frame) that neither starts with a
+   --  whole frame header a valid frame could carry nor holds zero bytes up to the end
+   --  of its first 4096-byte block, mean mid-log corruption or a file that is not a
+   --  WAL, and fail closed with Status_IO_Error leaving the file untouched; so does a
+   --  WAL holding more than Max_WAL_Frames frames. A missing WAL is not an error.
    procedure Repair_WAL_Tail
      (WAL_Path : in     Bounded_Text;
       Status   :    out Engine_Status)
@@ -348,10 +349,22 @@ package Nhe_O.Transaction is
           Pre    => WAL_Path.Length > 0,
           Post   => Status in Status_Ok | Status_IO_Error;
 
+   --  Classify WAL_Path as Repair_WAL_Tail does, changing nothing: Is_WAL is True iff
+   --  it is missing, or a WAL that Repair_WAL_Tail accepts (torn tail included)
+   procedure Check_WAL_File
+     (WAL_Path : in     Bounded_Text;
+      Is_WAL   :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => WAL_Path.Length > 0;
+
    --  Crash-recovery tail repair for the database file: a crash while extending DB_Path
    --  can leave a partial trailing page. Every page of DB_Path is materialized from a
    --  committed WAL frame (NO-STEAL), so the partial page is truncated away and rebuilt by
-   --  the Redo_WAL_Recovery replay that must follow. A missing file is not an error.
+   --  the Redo_WAL_Recovery replay that must follow. The file is not classified first:
+   --  only a database of this engine may be passed (nhe_o_init_with_paths refuses a
+   --  file whose first page is not zero before recovery runs). A missing file is not
+   --  an error.
    procedure Repair_DB_Tail
      (DB_Path : in     Bounded_Text;
       Status  :    out Engine_Status)

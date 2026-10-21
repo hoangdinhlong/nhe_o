@@ -15,16 +15,27 @@ through a process-wide lock, so the engine is safe to share between threads.
 Each call needs about 256 KiB of thread stack; call it from threads with at least
 1 MiB (the default on Linux and for the main thread; see include/nhe_o.h).
 
+One process per database: the library locks the database and WAL files it opens, so
+opening files that another process holds fails with NheOError (STATUS_IO_ERROR). A
+forked child does not inherit the parent's engine: this module closes the child's
+copy right after fork() (os.register_at_fork) without touching the parent's files,
+and the child may then open a database of its own.
+
 KV methods take `now_sec`, the Unix time of the operation (the engine has no clock of
 its own); when it is omitted the current time is used. Timestamps should never
 decrease. Integer arguments outside their C range raise ValueError instead of
 wrapping silently.
+
+Text is UTF-8. Bytes that are not valid UTF-8 (a value stored by a C client, say)
+come back as surrogate escapes (PEP 383, errors="surrogateescape") and are written
+back unchanged, so binary KV values and Pub/Sub payloads round-trip.
 """
 
 from __future__ import annotations
 
 import ctypes
 import math
+import os
 import shutil
 import tempfile
 import threading
@@ -93,6 +104,63 @@ _ENGINE_LOCK = threading.RLock()
 _open_engine: NheOEngine | None = None
 
 
+# Signals whose handlers the GNAT run time replaces when the library is initialized
+_RUNTIME_SIGNALS = ("SIGSEGV", "SIGBUS", "SIGFPE", "SIGILL", "SIGABRT")
+
+
+def _load_library(lib_path: str) -> ctypes.CDLL:
+    """Load libnhe_o, keeping the interpreter's handlers for _RUNTIME_SIGNALS.
+
+    Initializing the library installs GNAT run-time handlers for these signals (see
+    include/nhe_o.h), which would replace the interpreter's own, faulthandler's for
+    instance. Their previous dispositions are saved and restored with sigaction(2),
+    the struct being treated as an opaque buffer.
+    """
+    import signal
+
+    try:
+        sigaction = ctypes.CDLL(None).sigaction
+    except (OSError, AttributeError):
+        return ctypes.CDLL(lib_path)
+    saved = []
+    for name in _RUNTIME_SIGNALS:
+        signum = getattr(signal, name, None)
+        if signum is None:
+            continue
+        old_action = ctypes.create_string_buffer(512)  # larger than any struct sigaction
+        if sigaction(int(signum), None, old_action) == 0:
+            saved.append((int(signum), old_action))
+    lib = ctypes.CDLL(lib_path)
+    for signum, old_action in saved:
+        sigaction(signum, old_action, None)
+    return lib
+
+
+def _after_fork_in_child() -> None:
+    """Drop the engine a forked child inherited, without touching the parent's files.
+
+    The child inherits the library state and the descriptors that hold the parent's
+    file locks. nhe_o_close in the child only releases those copies (the library sees
+    that another process opened the engine: no checkpoint, no file removed), so the
+    parent can still reopen its database while the child runs.
+    """
+    global _ENGINE_LOCK, _open_engine
+    # Another thread of the parent may have held the lock at fork() time
+    _ENGINE_LOCK = threading.RLock()
+    engine = _open_engine
+    _open_engine = None
+    if engine is not None:
+        engine._scratch_dir = None  # the parent's directory: never removed by the child
+        if not engine._closed:
+            engine._closed = True
+            status = c_int(0)
+            engine._lib.nhe_o_close(byref(status))
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_in_child)
+
+
 class NheOError(RuntimeError):
     """A C ABI call returned a non-OK status (`status` holds the NHE_O_STATUS_* code)."""
 
@@ -103,7 +171,7 @@ class NheOError(RuntimeError):
 
 
 def _make_ident_buf(text: str) -> tuple[IdentBuffer, int]:
-    raw = text.encode("utf-8")
+    raw = text.encode("utf-8", "surrogateescape")
     if len(raw) == 0 or len(raw) > MAX_IDENT_LEN:
         raise ValueError(f"Identifier length must be in 1..{MAX_IDENT_LEN} bytes")
     buf = IdentBuffer()
@@ -112,7 +180,7 @@ def _make_ident_buf(text: str) -> tuple[IdentBuffer, int]:
 
 
 def _make_text_buf(text: str) -> tuple[TextBuffer, int]:
-    raw = text.encode("utf-8")
+    raw = text.encode("utf-8", "surrogateescape")
     if len(raw) > MAX_TEXT_LEN:
         raise ValueError(f"Text exceeds {MAX_TEXT_LEN} bytes")
     buf = TextBuffer()
@@ -121,7 +189,7 @@ def _make_text_buf(text: str) -> tuple[TextBuffer, int]:
 
 
 def _make_toast_buf(text: str) -> tuple[ToastBuffer, int]:
-    raw = text.encode("utf-8")
+    raw = text.encode("utf-8", "surrogateescape")
     if len(raw) > MAX_TOAST_BYTES:
         raise ValueError(f"TOAST payload exceeds {MAX_TOAST_BYTES} bytes")
     buf = ToastBuffer()
@@ -209,7 +277,7 @@ class NheOEngine:
                 )
             self._closed = True
             self._scratch_dir: str | None = None
-            self._lib = ctypes.CDLL(str(lib_path))
+            self._lib = _load_library(str(lib_path))
             self._bind_signatures()
             self._closed = False
             _open_engine = self
@@ -483,7 +551,7 @@ class NheOEngine:
             return None
         if status.value != STATUS_OK:
             raise NheOError("nhe_o_kv_get", status.value)
-        return bytes(out_buf[: out_len.value]).decode("utf-8")
+        return bytes(out_buf[: out_len.value]).decode("utf-8", "surrogateescape")
 
     def kv_del(self, key: str, now_sec: int | None = None) -> bool:
         """Redis DEL at now_sec: True iff the key was live (present and not expired)."""
@@ -618,8 +686,8 @@ class NheOEngine:
             return None
         if status.value != STATUS_OK:
             raise NheOError("nhe_o_pubsub_poll", status.value)
-        chan = bytes(c_buf[: c_len.value]).decode("utf-8")
-        payload = bytes(p_buf[: p_len.value]).decode("utf-8")
+        chan = bytes(c_buf[: c_len.value]).decode("utf-8", "surrogateescape")
+        payload = bytes(p_buf[: p_len.value]).decode("utf-8", "surrogateescape")
         return chan, payload
 
     def rag_ingest_3d(
@@ -1083,8 +1151,10 @@ def run_self_test() -> None:
     _check(getattr(exc, "status", None) == STATUS_IO_ERROR, "foreign WAL status")
     _check(wal_4096.read_bytes() == b"NOT_A_WAL_FILE", "foreign WAL left untouched")
 
-    # A torn first frame is repaired, but the corrupted database page still fails recovery
-    wal_4096.write_bytes(b"NHEO" + b"\x00" * 10)
+    # A torn first frame (a valid header, part of the payload) is repaired, but the
+    # corrupted database page still fails recovery
+    torn_header = b"NHEO" + (1).to_bytes(4, "big") + (1).to_bytes(4, "big") + bytes(16)
+    wal_4096.write_bytes(torn_header + b"\x01" * 1000)
     _expect_error(
         NheOError,
         lambda: engine.init_with_paths(str(db_4096), str(wal_4096), dim=4096),
@@ -1220,6 +1290,104 @@ def run_self_test() -> None:
         t.join()
     _check(not errors, f"threaded calls failed: {errors!r}")
     _check(engine.kv_get("threads:counter", now_sec=3000) == "100", "no lost increments")
+
+    # Bytes that are not UTF-8 round-trip as surrogate escapes
+    engine.kv_set("bin:key", "caf\udce9", now_sec=3000)
+    _check(engine.kv_get("bin:key", now_sec=3000) == "caf\udce9", "non-UTF-8 value round-trips")
+    bin_sub = engine.pubsub_subscribe("bin.*")
+    engine.pubsub_publish("bin.x", "Gr\udcf6\udcdfe")
+    _check(engine.pubsub_poll(bin_sub) == ("bin.x", "Gr\udcf6\udcdfe"), "non-UTF-8 payload round-trips")
+    engine.pubsub_unsubscribe(bin_sub)
+
+    # One process per database: another process cannot open the files this one holds
+    import subprocess
+    import sys
+
+    lib_file = str(engine._lib._name)
+    probe = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})\n"
+        "import nhe_o\n"
+        "try:\n"
+        f"    nhe_o.NheOEngine(lib_path={lib_file!r}, db_path={str(db_4096)!r},"
+        f" wal_path={str(wal_4096)!r})\n"
+        "except nhe_o.NheOError as exc:\n"
+        "    sys.exit(0 if exc.status == nhe_o.STATUS_IO_ERROR else 1)\n"
+        "sys.exit(2)\n"
+    )
+    probe_rc = subprocess.run([sys.executable, "-I", "-c", probe], check=False).returncode
+    _check(probe_rc == 0, f"a second process must be refused (rc {probe_rc})")
+
+    # A forked child drops the inherited engine and cannot open the parent's files,
+    # while the parent can reopen them as long as the child runs
+    if hasattr(os, "fork"):
+        to_parent_r, to_parent_w = os.pipe()
+        to_child_r, to_child_w = os.pipe()
+        pid = os.fork()
+        if pid == 0:
+            code = 1
+            try:
+                os.close(to_parent_r)
+                os.close(to_child_w)
+                if engine._closed:
+                    try:
+                        NheOEngine(lib_path=lib_file, db_path=str(db_4096), wal_path=str(wal_4096))
+                        code = 2
+                    except NheOError as err:
+                        code = 0 if err.status == STATUS_IO_ERROR else 3
+                os.write(to_parent_w, b"r")
+                os.read(to_child_r, 1)
+            finally:
+                os._exit(code)
+        os.close(to_parent_w)
+        os.close(to_child_r)
+        os.read(to_parent_r, 1)
+        engine.init_with_paths(str(db_4096), str(wal_4096), dim=3)
+        _check(engine.kv_get("threads:counter", now_sec=3000) == "100", "parent reopens")
+        os.write(to_child_w, b"d")
+        os.close(to_child_w)
+        os.close(to_parent_r)
+        _, wait_status = os.waitpid(pid, 0)
+        _check(os.waitstatus_to_exitcode(wait_status) == 0, "forked child")
+
+    # A database path naming a file that is not a database is refused untouched
+    notes = work_dir / "notes.txt"
+    notes.write_text("my notes\n" * 300)
+    exc = _expect_error(
+        NheOError,
+        lambda: engine.init_with_paths(str(notes), str(work_dir / "notes.wal"), dim=3),
+        "Expected NheOError for a database path naming another file",
+    )
+    _check(getattr(exc, "status", None) == STATUS_INVALID_ARG, "non-database status")
+    _check(notes.read_text() == "my notes\n" * 300, "non-database file left untouched")
+    _check(not (work_dir / "notes.wal").exists(), "no WAL created for a refused database")
+
+    # Symbolic links are resolved once at open: the checkpoint renames over the real
+    # WAL and the links stay links
+    real_dir = work_dir / "real"
+    link_dir = work_dir / "links"
+    real_dir.mkdir()
+    link_dir.mkdir()
+    (link_dir / "s.db").symlink_to(real_dir / "s.db")
+    (link_dir / "s.wal").symlink_to(real_dir / "s.wal")
+    engine.init_with_paths(str(link_dir / "s.db"), str(link_dir / "s.wal"), dim=3)
+    engine.kv_set("link:key", "v", now_sec=100)
+    engine.rag_ingest_3d(1, "three dimensions", (1.0, 0.0, 0.0))
+    engine.checkpoint()
+    _check((link_dir / "s.wal").is_symlink(), "WAL link survives the checkpoint")
+    _check((real_dir / "s.wal").stat().st_size == 2 * WAL_FRAME_SIZE, "checkpoint wrote the real WAL")
+    _check(not list(work_dir.glob("**/*.ckpt")), "no checkpoint leftovers")
+    engine.init_with_paths(str(link_dir / "s.db"), str(link_dir / "s.wal"), dim=3)
+    _check(engine.kv_get("link:key", now_sec=100) == "v", "reopen through links")
+
+    # Reopening a database with another dimension is a mismatch, not damage
+    exc = _expect_error(
+        NheOError,
+        lambda: engine.init_with_paths(str(link_dir / "s.db"), str(link_dir / "s.wal"), dim=8),
+        "Expected NheOError for a dimension mismatch",
+    )
+    _check(getattr(exc, "status", None) == STATUS_DIMENSION_MISMATCH, "dimension mismatch status")
+    engine.init_with_paths(str(db_4096), str(wal_4096), dim=3)
 
     db_4096.unlink(missing_ok=True)
     wal_4096.unlink(missing_ok=True)

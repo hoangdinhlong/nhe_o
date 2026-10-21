@@ -20,6 +20,8 @@ package body Nhe_O.RAG is
       Engine.CLOG            := Default_CLOG;
       Engine.Commit_Seqs     := [others => 0];
       Engine.Last_Commit_Seq := 0;
+      Engine.Read_Horizon    := 0;
+      Engine.Pages_Pending   := False;
       Engine.Docs            := Empty_Docs;
       Init_BTree (Engine.PK_Tree);
       Init_HNSW (Engine.Vector_Graph, Dim);
@@ -1166,6 +1168,17 @@ package body Nhe_O.RAG is
             end loop;
             Decode_TOAST_Pointer (Vec_B, Vec_Ptr, Vec_Valid);
             Decode_TOAST_Pointer (Meta_B, Meta_Ptr, Meta_Valid);
+            --  The CRC-verified page holds the vector length of another dimension: the
+            --  database was opened with the wrong Dim, it is not damaged
+            if Vec_Valid
+              and then Vec_Ptr.Total_Byte_Length /= Expected_VLen
+              and then Vec_Ptr.Total_Byte_Length > Vector_TOAST_Header_Size
+              and then (Vec_Ptr.Total_Byte_Length - Vector_TOAST_Header_Size) mod 4 = 0
+            then
+               Init_RAG_Engine (Engine, Dim);
+               Status := Status_Dimension_Mismatch;
+               return;
+            end if;
             if not Vec_Valid
               or else Vec_Ptr.Total_Byte_Length /= Expected_VLen
               or else Vec_Ptr.Chunk_Count not in 1 .. Max_TOAST_Chunks
@@ -1497,6 +1510,8 @@ package body Nhe_O.RAG is
                Max_Seen_Tx      => Max_Seen,
                Status           => Redo_Stat);
             Flush_Pending := (Redo_Stat /= Status_Ok);
+            --  A successful redo materialized every committed frame of the WAL
+            Engine.Pages_Pending := Flush_Pending;
          end if;
       else
          Rollback_RAG_Tx (Engine, Ctx.Id);
@@ -1509,6 +1524,12 @@ package body Nhe_O.RAG is
       Status :    out Engine_Status)
    is
    begin
+      --  The WAL a checkpoint replaces would hold the only copy of committed pages
+      if Engine.Pages_Pending then
+         Status := Status_IO_Error;
+         return;
+      end if;
+
       --  Refuse while any transaction is in flight
       for T in CLOG_Tx_Index loop
          if Engine.CLOG (T) = Tx_Active then
@@ -1567,6 +1588,7 @@ package body Nhe_O.RAG is
       Engine.CLOG (1)        := Tx_Committed;
       Engine.Commit_Seqs     := [others => 0];
       Engine.Last_Commit_Seq := 0;
+      Engine.Read_Horizon    := 0;
 
       Engine.Doc_Count := 0;
       for S in RAG_Doc_Slot loop
@@ -1607,6 +1629,7 @@ package body Nhe_O.RAG is
       Saved_Tx_State     : constant Tx_State           := Engine.CLOG (Ctx.Id);
       Saved_PK_Tree      : constant BTree_Index        := Engine.PK_Tree;
       Saved_Graph        : constant HNSW_Index         := Engine.Vector_Graph;
+      Saved_Horizon      : constant Commit_Seq_Number  := Engine.Read_Horizon;
       Old_Xmin_Comm      : constant Boolean            :=
         Old_Entry.Active
         and then Is_Tx_Committed (Engine.CLOG, Old_Entry.Tuple_Hdr.Xmin);
@@ -1704,6 +1727,7 @@ package body Nhe_O.RAG is
          Engine.PK_Tree       := Saved_PK_Tree;
          Engine.Vector_Graph  := Saved_Graph;
          Engine.CLOG (Ctx.Id) := Saved_Tx_State;
+         Engine.Read_Horizon  := Saved_Horizon;
          if WAL_Touched then
             Check_File_Exists (WAL_Path, Exists_Now);
             if Exists_Now then
@@ -1903,6 +1927,14 @@ package body Nhe_O.RAG is
 
       --  Keep transaction Tx_Active in CLOG until Commit_Tx succeeds
       Set_CLOG_State (Engine.CLOG, Ctx.Id, Tx_Active);
+
+      --  Replacing a committed version that already has a prior drops that prior:
+      --  snapshots older than the commit of the version kept may have needed it
+      if Old_Entry.Active and then Old_Xmin_Comm and then Old_Entry.Has_Prior_Version
+        and then Engine.Commit_Seqs (Old_Entry.Tuple_Hdr.Xmin) > Engine.Read_Horizon
+      then
+         Engine.Read_Horizon := Engine.Commit_Seqs (Old_Entry.Tuple_Hdr.Xmin);
+      end if;
 
       Engine.Docs (Doc_Id) := (
          Active               => True,
@@ -2247,8 +2279,9 @@ package body Nhe_O.RAG is
       Top_Parent_Chunk := [others => 0];
 
       --  A snapshot newer than every commit the engine observed is not one of its
-      --  snapshots (or predates a freeze or recovery that reset the sequence)
-      if Snapshot > Engine.Last_Commit_Seq then
+      --  snapshots (or predates a freeze or recovery that reset the sequence); one
+      --  older than Read_Horizon may need a version that was dropped
+      if Snapshot > Engine.Last_Commit_Seq or else Snapshot < Engine.Read_Horizon then
          Status := Status_Tx_Aborted;
          return;
       end if;

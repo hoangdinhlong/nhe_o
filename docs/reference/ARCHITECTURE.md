@@ -118,7 +118,7 @@ How we build the vision in `VISION.md`. This is the **map** for design decisions
 
 ## 6. Cross-cutting concerns
 
-- **Crash Recovery & Checksums**: Every 4KB page and WAL frame carries a 32-bit CRC checksum computed in `SPARK_Mode (On)`. A torn last WAL frame or database page left by a crash is repaired before redo (a file that is not a WAL is never truncated); a corrupted frame anywhere else fails recovery closed (`ADR-009`).
+- **Crash Recovery & Checksums**: Every 4KB page and WAL frame carries a 32-bit CRC checksum computed in `SPARK_Mode (On)`. A torn last WAL frame or database page left by a crash is repaired before redo; a WAL path naming a file that is not a WAL, or a database path naming a file whose first page is not zero (the engine never writes page 0), is refused untouched; a corrupted frame anywhere else fails recovery closed (`ADR-009`).
 - **Exception-Free Kernel Boundary**: `Nhe_O.IO` avoids `Ada.Streams.Stream_IO` / `Ada.Direct_IO` exceptions entirely by invoking POSIX kernel descriptors (`open` including `O_EXCL` creation, `pread`, `pwrite`, `lseek`, `fsync`, `ftruncate`, `close`, `unlink`, `rename`, `stat`, `getcwd`, `getpid`, `access`) that return explicit `int` / `ssize_t` status values checked inside `SPARK_Mode (On)`.
 
 ---

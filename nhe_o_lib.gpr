@@ -29,6 +29,9 @@ library project Nhe_O_Lib is
    --  by gnatprove, and executing them would only add stack (whole-engine 'Old copies)
    --  and an exception path that cannot cross the C ABI. Run-time checks stay enabled.
    --  The verification executable (nhe_o.gpr) keeps -gnata.
+   --  -fstack-check probes large frames page by page, so overflowing the calling
+   --  thread's stack always hits its guard page (the process terminates with
+   --  Storage_Error) instead of skipping past it into adjacent memory.
    package Compiler is
       for Default_Switches ("Ada") use (
          "-O2",
@@ -36,7 +39,8 @@ library project Nhe_O_Lib is
          "-gnat2022",
          "-gnatwa",
          "-gnatQ",
-         "-fPIC"
+         "-fPIC",
+         "-fstack-check"
       );
    end Compiler;
 end Nhe_O_Lib;

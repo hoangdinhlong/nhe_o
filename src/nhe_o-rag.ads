@@ -72,6 +72,15 @@ package Nhe_O.RAG is
       CLOG            : Commit_Log         := Default_CLOG;
       Commit_Seqs     : Commit_Seq_Log     := [others => 0];
       Last_Commit_Seq : Commit_Seq_Number  := 0;
+      --  Snapshots older than Read_Horizon cannot be read: a document keeps one prior
+      --  committed version, so an update over a version that already had a prior
+      --  drops that prior, which snapshots older than the commit of the version kept
+      --  may need (queries at such a snapshot fail with Status_Tx_Aborted)
+      Read_Horizon    : Commit_Seq_Number  := 0;
+      --  A commit left pages of the WAL unmaterialized in the database file (its
+      --  in-place redo failed, see Commit_RAG_Tx): Freeze_RAG_Engine refuses until a
+      --  later in-place redo succeeds or the engine is recovered
+      Pages_Pending   : Boolean            := False;
       PK_Tree         : BTree_Index        := (others => <>);
       Vector_Graph    : HNSW_Index         := (others => <>);
       Docs            : RAG_Document_Table := [others => (others => <>)];
@@ -88,7 +97,8 @@ package Nhe_O.RAG is
    --  commit the engine has observed. Commits observed later are invisible to this
    --  snapshot. A snapshot is valid until the engine is frozen (Freeze_RAG_Engine),
    --  recovered or re-initialized; reads and writes refuse one newer than every
-   --  commit observed (Status_Tx_Aborted).
+   --  commit observed (Status_Tx_Aborted). Queries also refuse a snapshot that fell
+   --  below Read_Horizon (Status_Tx_Aborted, "snapshot too old"): take a new one.
    function Take_Snapshot (Engine : RAG_Engine) return Commit_Seq_Number is
      (Engine.Last_Commit_Seq);
 
@@ -304,7 +314,8 @@ package Nhe_O.RAG is
    --  Tx_Aborted after a failed Ingest/Delete) is rolled back without touching the WAL.
    --  If the commit barrier is durable but materializing pages failed, the database
    --  file is repaired in place with Redo_WAL_Recovery; Flush_Pending reports that the
-   --  repair failed too (the commit stands and is replayed at the next recovery).
+   --  repair failed too (the commit stands and is replayed at the next recovery) and
+   --  sets Engine.Pages_Pending, which a later successful in-place repair clears.
    procedure Commit_RAG_Tx
      (Engine        : in out RAG_Engine;
       Ctx           : in out Transaction_Context;
@@ -337,13 +348,16 @@ package Nhe_O.RAG is
                     and then (if Ctx.State = Tx_Aborted
                                 and then Engine'Old.CLOG (Ctx.Id) /= Tx_Committed
                               then Engine.CLOG (Ctx.Id) = Tx_Aborted)
-                    and then (if Flush_Pending then Status = Status_Ok);
+                    and then (if Flush_Pending then Status = Status_Ok
+                                                    and then Engine.Pages_Pending);
 
    --  Checkpoint support (VACUUM FREEZE): when no transaction is in flight, drop deleted
    --  documents and prior versions, re-stamp every live version as created by the
    --  frozen transaction 1 (Xmin = 1, commit sequence 0), and reset the CLOG so that
    --  transaction ids can restart at 2. Status_Tx_Aborted (engine unchanged) if any
-   --  document still carries an uncommitted version. Two obligations stay with the
+   --  document still carries an uncommitted version; Status_IO_Error (engine unchanged)
+   --  while Pages_Pending, since the WAL a checkpoint replaces would then hold the only
+   --  copy of committed pages. Two obligations stay with the
    --  caller (C_Checkpoint meets both): ids may restart at 2 only once the WAL holds no
    --  frame of an earlier transaction (replace it first, as a checkpoint does: an old
    --  frame of a reused id would be replayed or would abort the new commit), and every
@@ -363,9 +377,10 @@ package Nhe_O.RAG is
                     and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
                     and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count
                     and then Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page
-                    and then Status in Status_Ok | Status_Tx_Aborted
+                    and then Status in Status_Ok | Status_Tx_Aborted | Status_IO_Error
                     and then (if Status = Status_Ok then
                                 Engine.Last_Commit_Seq = 0
+                                and then Engine.Read_Horizon = 0
                                 and then Engine.CLOG (1) = Tx_Committed
                                 and then (for all S in RAG_Doc_Slot =>
                                             (if Engine.Docs (S).Active then
@@ -377,7 +392,8 @@ package Nhe_O.RAG is
    --  Recover a RAG_Engine from on-disk WAL + Page 1 Slotted_Page. A missing or empty
    --  database file recovers an empty engine. Max_Seen_Tx is the largest transaction id
    --  found in the WAL (Redo_WAL_Recovery.Max_Seen_Tx), the Page 1 LSN, and any
-   --  recovered tuple header: callers must seed Next_Tx above it.
+   --  recovered tuple header: callers must seed Next_Tx above it. A document whose
+   --  vector has another dimension than Dim fails with Status_Dimension_Mismatch.
    procedure Recover_RAG_Engine
      (Engine      :    out RAG_Engine;
       Dim         : in     Vector_Dim;
@@ -474,7 +490,8 @@ package Nhe_O.RAG is
    --  OFFSET n skips the first n ranked hits. LIMIT $n / OFFSET $n are rejected
    --  (Status_Invalid_Syntax: the query vector is the only bound parameter) and so is
    --  a window ending past rank Max_RAG_Hits (Status_Capacity_Exceeded). A Snapshot
-   --  newer than Engine.Last_Commit_Seq is refused with Status_Tx_Aborted.
+   --  newer than Engine.Last_Commit_Seq is refused with Status_Tx_Aborted, and so is
+   --  one older than Engine.Read_Horizon (a version it may need was dropped).
    procedure Execute_Hybrid_RAG_Query
      (Engine            : in     RAG_Engine;
       Snapshot          : in     Commit_Seq_Number;
