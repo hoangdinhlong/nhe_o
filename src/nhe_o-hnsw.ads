@@ -101,8 +101,7 @@ package Nhe_O.HNSW is
      (Index.Node_Count < Max_HNSW_Nodes
       or else (for some I in 1 .. Index.Node_Count =>
                  not Index.Nodes (I).Active
-                 or else Index.Nodes (I).Doc_Id = Doc_Id))
-     with Pre => Index.Node_Count <= Max_HNSW_Nodes;
+                 or else Index.Nodes (I).Doc_Id = Doc_Id));
 
    --  Deactivate a document's vector node, scrub incoming neighbor edges, trim
    --  trailing inactive nodes, and recompute Entry_Node / Top_Layer
@@ -111,7 +110,6 @@ package Nhe_O.HNSW is
       Doc_Id : in     Positive)
      with Global => null,
           Always_Terminates,
-          Pre    => Index.Node_Count <= Max_HNSW_Nodes,
           Post   => Index.Dim = Index.Dim'Old
                     and then Index.Node_Count <= Index.Node_Count'Old
                     and then Is_Valid_HNSW (Index);
@@ -129,10 +127,8 @@ package Nhe_O.HNSW is
       Status    :    out Engine_Status)
      with Global => null,
           Always_Terminates,
-          Pre    => Index.Node_Count <= Max_HNSW_Nodes
-                    and then Node_Snap.Bin_Vec.Dim = Index.Dim,
+          Pre    => Node_Snap.Bin_Vec.Dim = Index.Dim,
           Post   => Index.Dim = Index.Dim'Old
-                    and then Index.Node_Count <= Max_HNSW_Nodes
                     and then Is_Valid_HNSW (Index)
                     and then Status in Status_Ok | Status_Capacity_Exceeded
                     and then (if not Node_Snap.Active then Status = Status_Ok)
@@ -154,10 +150,8 @@ package Nhe_O.HNSW is
       Node_Snap : in     HNSW_Node)
      with Global => null,
           Always_Terminates,
-          Pre    => Index.Node_Count <= Max_HNSW_Nodes
-                    and then Node_Snap.Bin_Vec.Dim = Index.Dim,
+          Pre    => Node_Snap.Bin_Vec.Dim = Index.Dim,
           Post   => Index.Dim = Index.Dim'Old
-                    and then Index.Node_Count <= Max_HNSW_Nodes
                     and then Is_Valid_HNSW (Index);
 
    --  Insert or update a vector in the HNSW graph, computing Binary (1-bit),
@@ -172,8 +166,7 @@ package Nhe_O.HNSW is
       Status     :    out Engine_Status)
      with Global => null,
           Always_Terminates,
-          Pre    => Vec.Dim = Index.Dim
-                    and then Index.Node_Count <= Max_HNSW_Nodes,
+          Pre    => Vec.Dim = Index.Dim,
           Post   => Index.Dim = Index.Dim'Old
                     and then (if Status = Status_Ok then
                                 Index.Node_Count >= 1
@@ -217,8 +210,7 @@ package Nhe_O.HNSW is
       Results  :    out HNSW_Search_Result)
      with Global => null,
           Always_Terminates,
-          Pre    => Query.Dim = Index.Dim
-                    and then Index.Node_Count <= Max_HNSW_Nodes,
+          Pre    => Query.Dim = Index.Dim,
           Post   => Results.Count <= K
                     and then Results.Count <= Index.Node_Count
                     and then (for all I in 1 .. Results.Count =>

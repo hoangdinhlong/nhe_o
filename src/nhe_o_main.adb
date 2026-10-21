@@ -1691,11 +1691,20 @@ begin
    Analyze_SQL (Make_Text ("SELECT * FROM """""), SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Invalid_Syntax);
 
-   --  SQL-9: FF / VT are whitespace and $01 is a positional parameter
+   --  SQL-9: FF is whitespace, VT is not (PostgreSQL 16), and $01 is a positional
+   --  parameter
    Analyze_SQL (Make_Text ("SELECT id" & ASCII.FF & "FROM docs"), SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Ok and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("docs")));
    Analyze_SQL (Make_Text ("SELECT id FROM" & ASCII.VT & "docs"), SQL_Desc, SQL_Status);
-   Check (SQL_Status = Status_Ok and then Equal_Ident (SQL_Desc.Table_Or_Target, Make_Ident ("docs")));
+   Check (SQL_Status = Status_Invalid_Syntax);
+   --  R15-SQL-01: the query must be UTF-8. In SJIS 0x95 0x5C is one character, so the
+   --  server would close this E'' literal before ";" and run the DELETE
+   Analyze_SQL (Make_Text ("SELECT E'" & Character'Val (16#95#) & "\'; DELETE FROM docs; --'"),
+                SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT E'caf" & Character'Val (16#C3#) & Character'Val (16#A9#)
+                           & "\n' FROM docs"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Ok);
    Analyze_SQL (Make_Text ("SELECT $01 FROM t"), SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Ok and then SQL_Desc.Has_Positional_Param);
    Analyze_SQL (Make_Text ("SELECT $0 FROM t"), SQL_Desc, SQL_Status);
@@ -1744,7 +1753,7 @@ begin
           and then Deq_Vec_Sat.Elements (2) <= -Max_Component + 1.0);
 
    --  Verify the 4096-D Float32 TOAST round trip (Q-003): "VTS2" stores each component's
-   --  exact IEEE 754 binary32 pattern, so decoding returns the identical vector
+   --  exact IEEE 754 binary32 pattern (zero as +0.0), so decoding returns an equal vector
    Encode_Vector_TOAST (Vec_4096_A, Vec_Toast_Buf, Vec_Toast_Len);
    Check (Vec_Toast_Len = Vector_TOAST_Byte_Length (4096)
           and then Vec_Toast_Buf (4) = Character'Pos ('2'));
@@ -2538,9 +2547,7 @@ begin
    Insert_Vector (Graph_Idx, Doc_Id => 3, Vec => Make_Vector_3D (-1.0, -1.0, -1.0), TOAST_Root => 12, Layer_Hint => 1, Status => HNSW_Stat);
    Check (HNSW_Stat = Status_Ok);
    for D in 4 .. 10 loop
-      pragma Loop_Invariant
-        (Graph_Idx.Dim = 3
-         and then Graph_Idx.Node_Count <= Max_HNSW_Nodes);
+      pragma Loop_Invariant (Graph_Idx.Dim = 3);
       Insert_Vector
         (Graph_Idx,
          Doc_Id     => D,
@@ -2579,9 +2586,7 @@ begin
    --  leave doc 4 (x = 1) without incoming edges; it must still be found
    Init_HNSW (Graph_1D, Dim => 1);
    for D in 1 .. 6 loop
-      pragma Loop_Invariant
-        (Graph_1D.Dim = 1
-         and then Graph_1D.Node_Count <= Max_HNSW_Nodes);
+      pragma Loop_Invariant (Graph_1D.Dim = 1);
       Insert_Vector
         (Graph_1D,
          Doc_Id     => D,
@@ -2618,9 +2623,7 @@ begin
    --  index fails visibly, then succeeds once a slot is freed
    Init_HNSW (Graph_1D, Dim => 1);
    for D in 1 .. Max_HNSW_Nodes loop
-      pragma Loop_Invariant
-        (Graph_1D.Dim = 1
-         and then Graph_1D.Node_Count <= Max_HNSW_Nodes);
+      pragma Loop_Invariant (Graph_1D.Dim = 1);
       Insert_Vector
         (Graph_1D,
          Doc_Id     => D,
@@ -2900,6 +2903,24 @@ begin
    C_KV_Set (C_Key_Buf, 3, C_Val_Buf, 2, 1000, 0, C_Rc);
    Check (C_Rc = C_Status_Not_Initialized);
 
+   --  R15-CA-04: an existing scratch file that another open holds (a process with the
+   --  same pid in another PID namespace) is never removed: nhe_o_init refuses
+   if C_Saved_DB.Length > 0 then
+      Create_File_Exclusive (C_Saved_DB, C_Size_Ok);
+      Check (C_Size_Ok);
+      Lock_File (C_Saved_DB, C_Lock, C_Locked);
+      Check (C_Locked);
+      C_Init (C_Rc);
+      Check (C_Rc = C_Status_IO_Error and then not G_Initialized);
+      Check_File_Exists (C_Saved_DB, C_File_Found);
+      Check (C_File_Found);
+      Unlock_File (C_Lock);
+      C_Init (C_Rc);
+      Check (C_Rc = C_Status_Ok and then G_Initialized);
+      C_Close (C_Rc);
+      Check (C_Rc = C_Status_Ok);
+   end if;
+
    --  Relative paths are resolved once; DB and WAL may not alias one file
    Make_Absolute_Path (Make_Text ("rel.db"), C_Abs_Path, C_Abs_Ok);
    Check (C_Abs_Ok and then C_Abs_Path.Length > 7 and then C_Abs_Path.Data (1) = '/'
@@ -3044,6 +3065,15 @@ begin
    Delete_File_If_Exists (C_Ckpt_Path);
    Create_File_Exclusive (C_Ckpt_Path, C_Size_Ok);
    Check (C_Size_Ok);
+   --  R15-CA-03: a WAL-like file there that another open holds (another database's
+   --  WAL or database file) is refused untouched as well
+   Lock_File (C_Ckpt_Path, C_Lock, C_Locked);
+   Check (C_Locked);
+   C_Init_With_Paths (C_DB_Buf, C_DB_Len, C_WAL_Buf, C_WAL_Len, 3, C_Rc);
+   Check (C_Rc = C_Status_IO_Error and then not G_Initialized);
+   Check_File_Exists (C_Ckpt_Path, C_File_Found);
+   Check (C_File_Found);
+   Unlock_File (C_Lock);
    C_Init_With_Paths (C_DB_Buf, C_DB_Len, C_WAL_Buf, C_WAL_Len, 3, C_Rc);
    Check (C_Rc = C_Status_Ok);
    Check_File_Exists (C_Ckpt_Path, C_File_Found);

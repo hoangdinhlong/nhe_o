@@ -176,12 +176,13 @@ package body Nhe_O.C_API is
    --  Return every runtime global except G_Scratch_Engine to its uninitialized state,
    --  releasing the database and WAL locks
    procedure Reset_Runtime
-     with Global => (In_Out => (G_DB_Lock, G_WAL_Lock),
+     with Global => (In_Out => (G_DB_Lock, G_WAL_Lock, G_Ckpt_Lock),
                      Output => (G_Initialized, G_Owner_Pid, G_Ephemeral, G_Next_Tx,
                                 G_Next_KV_Seq, G_DB_Path, G_WAL_Path, G_KV_Store, G_Broker,
                                 G_RAG_Engine, G_Write_Fault)),
           Always_Terminates,
           Post   => not Is_Locked (G_DB_Lock) and then not Is_Locked (G_WAL_Lock)
+                    and then not Is_Locked (G_Ckpt_Lock)
    is
    begin
       G_Initialized := False;
@@ -197,6 +198,7 @@ package body Nhe_O.C_API is
       G_Write_Fault := False;
       Unlock_File (G_DB_Lock);
       Unlock_File (G_WAL_Lock);
+      Unlock_File (G_Ckpt_Lock);
    end Reset_Runtime;
 
    --  Delete the scratch files of an nhe_o_init database opened by this process (no-op
@@ -221,6 +223,35 @@ package body Nhe_O.C_API is
       Removed := DB_Gone and then WAL_Gone and then Ckpt_Gone;
    end Remove_Scratch_Files;
 
+   --  Remove File_Path unless an open database holds it (Lock_File): a scratch file of
+   --  this pid can belong to a live engine of a process with the same pid in another
+   --  PID namespace sharing /tmp. A dangling link planted at the name is removed too.
+   --  Removed is True iff the path no longer exists.
+   procedure Remove_Unused_File
+     (File_Path : in     Bounded_Text;
+      Removed   :    out Boolean)
+     with Global => null,
+          Always_Terminates,
+          Pre    => File_Path.Length > 0
+   is
+      Exists : Boolean;
+      Lock   : File_Lock;
+      Locked : Boolean;
+   begin
+      Check_File_Exists (File_Path, Exists);
+      if Exists then
+         Lock_File (File_Path, Lock, Locked);
+         if not Locked then
+            Removed := False;
+            return;
+         end if;
+         Delete_File_If_Exists (File_Path, Removed);
+         Unlock_File (Lock);
+      else
+         Delete_File_If_Exists (File_Path, Removed);
+      end if;
+   end Remove_Unused_File;
+
    procedure C_Init (Out_Status : out int) is
       Pid       : constant Natural := Get_Process_Id;
       DB_Gone   : Boolean;
@@ -231,9 +262,9 @@ package body Nhe_O.C_API is
       Reset_Runtime;
       G_DB_Path  := Scratch_Path (Pid, ".db");
       G_WAL_Path := Scratch_Path (Pid, ".wal");
-      Delete_File_If_Exists (G_DB_Path, DB_Gone);
-      Delete_File_If_Exists (G_WAL_Path, WAL_Gone);
-      Delete_File_If_Exists (Scratch_Path (Pid, ".wal" & Checkpoint_Suffix), Ckpt_Gone);
+      Remove_Unused_File (G_DB_Path, DB_Gone);
+      Remove_Unused_File (G_WAL_Path, WAL_Gone);
+      Remove_Unused_File (Scratch_Path (Pid, ".wal" & Checkpoint_Suffix), Ckpt_Gone);
       if DB_Gone and then WAL_Gone and then Ckpt_Gone then
          --  Recreate both files with O_EXCL: a link planted at a predictable /tmp name
          --  after the unlink makes the creation fail instead of being followed
@@ -285,7 +316,6 @@ package body Nhe_O.C_API is
       Frozen_Page : Page_Buffer;
       Frame       : WAL_Frame_Buffer;
       Frame_CRC   : Unsigned_32;
-      Tmp_Lock    : File_Lock;
       Tmp_Is_WAL  : Boolean;
       Locked      : Boolean;
       pragma Warnings (Off, Frame_CRC);
@@ -321,17 +351,25 @@ package body Nhe_O.C_API is
       --  2. Write the replacement WAL next to the live one: the KV snapshot, then the
       --     commit frame of the frozen transaction 1 carrying the frozen Page 1
       Tmp_Path := Checkpoint_Path (G_WAL_Path);
-      --  A leftover of a failed checkpoint is replaced; any other file is left alone
+      --  A leftover of a failed checkpoint is replaced; any other file, and a file an
+      --  open database holds (another database may use this name as its WAL), is
+      --  left alone
       Check_File_Exists (Tmp_Path, Tmp_Exists);
       if Tmp_Exists then
-         Check_WAL_File (Tmp_Path, Tmp_Is_WAL);
+         Lock_File (Tmp_Path, G_Ckpt_Lock, Locked);
+         if Locked then
+            Check_WAL_File (Tmp_Path, Tmp_Is_WAL);
+         else
+            Tmp_Is_WAL := False;
+         end if;
+         if Tmp_Is_WAL then
+            Delete_File_If_Exists (Tmp_Path, Tmp_Gone);
+         else
+            Tmp_Gone := False;
+         end if;
+         Unlock_File (G_Ckpt_Lock);
       else
-         Tmp_Is_WAL := True;
-      end if;
-      if Tmp_Is_WAL then
          Delete_File_If_Exists (Tmp_Path, Tmp_Gone);
-      else
-         Tmp_Gone := False;
       end if;
       if Tmp_Gone then
          --  O_EXCL: the rename below must move a file this call created, never a link
@@ -342,7 +380,7 @@ package body Nhe_O.C_API is
          return;
       end if;
       --  Lock the new WAL before it becomes live, so the WAL lock never lapses
-      Lock_File (Tmp_Path, Tmp_Lock, Locked);
+      Lock_File (Tmp_Path, G_Ckpt_Lock, Locked);
       if not Locked then
          Delete_File_If_Exists (Tmp_Path);
          Out_Status := C_Status_IO_Error;
@@ -359,7 +397,7 @@ package body Nhe_O.C_API is
       end if;
       if not Append_Ok then
          Delete_File_If_Exists (Tmp_Path);
-         Unlock_File (Tmp_Lock);
+         Unlock_File (G_Ckpt_Lock);
          Out_Status := C_Status_IO_Error;
          return;
       end if;
@@ -371,7 +409,7 @@ package body Nhe_O.C_API is
          if Tmp_Exists then
             --  The rename did not happen: the live WAL is untouched
             Delete_File_If_Exists (Tmp_Path);
-            Unlock_File (Tmp_Lock);
+            Unlock_File (G_Ckpt_Lock);
             Out_Status := C_Status_IO_Error;
             return;
          end if;
@@ -382,7 +420,8 @@ package body Nhe_O.C_API is
 
       --  The old WAL is unlinked; the lock taken on the new one replaces its lock
       Unlock_File (G_WAL_Lock);
-      G_WAL_Lock := Tmp_Lock;
+      G_WAL_Lock  := G_Ckpt_Lock;
+      G_Ckpt_Lock := No_Lock;
 
       --  4. The live WAL now describes the frozen engine; Page 1 of G_DB_Path is
       --     rewritten by the next commit, or by the redo of a recovery
@@ -397,7 +436,7 @@ package body Nhe_O.C_API is
      with Global => (Input  => (G_Initialized, G_Owner_Pid, G_DB_Path, G_WAL_Path,
                                 G_KV_Store),
                      In_Out => (G_Next_Tx, G_Next_KV_Seq, G_RAG_Engine, G_Scratch_Engine,
-                                G_Write_Fault, G_WAL_Lock)),
+                                G_Write_Fault, G_WAL_Lock, G_Ckpt_Lock)),
           Always_Terminates
    is
       WAL_Size    : File_Size;
@@ -425,7 +464,7 @@ package body Nhe_O.C_API is
      with Global => (Input  => (G_Initialized, G_Owner_Pid, G_DB_Path, G_WAL_Path,
                                 G_KV_Store),
                      In_Out => (G_Next_Tx, G_Next_KV_Seq, G_RAG_Engine, G_Scratch_Engine,
-                                G_Write_Fault, G_WAL_Lock)),
+                                G_Write_Fault, G_WAL_Lock, G_Ckpt_Lock)),
           Always_Terminates
    is
    begin
@@ -450,7 +489,9 @@ package body Nhe_O.C_API is
       WAL_P       : Bounded_Text;
       DB_R        : Bounded_Text;
       WAL_R       : Bounded_Text;
+      Too_Long    : Boolean := False;
       Locked      : Boolean;
+      Ckpt_Lock   : File_Lock;
       Abs_Ok      : Boolean;
       WAL_Existed : Boolean;
       WAL_Ok      : Boolean;
@@ -563,30 +604,32 @@ package body Nhe_O.C_API is
 
       --  Create missing files now, so their directory entries are durable before any
       --  commit and realpath(3) / stat(2) can resolve and compare them
+      --  (a file this call created is removed through realpath(3) on failure, so a
+      --  symbolic link given as the path is never unlinked in its place)
       Check_File_Exists (WAL_P, WAL_Existed);
       Create_File_If_Missing (WAL_P, WAL_Ok);
       if WAL_Ok then
-         Resolve_Path (WAL_P, WAL_R, WAL_Ok);
-         if not WAL_Ok and then not WAL_Existed then
-            Delete_File_If_Exists (WAL_P);
-         end if;
+         Resolve_Path (WAL_P, WAL_R, WAL_Ok, Too_Long);
       end if;
       if not WAL_Ok then
-         Out_Status := C_Status_IO_Error;
+         if not WAL_Existed then
+            Delete_Resolved_File (WAL_P);
+         end if;
+         Out_Status := (if Too_Long then C_Status_Invalid_Arg else C_Status_IO_Error);
          return;
       end if;
       Create_File_If_Missing (DB_P, DB_Ok);
       if DB_Ok then
-         Resolve_Path (DB_P, DB_R, DB_Ok);
-         if not DB_Ok and then not DB_Existed then
-            Delete_File_If_Exists (DB_P);
-         end if;
+         Resolve_Path (DB_P, DB_R, DB_Ok, Too_Long);
       end if;
       if not DB_Ok then
+         if not DB_Existed then
+            Delete_Resolved_File (DB_P);
+         end if;
          if not WAL_Existed then
             Delete_File_If_Exists (WAL_R);
          end if;
-         Out_Status := C_Status_IO_Error;
+         Out_Status := (if Too_Long then C_Status_Invalid_Arg else C_Status_IO_Error);
          return;
       end if;
 
@@ -645,15 +688,23 @@ package body Nhe_O.C_API is
       WAL_P := WAL_R;
 
       --  A checkpoint interrupted before its rename leaves a stale "<wal>.ckpt". The
-      --  name is reserved, yet a file there that is not a WAL is refused, not deleted.
+      --  name is reserved, yet a file there that another open holds (it may be another
+      --  database's WAL or database) or that is not a WAL is refused, not deleted.
       Check_File_Exists (Ckpt_P, Ckpt_Exists);
       if Ckpt_Exists then
+         Lock_File (Ckpt_P, Ckpt_Lock, Locked);
+         if not Locked then
+            Refuse (C_Status_IO_Error);
+            return;
+         end if;
          Check_WAL_File (Ckpt_P, Ckpt_Is_WAL);
          if not Ckpt_Is_WAL then
+            Unlock_File (Ckpt_Lock);
             Refuse (C_Status_Invalid_Arg);
             return;
          end if;
          Delete_File_If_Exists (Ckpt_P);
+         Unlock_File (Ckpt_Lock);
       end if;
 
       --  KV replay (repairs a torn WAL tail first)

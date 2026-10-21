@@ -66,7 +66,9 @@ package Nhe_O.C_API is
    --  Set by an I/O failure on a durable write path (WAL append, commit materialization,
    --  checkpoint rename). Once set, every write returns C_Status_IO_Error until
    --  nhe_o_init_with_paths reopens the database and recovery re-derives the durable
-   --  state from disk; reads keep serving the in-memory state.
+   --  state from disk. KV and Pub/Sub reads keep serving the in-memory state; RAG
+   --  queries read TOAST pages from G_DB_Path and fail while a commit's pages could
+   --  not be written there.
    G_Write_Fault    : Boolean       := False;
    --  Exclusive flock(2) locks on the open database and WAL files: while they are held
    --  a second open of either file - by another process, or by this one through a
@@ -74,6 +76,9 @@ package Nhe_O.C_API is
    --  over the old one, so the WAL lock never lapses.
    G_DB_Lock        : Nhe_O.IO.File_Lock := Nhe_O.IO.No_Lock;
    G_WAL_Lock       : Nhe_O.IO.File_Lock := Nhe_O.IO.No_Lock;
+   --  Lock of the new WAL while a checkpoint writes it (No_Lock otherwise). A global,
+   --  so a child forked in the middle of a checkpoint releases its copy on close.
+   G_Ckpt_Lock      : Nhe_O.IO.File_Lock := Nhe_O.IO.No_Lock;
 
    --  Automatic checkpoint thresholds (see C_Checkpoint): a checkpoint runs after a
    --  durable write once the WAL holds Checkpoint_WAL_Frames frames or a transaction /
@@ -107,7 +112,7 @@ package Nhe_O.C_API is
    --  (C_Status_IO_Error if a file cannot be removed, created or locked); nhe_o_close
    --  removes them again
    procedure C_Init (Out_Status : out int)
-     with Global        => (In_Out => (G_DB_Lock, G_WAL_Lock),
+     with Global        => (In_Out => (G_DB_Lock, G_WAL_Lock, G_Ckpt_Lock),
                             Output => (G_Initialized, G_Owner_Pid, G_Ephemeral, G_Next_Tx,
                                        G_Next_KV_Seq, G_DB_Path,
                                        G_WAL_Path, G_KV_Store, G_Broker, G_RAG_Engine,
@@ -143,7 +148,7 @@ package Nhe_O.C_API is
       Dim          : in     int;
       Out_Status   :    out int)
      with Global        => (In_Out => (G_Owner_Pid, G_Ephemeral, G_DB_Path, G_WAL_Path,
-                                       G_Scratch_Engine, G_DB_Lock, G_WAL_Lock),
+                                       G_Scratch_Engine, G_DB_Lock, G_WAL_Lock, G_Ckpt_Lock),
                             Output => (G_Initialized, G_Next_Tx, G_Next_KV_Seq, G_KV_Store,
                                        G_Broker, G_RAG_Engine, G_Write_Fault)),
           Always_Terminates,
@@ -163,7 +168,7 @@ package Nhe_O.C_API is
      with Global        => (In_Out => (G_Initialized, G_Owner_Pid, G_Ephemeral, G_DB_Path, G_WAL_Path,
                                        G_KV_Store, G_Next_Tx, G_Next_KV_Seq, G_RAG_Engine,
                                        G_Scratch_Engine, G_Write_Fault, G_DB_Lock,
-                                       G_WAL_Lock),
+                                       G_WAL_Lock, G_Ckpt_Lock),
                             Output => G_Broker),
           Always_Terminates,
           Export        => True,
@@ -181,7 +186,8 @@ package Nhe_O.C_API is
    procedure C_Checkpoint (Out_Status : out int)
      with Global        => (Input  => (G_Initialized, G_Owner_Pid, G_DB_Path, G_WAL_Path, G_KV_Store),
                             In_Out => (G_Next_Tx, G_Next_KV_Seq, G_RAG_Engine,
-                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock)),
+                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock,
+                                       G_Ckpt_Lock)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -241,7 +247,8 @@ package Nhe_O.C_API is
       Out_Status :    out int)
      with Global        => (Input  => (G_Initialized, G_Owner_Pid, G_DB_Path, G_WAL_Path),
                             In_Out => (G_Next_KV_Seq, G_KV_Store, G_Next_Tx, G_RAG_Engine,
-                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock)),
+                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock,
+                                       G_Ckpt_Lock)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -273,7 +280,8 @@ package Nhe_O.C_API is
       Out_Status  :    out int)
      with Global        => (Input  => (G_Initialized, G_Owner_Pid, G_DB_Path, G_WAL_Path),
                             In_Out => (G_Next_KV_Seq, G_KV_Store, G_Next_Tx, G_RAG_Engine,
-                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock)),
+                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock,
+                                       G_Ckpt_Lock)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -302,7 +310,8 @@ package Nhe_O.C_API is
       Out_Status  :    out int)
      with Global        => (Input  => (G_Initialized, G_Owner_Pid, G_DB_Path, G_WAL_Path),
                             In_Out => (G_Next_KV_Seq, G_KV_Store, G_Next_Tx, G_RAG_Engine,
-                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock)),
+                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock,
+                                       G_Ckpt_Lock)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -331,7 +340,8 @@ package Nhe_O.C_API is
       Out_Status  :    out int)
      with Global        => (Input  => (G_Initialized, G_Owner_Pid, G_DB_Path, G_WAL_Path),
                             In_Out => (G_Next_KV_Seq, G_KV_Store, G_Next_Tx, G_RAG_Engine,
-                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock)),
+                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock,
+                                       G_Ckpt_Lock)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -404,7 +414,8 @@ package Nhe_O.C_API is
       Out_Status     :    out int)
      with Global        => (Input  => (G_Initialized, G_Owner_Pid, G_DB_Path, G_WAL_Path, G_KV_Store),
                             In_Out => (G_Next_Tx, G_Next_KV_Seq, G_Broker, G_RAG_Engine,
-                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock)),
+                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock,
+                                       G_Ckpt_Lock)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -422,7 +433,8 @@ package Nhe_O.C_API is
       Out_Status     :    out int)
      with Global        => (Input  => (G_Initialized, G_Owner_Pid, G_DB_Path, G_WAL_Path, G_KV_Store),
                             In_Out => (G_Next_Tx, G_Next_KV_Seq, G_Broker, G_RAG_Engine,
-                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock)),
+                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock,
+                                       G_Ckpt_Lock)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -446,7 +458,8 @@ package Nhe_O.C_API is
       Out_Status     :    out int)
      with Global        => (Input  => (G_Initialized, G_Owner_Pid, G_DB_Path, G_WAL_Path, G_KV_Store),
                             In_Out => (G_Next_Tx, G_Next_KV_Seq, G_Broker, G_RAG_Engine,
-                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock)),
+                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock,
+                                       G_Ckpt_Lock)),
           Always_Terminates,
           Export        => True,
           Convention    => C,
@@ -458,7 +471,8 @@ package Nhe_O.C_API is
       Out_Status :    out int)
      with Global        => (Input  => (G_Initialized, G_Owner_Pid, G_DB_Path, G_WAL_Path, G_KV_Store),
                             In_Out => (G_Next_Tx, G_Next_KV_Seq, G_Broker, G_RAG_Engine,
-                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock)),
+                                       G_Scratch_Engine, G_Write_Fault, G_WAL_Lock,
+                                       G_Ckpt_Lock)),
           Always_Terminates,
           Export        => True,
           Convention    => C,

@@ -102,4 +102,31 @@ package Nhe_O.Types is
      with Global => null,
           Post   => Type_Name'Result.Length > 0;
 
+   --  UTF-8 (RFC 3629)
+   subtype UTF8_Count is Natural range 0 .. 3;
+
+   --  Classify a non-ASCII byte as a UTF-8 lead byte: Need is the number of
+   --  continuation bytes (0 = invalid lead byte) and Lo .. Hi the range of the
+   --  first continuation byte (excludes overlong forms, UTF-16 surrogates
+   --  U+D800 .. U+DFFF, and code points above U+10FFFF)
+   procedure UTF8_Lead
+     (C    : in     Character;
+      Need :    out UTF8_Count;
+      Lo   :    out Character;
+      Hi   :    out Character)
+     with Global => null,
+          Always_Terminates,
+          Post   => (Need = 0) = (Character'Pos (C) not in 16#C2# .. 16#F4#)
+                    and then (if Need = 1 then Character'Pos (C) in 16#C2# .. 16#DF#)
+                    and then (if Need = 2 then Character'Pos (C) in 16#E0# .. 16#EF#)
+                    and then (if Need = 3 then Character'Pos (C) in 16#F0# .. 16#F4#)
+                    and then Lo >= Character'Val (16#80#)
+                    and then Hi <= Character'Val (16#BF#);
+
+   --  Is T.Data (1 .. T.Length) well-formed UTF-8?
+   function Is_Valid_UTF8 (T : Bounded_Text) return Boolean
+     with Global => null,
+          Post   => (if (for all I in 1 .. T.Length => T.Data (I) < Character'Val (16#80#))
+                     then Is_Valid_UTF8'Result);
+
 end Nhe_O.Types;

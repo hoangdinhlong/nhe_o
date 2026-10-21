@@ -232,6 +232,15 @@ package body Nhe_O.IO is
           Convention    => C,
           External_Name => "signal";
 
+   --  unlink(2) of a NUL-terminated realpath(3) result
+   function Posix_Unlink_Real (Path : Real_Path_String) return int
+     with Side_Effects,
+          Global        => null,
+          Always_Terminates,
+          Import        => True,
+          Convention    => C,
+          External_Name => "unlink";
+
    F_OK : constant int := 0;
 
    function Posix_Access
@@ -597,7 +606,8 @@ package body Nhe_O.IO is
    procedure Resolve_Path
      (Path     : in     Bounded_Text;
       Resolved :    out Bounded_Text;
-      Success  :    out Boolean)
+      Success  :    out Boolean;
+      Too_Long :    out Boolean)
    is
       C_Path  : C_Path_String;
       Buf     : Real_Path_String := [others => ASCII.NUL];
@@ -606,6 +616,7 @@ package body Nhe_O.IO is
    begin
       Resolved := (Length => 0, Data => [others => ' ']);
       Success  := False;
+      Too_Long := False;
       if Has_Embedded_NUL (Path) then
          return;
       end if;
@@ -624,6 +635,7 @@ package body Nhe_O.IO is
       end loop;
 
       if Len = 0 or else Len > Max_Text_Len then
+         Too_Long := Len > Max_Text_Len;
          return;
       end if;
 
@@ -637,6 +649,25 @@ package body Nhe_O.IO is
          Resolved := (Length => 0, Data => [others => ' ']);
       end if;
    end Resolve_Path;
+
+   procedure Delete_Resolved_File (Path : in Bounded_Text) is
+      C_Path : C_Path_String;
+      Buf    : Real_Path_String := [others => ASCII.NUL];
+      Ptr    : size_t;
+      Rc     : int;
+      pragma Warnings (Off, Rc);
+   begin
+      if Has_Embedded_NUL (Path) then
+         return;
+      end if;
+      To_C_Path (Path, C_Path);
+      Ptr := Posix_Realpath (C_Path, Buf);
+      if Ptr /= 0 and then Buf (1) = '/' then
+         pragma Warnings (GNATprove, Off, "statement has no effect");
+         Rc := Posix_Unlink_Real (Buf);
+         pragma Warnings (GNATprove, On, "statement has no effect");
+      end if;
+   end Delete_Resolved_File;
 
    procedure Make_Absolute_Path
      (Path     : in     Bounded_Text;

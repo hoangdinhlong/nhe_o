@@ -61,88 +61,12 @@ package body Nhe_O.JSON is
    --  UTF-8 (RFC 3629)
    -------------------------------------------------------------------------
 
-   subtype UTF8_Count is Natural range 0 .. 3;
-
    --  Number of UTF-8 bytes encoding a Unicode scalar value
    function UTF8_Length (Code : Natural) return Positive is
      (if Code < 16#80# then 1
       elsif Code < 16#800# then 2
       elsif Code < 16#1_0000# then 3
       else 4);
-
-   --  Classify a non-ASCII byte as a UTF-8 lead byte: Need is the number of
-   --  continuation bytes (0 = invalid lead byte) and Lo .. Hi the range of the
-   --  first continuation byte (excludes overlong forms, UTF-16 surrogates
-   --  U+D800 .. U+DFFF, and code points above U+10FFFF)
-   procedure UTF8_Lead
-     (C    : in     Character;
-      Need :    out UTF8_Count;
-      Lo   :    out Character;
-      Hi   :    out Character)
-     with Global => null,
-          Always_Terminates,
-          Post   => (Need = 0) = (Character'Pos (C) not in 16#C2# .. 16#F4#)
-                    and then (if Need = 1 then Character'Pos (C) in 16#C2# .. 16#DF#)
-                    and then (if Need = 2 then Character'Pos (C) in 16#E0# .. 16#EF#)
-                    and then (if Need = 3 then Character'Pos (C) in 16#F0# .. 16#F4#)
-                    and then Lo >= Character'Val (16#80#)
-                    and then Hi <= Character'Val (16#BF#)
-   is
-      B : constant Natural := Character'Pos (C);
-   begin
-      Lo := Character'Val (16#80#);
-      Hi := Character'Val (16#BF#);
-      if B in 16#C2# .. 16#DF# then
-         Need := 1;
-      elsif B in 16#E0# .. 16#EF# then
-         Need := 2;
-         if B = 16#E0# then
-            Lo := Character'Val (16#A0#);
-         elsif B = 16#ED# then
-            Hi := Character'Val (16#9F#);
-         end if;
-      elsif B in 16#F0# .. 16#F4# then
-         Need := 3;
-         if B = 16#F0# then
-            Lo := Character'Val (16#90#);
-         elsif B = 16#F4# then
-            Hi := Character'Val (16#8F#);
-         end if;
-      else
-         Need := 0;
-      end if;
-   end UTF8_Lead;
-
-   --  Is T.Data (1 .. T.Length) well-formed UTF-8?
-   function Is_Valid_UTF8 (T : Bounded_Text) return Boolean
-     with Global => null,
-          Post   => (if (for all I in 1 .. T.Length => T.Data (I) < Character'Val (16#80#))
-                     then Is_Valid_UTF8'Result)
-   is
-      Need : UTF8_Count := 0;
-      Lo   : Character  := Character'Val (16#80#);
-      Hi   : Character  := Character'Val (16#BF#);
-   begin
-      for I in 1 .. T.Length loop
-         pragma Loop_Invariant
-           (if (for all J in 1 .. I - 1 => T.Data (J) < Character'Val (16#80#))
-            then Need = 0);
-         if Need > 0 then
-            if T.Data (I) not in Lo .. Hi then
-               return False;
-            end if;
-            Need := Need - 1;
-            Lo   := Character'Val (16#80#);
-            Hi   := Character'Val (16#BF#);
-         elsif T.Data (I) >= Character'Val (16#80#) then
-            UTF8_Lead (T.Data (I), Need, Lo, Hi);
-            if Need = 0 then
-               return False;
-            end if;
-         end if;
-      end loop;
-      return Need = 0;
-   end Is_Valid_UTF8;
 
    function Is_Valid_JSONB_Key (Key : Bounded_Ident) return Boolean is
       T : Bounded_Text := (Length => Key.Length, Data => [others => ' ']);
@@ -1167,7 +1091,7 @@ package body Nhe_O.JSON is
               and then JSON_Quoted_Length (Val) <= Max_Text_Len;
 
          when JSONB_Null =>
-            return Val.Length = 0 or else Equal_Text (Val, Make_Text ("null"));
+            return Equal_Text (Val, Make_Text ("null"));
 
          when JSONB_Boolean =>
             return Equal_Text (Val, Make_Text ("true"))
@@ -1238,13 +1162,14 @@ package body Nhe_O.JSON is
    is
       Norm_Val : Bounded_Text := Val;
    begin
-      if not Is_Valid_JSONB_Key (Key) or else not Is_Valid_Field_Value (Val, Kind) then
-         Status := Status_Invalid_Syntax;
-         return;
-      end if;
-
+      --  An empty null value is stored as the literal null, which `->` returns
       if Kind = JSONB_Null and then Norm_Val.Length = 0 then
          Norm_Val := Make_Text ("null");
+      end if;
+
+      if not Is_Valid_JSONB_Key (Key) or else not Is_Valid_Field_Value (Norm_Val, Kind) then
+         Status := Status_Invalid_Syntax;
+         return;
       end if;
 
       for I in 1 .. Doc.Count loop

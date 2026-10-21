@@ -170,8 +170,9 @@ package Nhe_O.Vector is
 
    --  Serialize a Float32 Vector_Value (up to 4096-D = 16,392 bytes including the 8B
    --  header) into a TOAST_Payload_Buffer for TOAST overflow storage (Q-003): a "VTS2"
-   --  payload holding each component's exact IEEE 754 binary32 bit pattern (big-endian),
-   --  so Decode_Vector_TOAST returns the identical vector
+   --  payload holding each component's exact IEEE 754 binary32 bit pattern (big-endian;
+   --  negative zero is written as +0.0, which compares equal), so Decode_Vector_TOAST
+   --  returns an equal vector
    procedure Encode_Vector_TOAST
      (V       : in     Vector_Value;
       Payload :    out TOAST_Payload_Buffer;

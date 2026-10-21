@@ -13,9 +13,10 @@ package body Nhe_O.SQL is
    --  Character classes (PostgreSQL src/backend/parser/scan.l)
    -------------------------------------------------------------------------
 
-   --  space: [ \t\n\r\f\v]
+   --  space: [ \t\n\r\f] (PostgreSQL 16; a vertical tab is whitespace only from
+   --  PostgreSQL 17 on, so it is rejected here)
    function Is_WS_Char (C : Character) return Boolean is
-     (C = ' ' or else C = ASCII.HT or else C = ASCII.LF or else C = ASCII.VT
+     (C = ' ' or else C = ASCII.HT or else C = ASCII.LF
       or else C = ASCII.FF or else C = ASCII.CR);
 
    function Is_Digit (C : Character) return Boolean is (C in '0' .. '9');
@@ -812,6 +813,14 @@ package body Nhe_O.SQL is
             return;
          end if;
       end loop;
+
+      --  The lexer works on bytes, which is sound only for UTF-8 (no byte of a
+      --  multi-byte character is ASCII). In client encodings such as SJIS, BIG5,
+      --  GBK or GB18030 a backslash byte can be the second half of a character, so
+      --  the server would end an E'' literal elsewhere: other text is rejected
+      if not Is_Valid_UTF8 (Query) then
+         return;
+      end if;
 
       while Pos <= Query.Length loop
          pragma Loop_Invariant (Toks.Count < Pos);

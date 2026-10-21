@@ -146,7 +146,7 @@ def _after_fork_in_child() -> None:
     parent can still reopen its database while the child runs.
     """
     global _ENGINE_LOCK, _open_engine
-    # Another thread of the parent may have held the lock at fork() time
+    # The lock was held across fork() by _before_fork: start from a fresh one
     _ENGINE_LOCK = threading.RLock()
     engine = _open_engine
     _open_engine = None
@@ -158,8 +158,21 @@ def _after_fork_in_child() -> None:
             engine._lib.nhe_o_close(byref(status))
 
 
+def _before_fork() -> None:
+    """No library call may be in flight when the process forks (see include/nhe_o.h)."""
+    _ENGINE_LOCK.acquire()
+
+
+def _after_fork_in_parent() -> None:
+    _ENGINE_LOCK.release()
+
+
 if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_after_fork_in_child)
+    os.register_at_fork(
+        before=_before_fork,
+        after_in_parent=_after_fork_in_parent,
+        after_in_child=_after_fork_in_child,
+    )
 
 
 class NheOError(RuntimeError):
@@ -802,6 +815,12 @@ class NheOEngine:
         top_k: int = 3,
         filter_json: str = "",
     ) -> dict[str, Any]:
+        """Rank every visible document by distance to query_vec (top hit returned).
+
+        A non-empty keyword found in a document's summary halves that document's
+        distance; "top_distance" is the halved value, and equal distances rank keyword
+        matches first, then the lower doc id (see include/nhe_o.h).
+        """
         q_buf, dim = _make_vec_buf(query_vec)
         f_buf, f_len = _make_text_buf(filter_json)
         k_buf, k_len = _make_text_buf(keyword)

@@ -233,7 +233,6 @@ package Nhe_O.RAG is
           Always_Terminates,
           Pre    => Ctx.State = Tx_Active
                     and then Engine.Vector_Graph.Dim = Engine.Dim
-                    and then Engine.Vector_Graph.Node_Count <= Max_HNSW_Nodes
                     and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
                     and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count,
           Post   => Engine.Dim = Engine.Dim'Old
@@ -262,7 +261,6 @@ package Nhe_O.RAG is
                     and then DB_Path.Length > 0
                     and then WAL_Path.Length > 0
                     and then Engine.Vector_Graph.Dim = Engine.Dim
-                    and then Engine.Vector_Graph.Node_Count <= Max_HNSW_Nodes
                     and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
                     and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count,
           Post   => Engine.Dim = Engine.Dim'Old
@@ -494,7 +492,11 @@ package Nhe_O.RAG is
    --  (Status_Invalid_Syntax: the query vector is the only bound parameter) and so is
    --  a window ending past rank Max_RAG_Hits (Status_Capacity_Exceeded). A Snapshot
    --  newer than Engine.Last_Commit_Seq is refused with Status_Tx_Aborted, and so is
-   --  one older than Engine.Read_Horizon (a version it may need was dropped).
+   --  one older than Engine.Read_Horizon (a version it may need was dropped). Every
+   --  visible document is ranked by its Stage-2 distance; with Use_Keyword_Boost, a
+   --  document whose summary contains Keyword (Contains_Keyword) ranks with half its
+   --  distance and that halved distance is the hit's Distance; equal distances rank
+   --  keyword matches first, then the lower Doc_Id.
    procedure Execute_Hybrid_RAG_Query
      (Engine            : in     RAG_Engine;
       Snapshot          : in     Commit_Seq_Number;

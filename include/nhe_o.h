@@ -12,21 +12,27 @@
  *    database and WAL files: opening either file from another process (or flock on
  *    another descriptor of it) fails with NHE_O_STATUS_IO_ERROR until nhe_o_close
  *    releases them. In this process, a new nhe_o_init / nhe_o_init_with_paths first
- *    releases the open database (without a checkpoint), so reopening it succeeds. The locks are advisory: tools that ignore flock can still
- *    change the files. The engine belongs to the process that opened it: in a forked
- *    child every stateful call returns NHE_O_STATUS_NOT_INITIALIZED, and nhe_o_close
- *    there only releases the child's inherited copies of the lock descriptors (no
- *    checkpoint, no file touched); call it in the child (or exec) if the parent is to
- *    reopen the database while the child runs.
- *  - Stack: the deepest calls (4096-D RAG ingest, recovery, checkpoint) need about
+ *    releases the open database (without a checkpoint), so reopening it succeeds.
+ *    The locks are advisory: tools that ignore flock can still change the files.
+ *  - fork(): the engine belongs to the process that opened it. In a forked child every
+ *    stateful call returns NHE_O_STATUS_NOT_INITIALIZED, and nhe_o_close there only
+ *    releases the child's inherited copies of the lock descriptors (no checkpoint, no
+ *    file touched); call it in the child (or exec) if the parent is to reopen the
+ *    database while the child runs. Fork only while no call is in flight: hold the
+ *    serializing mutex across fork() (pthread_atfork), since a child forked during a
+ *    call inherits a half-finished engine and may keep a lock the parent then misses.
+ *  - Stack: the deepest calls (4096-D RAG ingest and query, recovery) need about
  *    256 KiB of thread stack (192 KiB overflows); call the library from a thread with
  *    at least 1 MiB of stack.
  *  - Loading the library elaborates the GNAT runtime, which installs handlers for
- *    SIGSEGV, SIGBUS, SIGFPE, SIGILL and SIGABRT; the library then resets SIGABRT to
- *    its default action, so abort() and a failed assert() still raise SIGABRT. Hosts
- *    that install their own handlers for these signals (JVM, Go, crash reporters,
- *    Python's faulthandler) must re-install them after loading; a SIGABRT handler
- *    installed before loading is replaced by the default action.
+ *    SIGSEGV, SIGBUS, SIGFPE, SIGILL and SIGABRT and gives the loading thread a 32 KiB
+ *    alternate signal stack (sigaltstack) of its own; the library then resets SIGABRT
+ *    to its default action, so abort() and a failed assert() still raise SIGABRT.
+ *    Hosts that install their own handlers for these signals (JVM, Go, crash
+ *    reporters, Python's faulthandler) must re-install them after loading; a SIGABRT
+ *    handler installed before loading is replaced by the default action. The library
+ *    cannot be unloaded (it is linked with -z nodelete, so dlclose keeps it mapped and
+ *    those handlers and that stack stay valid).
  *  - nhe_o_analyze_sql, the vector-distance calls and the version queries need no open
  *    engine; every other call returns NHE_O_STATUS_NOT_INITIALIZED without one.
  *  - Input buffers are read only up to the given length (no NUL terminator needed).
@@ -35,8 +41,11 @@
  *    than the capacity, so always use the returned length.
  *  - Durability: a write that returns NHE_O_STATUS_OK is durable in the WAL. After an
  *    I/O error on a durable write path the engine refuses every further write with
- *    NHE_O_STATUS_IO_ERROR (reads keep working) until nhe_o_init_with_paths reopens
- *    the database; recovery then decides from disk whether the failed write survived.
+ *    NHE_O_STATUS_IO_ERROR until nhe_o_init_with_paths reopens the database; recovery
+ *    then decides from disk whether the failed write survived. KV and Pub/Sub reads
+ *    keep working meanwhile; RAG queries read TOAST pages from the database file, so
+ *    when a durable commit's pages could not be written there they fail with
+ *    NHE_O_STATUS_IO_ERROR until the reopen.
  */
 
 #ifndef NHE_O_H
@@ -53,6 +62,7 @@ extern "C" {
 #define NHE_O_MAX_TEXT_LEN     512
 #define NHE_O_MAX_TOAST_BYTES  16392
 #define NHE_O_MAX_VECTOR_DIM   4096
+#define NHE_O_MAX_COMPONENT    1.0e6f  /* vector components: finite, |x| <= 1e6 */
 #define NHE_O_DOC_ID_MIN       1
 #define NHE_O_DOC_ID_MAX       16
 #define NHE_O_MIN_DOC_ID       1
@@ -103,9 +113,10 @@ int nhe_o_version_minor(void);
  * files /tmp/nhe_o_c_api.<pid>.db and .wal: earlier contents are deleted and both files
  * are recreated with O_EXCL, so a link planted at these predictable names is refused,
  * and locked like any open database (NHE_O_STATUS_IO_ERROR if a file cannot be removed,
- * created or locked). A database opened before is released without a checkpoint. For
- * data that must persist, use nhe_o_init_with_paths with paths inside a private
- * directory. */
+ * created or locked; an existing scratch file another open holds, such as a process
+ * with the same pid in another PID namespace sharing /tmp, is never removed). A
+ * database opened before is released without a checkpoint. For data that must
+ * persist, use nhe_o_init_with_paths with paths inside a private directory. */
 void nhe_o_init(int *out_status);
 
 /* Initialize the runtime on caller-specified DB/WAL paths with dimension 1..4096,
@@ -122,7 +133,8 @@ void nhe_o_init(int *out_status);
  *    is not empty and its first min(size, 4096) bytes are not all zero (the engine
  *    never writes page 0, so this refuses swapped arguments and any other file); or
  *    "<wal>.ckpt", a name reserved for the checkpoint, holds a file that is not a WAL
- *    (a leftover of an interrupted checkpoint is removed).
+ *    (a leftover of an interrupted checkpoint is removed; a file there that another
+ *    open holds, such as another database's WAL, fails with NHE_O_STATUS_IO_ERROR).
  *  - Missing files are created (directory fsynced) and both files are locked (see
  *    "One process per database"); a refused call removes the files it created, except
  *    when the refusal is a lock held elsewhere or comes after the open's own
@@ -150,7 +162,8 @@ void nhe_o_close(int *out_status);
 
 /* Compact the WAL: write "<wal>.ckpt" with the KV entries and the frozen RAG page,
  * lock it, then rename it over the WAL and fsync the directory (a file at "<wal>.ckpt"
- * that is not a WAL makes the checkpoint fail with NHE_O_STATUS_IO_ERROR, untouched).
+ * that is not a WAL, or that another open holds, makes the checkpoint fail with
+ * NHE_O_STATUS_IO_ERROR, untouched).
  * Transaction ids restart at 2.
  * Runs automatically after a durable write once the WAL holds 512 frames or an id
  * reaches 4096; an explicit call is only needed to compact earlier. */
@@ -174,6 +187,8 @@ typedef enum {
 /* Analyze one PostgreSQL-dialect SQL statement (query_len 0..512) against the dialect
  * documented in src/nhe_o-sql.ads: NHE_O_STATUS_OK only for exactly one supported
  * statement, NHE_O_STATUS_INVALID_SYNTAX otherwise (including multi-statement input).
+ * The query must be UTF-8 (anything else is NHE_O_STATUS_INVALID_SYNTAX): do not pass
+ * text in SJIS, BIG5, GBK or GB18030, whose characters can contain a backslash byte.
  * out_has_vector: <->, <=> or <#> outside literals; out_has_jsonb: ->, ->>, #>, #>>,
  * @>, <@, ?, ?|, ?&, @? or #- outside literals. */
 void nhe_o_analyze_sql(
@@ -184,6 +199,11 @@ void nhe_o_analyze_sql(
     int        *out_has_jsonb,
     int        *out_status
 );
+
+/* Vector arguments (distances, ingest, queries): every component must be finite with
+ * |x| <= NHE_O_MAX_COMPONENT, otherwise NHE_O_STATUS_INVALID_ARG. The cosine distance
+ * involving a zero vector is 1.0 (pgvector returns NaN); the Hamming distance counts
+ * differing sign bits (bit set iff the component is > 0). */
 
 /* Compute 3D L2 distance (<->), Cosine distance (<=>), and 1-bit Hamming distance */
 void nhe_o_vector_distance_3d(
@@ -361,7 +381,12 @@ void nhe_o_rag_delete(
     int *out_status
 );
 
-/* *out_parent_bytes: full byte length of the top hit's parent chunk (no text copied) */
+/* RAG queries rank every visible document by its distance to the query (Stage 2 uses
+ * the full stored vector). A keyword (keyword_len > 0) found in a document's summary
+ * (case-folded, see src/nhe_o-rag.ads) halves that document's distance, and
+ * *out_top_distance reports the halved value; equal distances rank keyword matches
+ * first, then the lower doc_id.
+ * *out_parent_bytes: full byte length of the top hit's parent chunk (no text copied) */
 void nhe_o_rag_query_3d(
     float       qx,
     float       qy,

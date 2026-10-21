@@ -184,7 +184,6 @@ package body Nhe_O.RAG is
      with Global => null,
           Always_Terminates,
           Pre    => Engine.Vector_Graph.Dim = Engine.Dim
-                    and then Engine.Vector_Graph.Node_Count <= Max_HNSW_Nodes
                     and then Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes
                     and then Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count,
           Post   => Engine.Dim = Engine.Dim'Old

@@ -73,7 +73,8 @@ package Nhe_O.JSON is
 
    --  Validate that a field value is well-formed for its declared JSONB_Value_Kind.
    --  JSONB_String: decoded bytes, well-formed UTF-8 without NUL, whose quoted
-   --  `->` form fits in Max_Text_Len. JSONB_Number / JSONB_Object / JSONB_Array:
+   --  `->` form fits in Max_Text_Len. JSONB_Null: exactly "null"; JSONB_Boolean:
+   --  "true" or "false". JSONB_Number / JSONB_Object / JSONB_Array:
    --  one RFC 8259 value obeying the JSONB ingest rules (numbers within the
    --  PostgreSQL numeric range, object keys of 1 .. Max_Ident_Len decoded bytes
    --  at every depth, nesting of at most Max_JSONB_Depth - 1 levels).
@@ -130,7 +131,8 @@ package Nhe_O.JSON is
 
    --  Put or update a field in a decomposed JSONB document (`jsonb_set`),
    --  validating Key (Is_Valid_JSONB_Key) and Val against Kind
-   --  (Status_Invalid_Syntax otherwise)
+   --  (Status_Invalid_Syntax otherwise); an empty JSONB_Null value is stored as
+   --  "null"
    procedure Put_Field
      (Doc    : in out JSONB_Document;
       Key    : in     Bounded_Ident;

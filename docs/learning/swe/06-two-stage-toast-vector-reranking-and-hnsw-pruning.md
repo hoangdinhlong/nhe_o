@@ -1,6 +1,6 @@
 # Two-Stage 4096-D Vector TOAST Re-Ranking, Scale-Aware SQ8 & Distance-Pruned HNSW in SPARK
 
-> **Takeaway:** Storing full 4096-dimensional `Float32` vectors (`16 KB` each) directly inside every in-memory HNSW graph node exhausts embedded RAM and stack frames, while relying solely on truncated prefixes or unscaled `Int8` quantization degrades retrieval accuracy. By combining **Stage-1 HNSW candidate generation** (using 64-D Matryoshka prefixes, scale-aware `Int8` SQ8, or 4096-bit Binary Hamming with distance-pruned small-world edges) with **Stage-2 Exact Re-Ranking** over the full `Float32` embeddings persisted bit for bit in 4KB TOAST overflow chains (`"VTS2"`), **Nhé O** achieves full-precision top-$k$ recall within a statically bounded RAM footprint in 100% `SPARK_Mode (On)`.
+> **Takeaway:** Storing full 4096-dimensional `Float32` vectors (`16 KB` each) directly inside every in-memory HNSW graph node exhausts embedded RAM and stack frames, while relying solely on truncated prefixes or unscaled `Int8` quantization degrades retrieval accuracy. By combining **Stage-1 HNSW candidate generation** (using 64-D Matryoshka prefixes, scale-aware `Int8` SQ8, or 4096-bit Binary Hamming with distance-pruned small-world edges) with **Stage-2 Exact Re-Ranking** over the full `Float32` embeddings persisted bit for bit (negative zero aside, stored as `+0.0`) in 4KB TOAST overflow chains (`"VTS2"`), **Nhé O** achieves full-precision top-$k$ recall within a statically bounded RAM footprint in 100% `SPARK_Mode (On)`.
 
 **Tags:** swe, ai
 **Related ADRs:** [ADR-003](../../DECISIONS.md), [ADR-006](../../DECISIONS.md), [ADR-017](../../DECISIONS.md), [ADR-018](../../DECISIONS.md)
@@ -74,7 +74,7 @@ In [`src/nhe_o-vector.adb`](../../../src/nhe_o-vector.adb), `Encode_Vector_TOAST
 | `5..8` | `Dim` | Big-endian `Unsigned_32` dimension (`1 .. 4096`), must equal the engine dimension |
 | `9 .. 8 + 4*Dim` | `Elements` | One big-endian IEEE 754 binary32 word per component (`sign`, 8-bit biased exponent, 23-bit fraction) |
 
-`Float_Bits` computes each word arithmetically — scale `|x|` by exact doublings into $[2^{23}, 2^{24})$ (or stop at the subnormal exponent), then read off the integer significand — so no `Ada.Unchecked_Conversion` to or from `Float` is needed and the round trip is exact, subnormals included. `Bits_Float` inverts it with exact halvings in `Long_Float`, rejecting infinities, NaNs and magnitudes above `Max_Component` (`1.0e6`), so every decoded value is a valid `Vector_Component` by construction and `gnatprove` can discharge all run-time checks; the contract states `Post => V.Dim = Dim`. The pre-0.4 `"VTST"` scaled-decimal words (about 7 significant digits) remain readable through `Decode_VTST_Word`.
+`Float_Bits` computes each word arithmetically — scale `|x|` by exact doublings into $[2^{23}, 2^{24})$ (or stop at the subnormal exponent), then read off the integer significand — so no `Ada.Unchecked_Conversion` to or from `Float` is needed and the round trip is exact, subnormals included (zero is always written as `+0.0`, so `-0.0` reads back as `+0.0`, which compares equal). `Bits_Float` inverts it with exact halvings in `Long_Float`, rejecting infinities, NaNs and magnitudes above `Max_Component` (`1.0e6`), so every decoded value is a valid `Vector_Component` by construction and `gnatprove` can discharge all run-time checks; the contract states `Post => V.Dim = Dim`. The pre-0.4 `"VTST"` scaled-decimal words (about 7 significant digits) remain readable through `Decode_VTST_Word`.
 
 ---
 
@@ -84,7 +84,7 @@ In [`src/nhe_o-vector.adb`](../../../src/nhe_o-vector.adb), `Encode_Vector_TOAST
 |---|---|---|---|
 | **1. Full 4096-D `Float32` in HNSW RAM** | `> 550 KB` (exceeds stack frame budget) | Exact | 0 page reads |
 | **2. 64-D Prefix Only in HNSW RAM** | `~36 KB` | Blind to dimensions `65..4096` in `Float32`/`Int8` mode | 0 page reads |
-| **3. Two-Stage HNSW RAM + `"VTS2"` TOAST Re-Ranking (Nhé O's choice)** | `~36 KB` | **Exact (bit-identical stored vector)** | Reads the vector TOAST chain of every visible candidate |
+| **3. Two-Stage HNSW RAM + `"VTS2"` TOAST Re-Ranking (Nhé O's choice)** | `~36 KB` | **Exact (bit-identical stored vector; `-0.0` stored as `+0.0`)** | Reads the vector TOAST chain of every visible candidate |
 
 ---
 

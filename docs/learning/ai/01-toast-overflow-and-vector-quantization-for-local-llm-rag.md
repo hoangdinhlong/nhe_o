@@ -37,7 +37,7 @@ When a RAG query filters documents by metadata (`SELECT chunk FROM docs WHERE me
 
 ### B. Multi-Precision Vector Quantization (`Float32` · `Int8` · `Binary`)
 To coexist with memory-hungry local LLMs, a vector engine supports three representations for any dimension `D in 1 .. 4096`:
-1. **`Float32` (4 bytes / dim)**: Exact IEEE-754 single precision (`16 KB` at `4096-D`). Used for exact re-ranking or ground-truth storage in TOAST pages (Nhé O stores every component's exact binary32 bit pattern in `"VTS2"` payloads; legacy `"VTST"` payloads are still decoded, `ADR-018`).
+1. **`Float32` (4 bytes / dim)**: Exact IEEE-754 single precision (`16 KB` at `4096-D`). Used for exact re-ranking or ground-truth storage in TOAST pages (Nhé O stores every component's exact binary32 bit pattern in `"VTS2"` payloads, writing negative zero as `+0.0`; legacy `"VTST"` payloads are still decoded, `ADR-018`).
 2. **Scalar Quantization `Int8` (`SQ8`, 1 byte / dim)**: Maps each `Float32` component into a signed 8-bit integer `-127 .. 127` (`4 KB` at `4096-D` — **4x RAM reduction** with `>98%` recall). Nhé O's `Quantize_To_Int8` is symmetric: each vector keeps its own scale `max |x_i| / 127`, so distances between vectors of different magnitudes stay comparable.
 3. **Binary Quantization (`BQ`, 1 bit / dim)**: Encodes the sign of each component (`1` if `x > 0.0` else `0`) into packed 64-bit words (`512 bytes` at `4096-D` — **32x RAM reduction**!) and computes distance via hardware-friendly XOR + population count (`Hamming_Distance`).
 
@@ -80,7 +80,7 @@ During a **Two-Stage Matryoshka / Quantized RAG Query**:
    - The query vector is quantized to `Binary` (`512 bytes`) or `Int8`.
    - The HNSW index traverses in-memory nodes in microseconds, using Hamming distance over the full binary signature or `Int8` distance over each node's 64-D prefix. At Nhé O's fixed capacity (`32` HNSW nodes, `16` documents), `Search_KNN` then evaluates every node the graph walk missed, so it returns the exact top-K by that Stage-1 distance (`ADR-017`).
 2. **Stage 2 (Exact Re-ranking & Context Fetch — TOAST `Float32` + Parent Chunk)**:
-   - For every visible candidate, `Nhe_O.RAG` follows the 16-byte `TOAST_Pointer` to read the exact `Float32` vector (`"VTS2"`, bit-identical to the ingested one) from disk, recomputes its distance in the query's encoding (`<->` L2 for `Float32`, full-dimension SQ8 L2, or Hamming), and keeps the best hits (up to `Max_RAG_Hits = 8`). It then reads the parent text chunk of the top hit from its own TOAST chain and returns it with the hits to the local Qwen LLM.
+   - For every visible candidate, `Nhe_O.RAG` follows the 16-byte `TOAST_Pointer` to read the exact `Float32` vector (`"VTS2"`, bit-identical to the ingested one except that `-0.0` reads back as `+0.0`) from disk, recomputes its distance in the query's encoding (`<->` L2 for `Float32`, full-dimension SQ8 L2, or Hamming), and keeps the best hits (up to `Max_RAG_Hits = 8`). It then reads the parent text chunk of the top hit from its own TOAST chain and returns it with the hits to the local Qwen LLM.
 
 ---
 

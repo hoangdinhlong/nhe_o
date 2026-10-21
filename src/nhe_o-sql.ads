@@ -5,8 +5,14 @@ with Nhe_O.Types; use Nhe_O.Types;
 
 --  Supported dialect (anything else is rejected with Status_Invalid_Syntax):
 --
---  Lexical (PostgreSQL scan.l, standard_conforming_strings = on):
---    * whitespace: space, HT, LF, VT, FF, CR; comments "--" to end of line and
+--  Encoding: the query must be well-formed UTF-8 (other text is rejected). The
+--  lexer works on bytes, which is sound only for an encoding whose multi-byte
+--  characters contain no ASCII byte; in client encodings such as SJIS, BIG5, GBK
+--  or GB18030 a backslash byte can be the second half of a character.
+--
+--  Lexical (PostgreSQL 16 scan.l, standard_conforming_strings = on):
+--    * whitespace: space, HT, LF, FF, CR (a vertical tab, whitespace only from
+--      PostgreSQL 17 on, is rejected); comments "--" to end of line and
 --      nested "/* ... */"; unterminated comments / literals are rejected
 --    * '...' ('' doubles), E'...' (backslash escapes the next character, '' also
 --      doubles), N'...', B'...' / X'...', $tag$ ... $tag$ with an optional tag

@@ -25,6 +25,11 @@ library project Nhe_O_Lib is
    );
    for Library_Auto_Init use "true";
 
+   --  The library cannot be unloaded (DF_1_NODELETE): its initialization installs GNAT
+   --  signal handlers and replaces the loading thread's alternate signal stack, which
+   --  would point into freed memory after a dlclose.
+   for Library_Options use ("-Wl,-z,nodelete");
+
    --  No -gnata: every assertion (Pre/Post/Assert/Loop_Invariant) is proved statically
    --  by gnatprove, and executing them would only add stack (whole-engine 'Old copies)
    --  and an exception path that cannot cross the C ABI. Run-time checks stay enabled.

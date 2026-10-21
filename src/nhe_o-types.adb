@@ -110,4 +110,61 @@ package body Nhe_O.Types is
       end case;
    end Type_Name;
 
+   procedure UTF8_Lead
+     (C    : in     Character;
+      Need :    out UTF8_Count;
+      Lo   :    out Character;
+      Hi   :    out Character)
+   is
+      B : constant Natural := Character'Pos (C);
+   begin
+      Lo := Character'Val (16#80#);
+      Hi := Character'Val (16#BF#);
+      if B in 16#C2# .. 16#DF# then
+         Need := 1;
+      elsif B in 16#E0# .. 16#EF# then
+         Need := 2;
+         if B = 16#E0# then
+            Lo := Character'Val (16#A0#);
+         elsif B = 16#ED# then
+            Hi := Character'Val (16#9F#);
+         end if;
+      elsif B in 16#F0# .. 16#F4# then
+         Need := 3;
+         if B = 16#F0# then
+            Lo := Character'Val (16#90#);
+         elsif B = 16#F4# then
+            Hi := Character'Val (16#8F#);
+         end if;
+      else
+         Need := 0;
+      end if;
+   end UTF8_Lead;
+
+   function Is_Valid_UTF8 (T : Bounded_Text) return Boolean is
+      Need : UTF8_Count := 0;
+      Lo   : Character  := Character'Val (16#80#);
+      Hi   : Character  := Character'Val (16#BF#);
+   begin
+      for I in 1 .. T.Length loop
+         pragma Loop_Invariant
+           (if (for all J in 1 .. I - 1 => T.Data (J) < Character'Val (16#80#))
+            then Need = 0);
+         if Need > 0 then
+            if T.Data (I) not in Lo .. Hi then
+               return False;
+            end if;
+            Need := Need - 1;
+            Lo   := Character'Val (16#80#);
+            Hi   := Character'Val (16#BF#);
+         elsif T.Data (I) >= Character'Val (16#80#) then
+            UTF8_Lead (T.Data (I), Need, Lo, Hi);
+            if Need = 0 then
+               return False;
+            end if;
+         end if;
+      end loop;
+      return Need = 0;
+   end Is_Valid_UTF8;
+
 end Nhe_O.Types;

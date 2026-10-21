@@ -125,8 +125,11 @@ package Nhe_O.IO is
           Always_Terminates,
           Pre    => Path_A.Length > 0 and then Path_B.Length > 0;
 
-   --  Return the calling process identifier (getpid), used to derive
-   --  per-process default database paths
+   --  Return the calling process identifier (getpid), used to derive the per-process
+   --  scratch paths and to recognise a forked child (Nhe_O.C_API.Engine_Ready).
+   --  Modelled as a constant (Global => null): the identifier changes only at fork(2),
+   --  which hosts call between calls into this library (never during one, see
+   --  include/nhe_o.h), and no contract relates its values across calls.
    function Get_Process_Id return Natural
      with Global => null;
 
@@ -163,15 +166,29 @@ package Nhe_O.IO is
    --  Canonical absolute path of the existing file Path (realpath(3): symbolic links,
    --  "." and ".." resolved), so directory fsyncs and checkpoint renames act on the
    --  real file; Success is False when it cannot be resolved or exceeds Max_Text_Len
+   --  (Too_Long: the resolved path exists but is longer than Max_Text_Len)
    procedure Resolve_Path
      (Path     : in     Bounded_Text;
       Resolved :    out Bounded_Text;
-      Success  :    out Boolean)
+      Success  :    out Boolean;
+      Too_Long :    out Boolean)
      with Global => null,
           Always_Terminates,
           Pre    => Path.Length > 0,
           Post   => (if Success then Resolved.Length > 0 and then Resolved.Data (1) = '/'
+                                     and then not Too_Long
                      else Resolved.Length = 0);
+
+   --  Delete the file Path resolves to (realpath(3)), never a symbolic link on the way:
+   --  undoes a creation through a link even when the resolved path is longer than
+   --  Max_Text_Len. Nothing happens when Path cannot be resolved.
+   pragma Warnings (GNATprove, Off, "subprogram ""Delete_Resolved_File"" has no effect",
+                    Reason => "Unlinks OS file on disk via contract-bound POSIX unlink syscall");
+   procedure Delete_Resolved_File (Path : in Bounded_Text)
+     with Global => null,
+          Always_Terminates,
+          Pre    => Path.Length > 0;
+   pragma Warnings (GNATprove, On, "subprogram ""Delete_Resolved_File"" has no effect");
 
    --  Prefix a relative Path with the current working directory (getcwd) so later
    --  calls are immune to chdir(2); absolute paths are returned unchanged
