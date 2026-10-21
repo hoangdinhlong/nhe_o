@@ -3,7 +3,7 @@
 > **Takeaway:** Pairing 4KB primary slotted pages with PostgreSQL-style TOAST overflow chains (`TOAST_Pointer` / `Root_Overflow_Page`) and vector quantization (`Float32`, `Int8`, `Binary`) allows an embedded database to support arbitrary embedding dimensions up to 4096-D and multi-kilobyte RAG parent chunks while keeping metadata filtering fast and reducing HNSW memory footprints by 4x–32x alongside local LLMs.
 
 **Tags:** ai, swe
-**Related ADRs:** [ADR-003](../../DECISIONS.md)
+**Related ADRs:** [ADR-003](../../DECISIONS.md), [ADR-017](../../DECISIONS.md), [ADR-018](../../DECISIONS.md)
 
 ---
 
@@ -28,7 +28,7 @@ Database engines and vector search systems solve these three problems using two 
 
 ### A. Primary 4KB Slotted Pages + TOAST Overflow Page Chains
 Inspired by PostgreSQL's **TOAST** (*The Oversized-Attribute Storage Technique*):
-- **Primary Slotted Page (`4096 bytes`)**: Stores compact relational columns, `JSONB` filter metadata, MVCC transaction headers (`Xmin`, `Xmax`), and small inline attributes (`<= 512 bytes`).
+- **Primary Slotted Page (`4096 bytes`)**: Stores compact relational columns, `JSONB` filter metadata, MVCC transaction headers (`Xmin`, `Xmax`), and small inline attributes (in Nhé O, up to `Max_Inline_Tuple_Bytes = 208` bytes per tuple).
 - **16-Byte Inline TOAST Pointer**: When an attribute (such as a `4096-D` `Float32` vector or an `8 KB` parent document chunk) exceeds the inline threshold, the primary tuple stores only a **16-byte descriptor** (`Root_Overflow_Page`, `Total_Byte_Length`, `Chunk_Count`, `Payload_CRC32`) instead of the multi-kilobyte payload.
 - **Linked 4KB TOAST Overflow Pages**: The oversized payload is split into fixed `4096-byte` overflow pages linked via `Next_Page_Id : Valid_Page_Id` and protected by per-page CRC32 checksums.
 
@@ -37,8 +37,8 @@ When a RAG query filters documents by metadata (`SELECT chunk FROM docs WHERE me
 
 ### B. Multi-Precision Vector Quantization (`Float32` · `Int8` · `Binary`)
 To coexist with memory-hungry local LLMs, a vector engine supports three representations for any dimension `D in 1 .. 4096`:
-1. **`Float32` (4 bytes / dim)**: Exact IEEE-754 single precision (`16 KB` at `4096-D`). Used for exact re-ranking or ground-truth storage in TOAST pages.
-2. **Scalar Quantization `Int8` (`SQ8`, 1 byte / dim)**: Maps each `Float32` component in `[Min_Val .. Max_Val]` into a signed 8-bit integer `-127 .. 127` (`4 KB` at `4096-D` — **4x RAM reduction** with `>98%` recall).
+1. **`Float32` (4 bytes / dim)**: Exact IEEE-754 single precision (`16 KB` at `4096-D`). Used for exact re-ranking or ground-truth storage in TOAST pages (Nhé O stores every component's exact binary32 bit pattern in `"VTS2"` payloads; legacy `"VTST"` payloads are still decoded, `ADR-018`).
+2. **Scalar Quantization `Int8` (`SQ8`, 1 byte / dim)**: Maps each `Float32` component into a signed 8-bit integer `-127 .. 127` (`4 KB` at `4096-D` — **4x RAM reduction** with `>98%` recall). Nhé O's `Quantize_To_Int8` is symmetric: each vector keeps its own scale `max |x_i| / 127`, so distances between vectors of different magnitudes stay comparable.
 3. **Binary Quantization (`BQ`, 1 bit / dim)**: Encodes the sign of each component (`1` if `x > 0.0` else `0`) into packed 64-bit words (`512 bytes` at `4096-D` — **32x RAM reduction**!) and computes distance via hardware-friendly XOR + population count (`Hamming_Distance`).
 
 ```text
@@ -49,7 +49,7 @@ To coexist with memory-hungry local LLMs, a vector engine supports three represe
 | |        full_vec_ptr = [TOAST Page #105, Len=16384B, Chunks=5]     | |
 | +-------------------------------------------------------------------+ |
 +-----------------------------------|-----------------------------------+
-                                    | (Only dereferenced for Top-K re-ranking!)
+                                    | (Only dereferenced for Stage-2 re-ranking!)
                                     v
         +-------------------+    +-------------------+    +-------------------+
         | TOAST Page #105   |--->| TOAST Page #106   |--->| TOAST Page #107.. |
@@ -57,7 +57,7 @@ To coexist with memory-hungry local LLMs, a vector engine supports three represe
         +-------------------+    +-------------------+    +-------------------+
 ```
 
-By keeping the `512-byte` Binary Quantized (or `Int8`) vector inline inside the HNSW graph and deferring the `16 KB` `Float32` TOAST read to the final Top-K two-stage re-ranking pass, **Nhé O** achieves sub-millisecond ANN search with minimal RAM usage.
+By keeping the `512-byte` Binary Quantized (or `Int8`) vector inline inside the HNSW graph and deferring the `16 KB` `Float32` TOAST read to the Stage-2 re-ranking pass (which reads the full stored vector of every visible candidate), **Nhé O** achieves sub-millisecond ANN search with minimal RAM usage.
 
 ---
 
@@ -67,17 +67,17 @@ Consider a **4096-dimensional** embedding from `Qwen3-Embedding-8B`:
 
 ```ada
 --  1. Storage footprint comparison for a 4096-D vector in Nhé O:
---     * Float32 (Full precision) : 4096 * 4 bytes = 16,384 bytes (5 TOAST 4KB pages)
---     * Int8    (Scalar quant.)  : 4096 * 1 byte  =  4,096 bytes (1 TOAST 4KB page)
---     * Binary  (1-bit Hamming)  : 4096 / 8 bits  =    512 bytes (Fits INLINE in 4KB page!)
+--     * Float32 (Full precision) : 4096 * 4 bytes = 16,384 bytes (+ 8-byte "VTS2" header: 5 TOAST 4KB pages)
+--     * Int8    (Scalar quant.)  : 4096 * 1 byte  =  4,096 bytes (computed on demand; HNSW keeps a 64-D prefix)
+--     * Binary  (1-bit Hamming)  : 4096 / 8 bits  =    512 bytes (kept INLINE in every in-RAM HNSW node!)
 ```
 
 During a **Two-Stage Matryoshka / Quantized RAG Query**:
 1. **Stage 1 (Candidate Retrieval — HNSW over `Binary` or `Int8`)**:
    - The query vector is quantized to `Binary` (`512 bytes`) or `Int8`.
-   - The HNSW index traverses in-memory nodes using Hamming or `Int8` distance to select the top `K_Candidates = 50` tuple IDs in microseconds.
+   - The HNSW index traverses in-memory nodes in microseconds, using Hamming distance over the full binary signature or `Int8` distance over each node's 64-D prefix. At Nhé O's fixed capacity (`32` HNSW nodes, `16` documents), `Search_KNN` then evaluates every node the graph walk missed, so it returns the exact top-K by that Stage-1 distance (`ADR-017`).
 2. **Stage 2 (Exact Re-ranking & Context Fetch — TOAST `Float32` + Parent Chunk)**:
-   - Only for those `50` candidates, `Nhe_O.Transaction` follows the 16-byte `TOAST_Pointer` to read the exact `Float32` vector and parent text chunk from disk, computes exact Cosine/L2 distance (`<=>` / `<->`), and returns the top `K = 5` passages to the local Qwen LLM.
+   - For every visible candidate, `Nhe_O.RAG` follows the 16-byte `TOAST_Pointer` to read the exact `Float32` vector (`"VTS2"`, bit-identical to the ingested one) from disk, recomputes its distance in the query's encoding (`<->` L2 for `Float32`, full-dimension SQ8 L2, or Hamming), and keeps the best hits (up to `Max_RAG_Hits = 8`). It then reads the parent text chunk of the top hit from its own TOAST chain and returns it with the hits to the local Qwen LLM.
 
 ---
 
@@ -94,11 +94,12 @@ During a **Two-Stage Matryoshka / Quantized RAG Query**:
 ## 5. Where it lives in the project
 
 - **ADR**: [`ADR-003`](../../DECISIONS.md) — *4KB Slotted Pages with TOAST Overflow Chains, 4096-D Vectors & Quantization for Universal RAG*.
+- **ADR**: [`ADR-017`](../../DECISIONS.md) — *Exact Top-K Retrieval at Bounded Capacity & Lossless B+Tree Delete Repair*; [`ADR-018`](../../DECISIONS.md) — *Exact `"VTS2"` Vector TOAST Payload (IEEE 754 binary32 Words)*.
 - **Domain Invariants**:
-  - [`BR-003`](../../domain/business-rules.md) — *PostgreSQL Vector, Scale-Aware Quantization & RFC 8259 JSONB Integrity*.
-  - [`BR-006`](../../domain/business-rules.md) — *4KB `"SLOT"` Primary Pages, `"TOAS"` Overflow Chains, `"RMET"` Metadata & `"VTST"` Stage-2 Vector Re-Ranking*.
-- **Active Epic**: [`docs/epics/02-storage-indexing-and-rag-executor/PROGRESS.md`](../../epics/02-storage-indexing-and-rag-executor/PROGRESS.md) — Tasks 1, 2, 4, and 6.
-- **Code Modules**: [`src/nhe_o-vector.ads`](../../../src/nhe_o-vector.ads) and [`src/nhe_o-transaction.ads`](../../../src/nhe_o-transaction.ads).
+  - [`BR-003`](../../domain/business-rules.md) — *PostgreSQL Vector, Scale-Aware Quantization & PostgreSQL-Exact JSONB*.
+  - [`BR-006`](../../domain/business-rules.md) — *4KB `"SLOT"` Primary Pages, `"TOAS"` Overflow Chains, `"RMET"` Metadata & `"VTS2"` Stage-2 Vector Re-Ranking*.
+- **Epic**: [`docs/epics/02-storage-indexing-and-rag-executor/PROGRESS.md`](../../epics/02-storage-indexing-and-rag-executor/PROGRESS.md) — Tasks 1, 2, 4, and 6.
+- **Code Modules**: [`src/nhe_o-vector.ads`](../../../src/nhe_o-vector.ads), [`src/nhe_o-transaction.ads`](../../../src/nhe_o-transaction.ads), [`src/nhe_o-hnsw.ads`](../../../src/nhe_o-hnsw.ads) (`Search_KNN`), and [`src/nhe_o-rag.adb`](../../../src/nhe_o-rag.adb) (Stage-2 re-ranking).
 
 ---
 
@@ -114,5 +115,5 @@ During a **Two-Stage Matryoshka / Quantized RAG Query**:
 
 1. **Why is simply increasing the database page size from `4 KB` to `16 KB` insufficient for a `4096-D` `Float32` embedding stored alongside a parent-document RAG text chunk?**
 2. **How does storing oversized vectors in TOAST overflow pages speed up Hybrid RAG queries that filter on `JSONB` metadata (`WHERE meta @> ...`)?**
-3. **How much memory does a `4096-D` vector consume in `Float32`, `Int8`, and `Binary` (1-bit) encodings, and why can a `4096-D` `Binary` vector fit directly inside a primary 4KB slotted page?**
+3. **How much memory does a `4096-D` vector consume in `Float32`, `Int8`, and `Binary` (1-bit) encodings, and why is a `4096-D` `Binary` vector small enough to keep inline in every in-RAM HNSW node?**
 4. **How does two-stage quantized retrieval (Binary/Int8 HNSW candidate search followed by TOAST `Float32` re-ranking) preserve high recall while saving RAM for a local LLM?**

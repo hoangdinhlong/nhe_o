@@ -133,14 +133,25 @@ Because `Dir_Base` and `Tup_Base` are local variables assigned inside the loop b
 In [`src/nhe_o-vector.adb`](../../../src/nhe_o-vector.adb), `Sqrt_Bounded` computes $\sqrt{X}$ using 80 Newton-Raphson iterations (`Guess := 0.5 * (Guess + X / Guess)`). To prove that `Guess + X / Guess` never overflows `Float'Last` and `X / Guess` never divides by zero across all 80 iterations, we split the computation into two half-terms (`Term1 := 0.5 * Guess` and `Term2 := 0.5 * (X / Guess)`) and clamp `Guess` to the invariant range `[1.0 .. X]` (for `X >= 1.0`) or `[X .. 1.0]` (for `X < 1.0`):
 
 ```ada
-      if X >= 1.0 then
-         Guess := X;
-         for Iter in 1 .. 80 loop
+      if X <= 0.0 then
+         return 0.0;
+      elsif X >= 1.0 then
+         Guess := (if X > 2.0 then X * 0.5 else 1.0);
+         if Guess < 1.0 then
+            Guess := 1.0;
+         elsif Guess > X then
+            Guess := X;
+         end if;
+         for Step in 1 .. 80 loop
             pragma Loop_Invariant (Guess in 1.0 .. X);
             Term1 := 0.5 * Guess;
             Term2 := 0.5 * (X / Guess);
-            pragma Assert (Term1 in 0.0 .. 0.5 * X);
-            pragma Assert (Term2 in 0.0 .. 0.5 * X);
+            if Term1 > X * 0.5 then
+               Term1 := X * 0.5;
+            end if;
+            if Term2 > X * 0.5 then
+               Term2 := X * 0.5;
+            end if;
             Guess := Term1 + Term2;
             if Guess < 1.0 then
                Guess := 1.0;
@@ -148,11 +159,10 @@ In [`src/nhe_o-vector.adb`](../../../src/nhe_o-vector.adb), `Sqrt_Bounded` compu
                Guess := X;
             end if;
          end loop;
-      end if;
 ```
 
 Why did splitting `0.5 * (Guess + X / Guess)` into `0.5 * Guess + 0.5 * (X / Guess)` matter?
-Because if `Guess = X` and `X > Float'Last / 2.0`, then `Guess + X / Guess` (`X + 1.0`) could overflow before multiplying by `0.5`! By multiplying each term by `0.5` first (`Term1 <= 0.5 * X` and `Term2 <= 0.5 * X`), `Term1 + Term2 <= X <= Float'Last` is guaranteed overflow-free for all `X`!
+Because if `Guess = X` and `X > Float'Last / 2.0`, then `Guess + X / Guess` (`X + 1.0`) could overflow before multiplying by `0.5`! By multiplying each term by `0.5` first and clamping it (`Term1 <= 0.5 * X` and `Term2 <= 0.5 * X` hold by construction, Principle 5), `Term1 + Term2 <= X <= Float'Last` is guaranteed overflow-free for all `X`!
 
 ---
 
@@ -162,7 +172,7 @@ Because if `Guess = X` and `X > Float'Last / 2.0`, then `Guess + X / Guess` (`X 
 |---|---|---|---|
 | **1. Suppress Floating-Point Overflow Checks (`pragma Suppress`)** | Zero proof effort on floating-point loops. | Violates AoRTE guarantees; silent `Inf` or `NaN` values can corrupt HNSW graph edges. | Unverified prototypes only. |
 | **2. Fixed-Point Arithmetic Only** | Integer/fixed-point SMT theories are much faster than IEEE-754 float theories. | Loses compatibility with standard `Float32` LLM embeddings (`pgvector` `VECTOR(d)`). | Financial/accounting columns (`Pg_Numeric`). |
-| **3. Linearly Bounded IEEE-754 Loop Invariants + Algebraic Offsets (Nhé O's choice)** | Retains full `Float32` `pgvector` compatibility while proving 100% of all 4,246 checks in `gnatprove`. | Requires explicit range subtypes (`Vector_Component in -1.0e6 .. 1.0e6`) and linear loop bounds. | Formally verified vector & RAG databases (`ADR-002`, `ADR-003`, `ADR-006`). |
+| **3. Linearly Bounded IEEE-754 Loop Invariants + Algebraic Offsets (Nhé O's choice)** | Retains full `Float32` `pgvector` compatibility while proving 100% of its checks in `gnatprove`. | Requires explicit range subtypes (`Vector_Component in -1.0e6 .. 1.0e6`) and linear loop bounds. | Formally verified vector & RAG databases (`ADR-002`, `ADR-003`, `ADR-006`). |
 
 ---
 

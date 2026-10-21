@@ -9,9 +9,9 @@
 
 ## 1. Context — the problem
 
-In high-assurance software engineering (such as **Nhé O**, where all 26 source files in `src/` operate under `pragma SPARK_Mode (On);` with `4,246` formal checks), a single adversarial review pass is rarely sufficient. Tightening a parser rule in Round $r$ can expose a new edge case in a caller or a contract tautology in Round $r+1$.
+In high-assurance software engineering (such as **Nhé O**, where all 26 source files in `src/` operate under `pragma SPARK_Mode (On);` with thousands of formal checks, `4,246` at the end of Epic 04), a single adversarial review pass is rarely sufficient. Tightening a parser rule in Round $r$ can expose a new edge case in a caller or a contract tautology in Round $r+1$.
 
-However, naively coupling **multi-round adversarial review** with **full formal verification** on every round creates a severe bottleneck:
+However, naively coupling **multi-round adversarial review** with **full formal verification** on every round creates a severe bottleneck (figures from Epic 04, Rounds 9–11):
 - A full `gnatprove -P nhe_o.gpr --mode=all --level=2 -j24` pass across 4,200+ VCs takes **3 to 5 minutes** of multi-core SMT solving (`cvc5`, `Z3`, `Alt-Ergo`).
 - An incremental `gprbuild` compile (`-gnatwa -gnatwe`) plus all 11 runtime verification suites (`./bin/nhe_o_main`) and the Python `ctypes` FFI test suite (`python3 bindings/python/nhe_o.py`) takes **~1.5 seconds**.
 - If an AI agent runs 4 adversarial rounds and invokes `gnatprove` after every round, it spends ~20 minutes waiting on SMT solvers for intermediate code states that get rewritten in the very next round.
@@ -51,7 +51,7 @@ The **Two-Tier Adversarial Fast-Loop** separates **defect discovery & behavioral
 ### Why "Proof-Ready" Edits in Tier 1 Matter
 Skipping `gnatprove` during Tier 1 does **not** mean writing careless code and hoping it proves later. Every Tier-1 fix must follow three discipline rules:
 1. **Bounded Loops or Explicit `pragma Loop_Variant`**: Prefer `for Step in 1 .. Max_Text_Len loop` over unstructured `while` loops, or write `pragma Loop_Variant (Increases => Pos);` immediately when writing the loop.
-2. **Index Bounds in `pragma Loop_Invariant`**: Maintain cursor bounds (`Pos in 1 .. Clean_Query.Length + 1`) inside every loop invariant.
+2. **Index Bounds in `pragma Loop_Invariant`**: Maintain cursor bounds (`Pos in 1 .. Query.Length + 1`) inside every loop invariant.
 3. **Non-Tautological Modular `Post` Contracts**: Never write `Post => True`; give every new helper a concise, true `Post` contract so Tier 2 does not suffer contextual inlining timeouts.
 
 ---
@@ -61,9 +61,9 @@ Skipping `gnatprove` during Tier 1 does **not** mean writing careless code and h
 During Task 20 of **Epic 04 (`04-post-epic-03-grooming-and-hardening`)**, we executed the Two-Tier Adversarial Fast-Loop across the entire Nhé O repository:
 
 1. **Fast-Loop Round 1 (Overall Round 9 — `1.63s` compile + test)**:
-   - Audited all 26 `.ads`/`.adb` files and uncovered `R9-HIGH-01` (unified `CREATE TABLE` `<col_ident> <pg_type>` validation in `Count_Create_Table_Columns` and multi-tuple `INSERT VALUES (...), (...)` validation), `R9-MED-01` (removing raw-string `@>` shortcuts in `Nhe_O.JSON` so `Max_JSON_Fields = 16` completeness is always enforced), and `R9-MED-02` (eliminating all 15 literal `Post => True` contracts and subtype-range tautologies).
+   - Audited all 26 `.ads`/`.adb` files and uncovered `R9-HIGH-01` (unified `CREATE TABLE` `<col_ident> <pg_type>` validation in the column counter of that time and multi-tuple `INSERT VALUES (...), (...)` validation), `R9-MED-01` (removing raw-string `@>` shortcuts in `Nhe_O.JSON` so `Max_JSON_Fields = 16` completeness is always enforced), and `R9-MED-02` (eliminating all 15 literal `Post => True` contracts and subtype-range tautologies).
 2. **Fast-Loop Round 2 (Overall Round 10 — `1.48s` compile + test)**:
-   - Re-audited all modified units and uncovered `R10-MED-01`: tightened `Validate_Clause_Structure` to enforce `ON CONFLICT` and `RETURNING` clause ordering/uniqueness, rejected `DOUBLE PRECISION(...)` type modifiers, and added `Post` contracts to `Analyze_SQL` and `Resolve_Pg_Type`.
+   - Re-audited all modified units and uncovered `R10-MED-01`: tightened the clause-structure validator of that time to enforce `ON CONFLICT` and `RETURNING` clause ordering/uniqueness, rejected `DOUBLE PRECISION(...)` type modifiers, and added `Post` contracts to `Analyze_SQL` and `Resolve_Pg_Type`. (*Update (0.4):* Round 12 replaced these substring-based SQL helpers with a PostgreSQL-faithful lexer and token-level validator, `ADR-016`.)
 3. **Fast-Loop Round 3 (Overall Round 11 — `1.49s` compile + test)**:
    - Re-audited all 5 attack surfaces and found **`0` issues** (convergence).
    - **Total Tier-1 compile-and-test time across all 3 rounds: `4.6 seconds`!**
@@ -78,7 +78,7 @@ During Task 20 of **Epic 04 (`04-post-epic-03-grooming-and-hardening`)**, we exe
 |---|---|---|---|
 | **1. Single-Pass Audit + Heavy Prove** | ~4 min | Misses secondary bugs introduced by Round-1 fixes or cross-module interactions. | Trivial single-file patches. |
 | **2. Heavy Prove Inside Every Audit Round** | ~15–20 min | High assurance, but wastes 80%+ of time proving intermediate code that gets refactored in Round $r+1$. | Tiny packages with `< 100` VCs. |
-| **3. Two-Tier Fast-Loop + Outer Heavy Gate (Nhé O's choice)** | **~4.6s (Tier 1) + ~4 min (Tier 2)** | Identical 100% formal assurance (`4,246 / 4,246` VCs proved) with 4x–5x faster multi-round convergence. | Full-system adversarial audits on SPARK, Rust (`Kani`/`Verus`), or Lean/Coq codebases. |
+| **3. Two-Tier Fast-Loop + Outer Heavy Gate (Nhé O's choice)** | **~4.6s (Tier 1) + ~4 min (Tier 2)** | Identical 100% formal assurance (`4,246 / 4,246` VCs proved at Round 11) with 4x–5x faster multi-round convergence. | Full-system adversarial audits on SPARK, Rust (`Kani`/`Verus`), or Lean/Coq codebases. |
 
 ---
 
@@ -93,7 +93,7 @@ During Task 20 of **Epic 04 (`04-post-epic-03-grooming-and-hardening`)**, we exe
 ## 6. Further reading
 
 - [`swe/07-closing-protocol-invariant-gaps-and-modular-spark-contracts.md`](../swe/07-closing-protocol-invariant-gaps-and-modular-spark-contracts.md) — Why 100% AoRTE still requires multi-round adversarial protocol audits.
-- [`swe/09-eliminating-tautological-contracts-and-contextual-inlining-in-spark.md`](../swe/09-eliminating-tautological-contracts-and-contextual-inlining-in-spark.md) — Writing proof-ready non-tautological contracts during Tier 1 so Tier 2 proves in `< 1s` per VC.
+- [`swe/09-eliminating-tautological-contracts-and-contextual-inlining-in-spark.md`](../swe/09-eliminating-tautological-contracts-and-contextual-inlining-in-spark.md) — Writing proof-ready non-tautological contracts during Tier 1 so Tier 2 proves each helper modularly instead of timing out on inlined loops.
 
 ---
 

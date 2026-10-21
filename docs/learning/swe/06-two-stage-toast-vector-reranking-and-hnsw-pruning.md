@@ -27,7 +27,7 @@ During the post-Epic-03 adversarial review ([`ADVERSARIAL-REVIEW.md`](../../epic
 ## 2. The concept, explained simply
 
 ### 1. Scale-Aware `Int8` SQ8 Distance (`Dequantize_Int8_Scalar`)
-Each `Quantized_Int8_Vector` (and each `HNSW_Node`) stores its quantization multiplier `Scale : Non_Negative_Float`. When computing `Int8` distance between node $A$ and query $Q$, each component is reconstructed into `Vector_Component` (`[-1.0e6 .. 1.0e6]`) using `Dequantize_Int8_Scalar`:
+Each `Quantized_Int8_Vector` stores its quantization multiplier `Scale : Non_Negative_Float` (each `HNSW_Node` keeps it as `Int8_Scale`). When computing `Int8` distance between node $A$ and query $Q$, each component is reconstructed into `Vector_Component` (`[-1.0e6 .. 1.0e6]`) using `Dequantize_Int8_Scalar`:
 
 $$\hat{A}_i = \text{clamp}(\text{Int8\_Pref}_A[i] \times \text{Scale}_A,\; -10^6, +10^6), \quad \hat{Q}_i = \text{clamp}(Q[i] \times \text{Scale}_Q,\; -10^6, +10^6)$$
 

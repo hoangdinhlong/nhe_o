@@ -138,6 +138,8 @@ Here is how `To_Bounded_Ident` and `C_KV_Set` in [`src/nhe_o-c_api.adb`](../../.
 
 Notice why `Post => To_Bounded_Ident'Result.Length = Len` on `To_Bounded_Ident` is essential: without that postcondition, `gnatprove` knows `Key_Len >= 1`, but would not know that `Key.Length >= 1` when checking `Nhe_O.KV.Set`'s precondition (`Pre => Key.Length > 0`)!
 
+> **Update (0.4):** Every database opened through the C ABI now has a WAL (`nhe_o_init` uses per-process scratch files, `ADR-013`), so the live path of `C_KV_Set` is its durable branch. After the same validation (plus a `G_Initialized` check and the rejection of a negative `TTL_Sec`), it refuses writes while the write-fault latch `G_Write_Fault` is set (`ADR-012`) and calls `Set_Durable`, whose `Pre => Key.Length > 0 and then ...` is discharged by exactly the same `To_Bounded_Ident` postcondition. The in-memory `Set` call shown above remains the branch for an engine without a WAL.
+
 ---
 
 ## 4. Trade-offs & alternatives

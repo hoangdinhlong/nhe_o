@@ -125,11 +125,13 @@ Instead of calling stateful `lseek` + `read`/`write` (which requires two syscall
    end Write_Page;
 ```
 
+> **Update (0.4):** The body in [`src/nhe_o-io.adb`](../../../src/nhe_o-io.adb) has grown since this sketch: it refuses a file whose size is not page-aligned (`Posix_Lseek (Fd, 0, SEEK_END)`), retries a failed or short `pwrite` up to `Max_IO_Retries` times, fsyncs the parent directory after the first write into an empty file (`Sync_Parent_Directory`), and truncates a failed file extension back with `Posix_Ftruncate`, leaving any torn page that survives to `Repair_DB_Tail` at the next recovery (`ADR-009`). `Success` now depends on the write and the `fsync` only, no longer on `close`.
+
 Notice what `SPARK_Mode (On)` verifies inside `Write_Page` and `Read_Page`:
 1. **No Path Truncation**: `To_C_Path` cannot be called unless `not Has_Embedded_NUL (File_Path)` holds.
 2. **No Integer Overflow**: Because `Page_Id` is constrained to `Valid_Page_Id` (`0 .. 1_048_575`) and cast to 64-bit `Off_T` (`Interfaces.Integer_64`) before multiplying by `4096`, `Off_T (Page_Id) * Off_T (Nhe_O.Page_Size)` is provably free of 32-bit signed overflow.
 3. **No Uninitialized Output Buffers**: In `Read_Page`, `Buffer` is zero-initialized on entry and explicitly wiped (`Buffer := [others => 0];`) if `N_Read /= 4096` or `Close_R /= 0`, ensuring partial/corrupt disk reads never leak into the engine.
-4. **Explicit Durability Check**: `Success` is `True` if and only if all `4096` bytes were written, `fsync` returned `0`, and `close` returned `0`.
+4. **Explicit Durability Check**: `Success` is `True` if and only if all `4096` bytes were written and `fsync` returned `0` (and, for the first write into an empty file, the parent directory was fsynced too).
 
 ---
 

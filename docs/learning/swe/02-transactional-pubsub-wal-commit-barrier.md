@@ -17,7 +17,7 @@ In an Agentic RAG or multi-model database system like **Nhé O**, applications u
 2. **State-Change Triggers for Background Workers (PostgreSQL-style)**:
    - A transaction inserts a new document chunk into a table and notifies a background embedding / HNSW indexing worker (`NOTIFY rag_ingest, 'doc_id=108'`).
    - What happens if the notification is delivered **immediately** before the transaction commits?
-     - **Race Condition (Premature Read)**: The background worker wakes up and queries `doc_id=108` *before* the inserting transaction commits. Under MVCC Snapshot Isolation (`Is_Tuple_Visible`), the row is invisible (`Not Found`)!
+     - **Race Condition (Premature Read)**: The background worker wakes up and queries `doc_id=108` *before* the inserting transaction commits. Under MVCC Snapshot Isolation (`Is_Version_Visible`), the row is invisible (`Not Found`)!
      - **Phantom Indexing on Rollback**: Worse, if the transaction later fails a constraint check or I/O check and rolls back (`Rollback_Tx`), a fire-and-forget notification has already been sent — causing the RAG worker to index phantom data that does not exist in the database.
 
 ---
@@ -27,22 +27,22 @@ In an Agentic RAG or multi-model database system like **Nhé O**, applications u
 A **WAL Commit Barrier** solves both the premature-read race condition and the phantom-rollback bug by separating **staging a notification** from **dispatching it to subscribers**:
 
 - **Mode 1: Immediate In-Memory Delivery (`Durable => False`, Redis `PUBLISH` semantics)**
-  - Calling `Publish` writes the message directly into the bounded FIFO ring buffers of all matching active subscribers (`Exact` channel or `*` prefix pattern).
+  - Calling `Publish` writes the message directly into the bounded FIFO ring buffers of all matching active subscribers (exact channel or `*` glob pattern at any position, `Matches_Channel`).
   - Zero disk I/O; independent of transactions.
 - **Mode 2: Transactional WAL-Committed Delivery (`Durable => True`, PostgreSQL `NOTIFY` semantics)**
-  - When a transaction calls `Notify (Ctx, Channel, Payload)` while `Ctx.State = Tx_Active`, the message is **not** placed into subscriber ring buffers yet. Instead, it is appended to a bounded **Transactional Staging Queue** associated with `Ctx.Id`.
+  - When a transaction calls `Stage_Notify (Ctx, Staging, Channel, Payload, Status)` while `Ctx.State = Tx_Active`, the message is **not** placed into subscriber ring buffers yet. Instead, it is appended to a bounded **Transactional Staging Queue** associated with `Ctx.Id`.
   - **On `Commit_Tx`**:
     1. `Nhe_O.Transaction` encodes the WAL frame with CRC32 and flushes it to disk (`Posix_Pwrite_WAL` + `Posix_Fsync`).
     2. **Only after `Status = Status_Ok` and `Ctx.State = Tx_Committed`** (the *WAL Commit Barrier*), the staged notifications for `Ctx.Id` are atomically flushed into the subscriber ring buffers of `Nhe_O.PubSub`.
   - **On `Rollback_Tx` (or failed `Commit_Tx`)**:
-    - The staged notifications for `Ctx.Id` are simply discarded (`Staged_Count := 0`). Subscribers never see a notification from an aborted transaction.
+    - The staged notifications for `Ctx.Id` are simply discarded (`Staging.Count = 0`). Subscribers never see a notification from an aborted transaction.
 
 ```text
 Transaction T1 (Active)                        Subscriber (RAG Indexer Worker)
 -----------------------                        -------------------------------
 1. Begin_Tx (T1)
 2. Insert Document Chunk (doc_id=108)
-3. Notify_Tx (T1, "rag_ingest", "108")
+3. Stage_Notify (T1, "rag_ingest", "108")
       |
       +--> [Staged in T1 Queue]  (Blocked by WAL Commit Barrier)
                                  (Subscriber sees NOTHING yet)
@@ -51,7 +51,8 @@ Transaction T1 (Active)                        Subscriber (RAG Indexer Worker)
    - Posix_Fsync (WAL) == 0  <=== WAL COMMIT BARRIER PASSED!
    - Ctx.State := Tx_Committed
       |
-      +--> Dispatch_Staged (T1) -------------> 5. Poll_Message ("rag_ingest")
+      +--> Flush_Committed_Notifications (T1)
+                    -------------------------> 5. Poll_Message ("rag_ingest")
                                                6. Reads doc_id=108 (Guaranteed
                                                   visible under MVCC & durable!)
 ```
@@ -76,23 +77,28 @@ In **Nhé O**, a bounded transactional notification staging buffer in `SPARK_Mod
                      and then Staging.Owner_Tx = Ctx.Id);
 
    --  Flush staged notifications to Pub/Sub Broker ONLY after Tx_Committed
+   --  and only when Staging.Owner_Tx matches Ctx.Id
    procedure Flush_Committed_Notifications
      (Ctx             : in     Transaction_Context;
       Staging         : in out Tx_Notification_Buffer;
       Broker          : in out PubSub_Broker;
       Total_Delivered :    out Natural)
      with Pre  => Ctx.State = Tx_Committed,
-          Post => Staging.Count = 0;
+          Post => (if Staging'Old.Count = 0 or else Staging'Old.Owner_Tx = Ctx.Id
+                   then Staging.Count = 0
+                   else Staging = Staging'Old);
 
    --  Discard staged notifications on rollback
    procedure Discard_Staged_Notifications
      (Ctx     : in     Transaction_Context;
       Staging : in out Tx_Notification_Buffer)
      with Pre  => Ctx.State = Tx_Aborted,
-          Post => Staging.Count = 0;
+          Post => (if Staging'Old.Count = 0 or else Staging'Old.Owner_Tx = Ctx.Id
+                   then Staging.Count = 0
+                   else Staging = Staging'Old);
 ```
 
-Notice how the precondition `Pre => Ctx.State = Tx_Committed` on `Flush_Committed_Notifications` makes it **mathematically impossible** in `SPARK_Mode (On)` to dispatch a durable notification before `Commit_Tx` has transitioned the transaction to `Tx_Committed`!
+Notice how the precondition `Pre => Ctx.State = Tx_Committed` on `Flush_Committed_Notifications` makes it **mathematically impossible** in `SPARK_Mode (On)` to dispatch a durable notification before `Commit_Tx` has transitioned the transaction to `Tx_Committed`! The `Owner_Tx` guard in both postconditions adds that a transaction can never flush or discard notifications staged by another transaction: such a buffer is left untouched.
 
 ---
 
@@ -110,7 +116,7 @@ Notice how the precondition `Pre => Ctx.State = Tx_Committed` on `Flush_Committe
 
 - **ADR**: [`ADR-004`](../../DECISIONS.md) — *Dual-Mode Pub/Sub: Fast In-Memory Ring Buffers + Optional `DURABLE` WAL-Committed Dispatch*.
 - **Domain Invariant**: [`BR-005`](../../domain/business-rules.md) — *Dual-Mode Pub/Sub Delivery, `Owner_Tx` Guard & Overflow Accounting*.
-- **Active Epic**: [`docs/epics/02-storage-indexing-and-rag-executor/PROGRESS.md`](../../epics/02-storage-indexing-and-rag-executor/PROGRESS.md) — Task 5.
+- **Epic**: [`docs/epics/02-storage-indexing-and-rag-executor/PROGRESS.md`](../../epics/02-storage-indexing-and-rag-executor/PROGRESS.md) — Task 5.
 - **Code Modules**: [`src/nhe_o-pubsub.ads`](../../../src/nhe_o-pubsub.ads) and [`src/nhe_o-transaction.ads`](../../../src/nhe_o-transaction.ads).
 
 ---
@@ -126,6 +132,6 @@ Notice how the precondition `Pre => Ctx.State = Tx_Committed` on `Flush_Committe
 ## 7. Check yourself
 
 1. **What two bugs occur if a transaction publishes an event to a background RAG indexing worker *before* the transaction commits?**
-2. **Why can a subscriber wake up upon receiving an immediate (non-transactional) notification and fail to see the newly inserted row under MVCC Snapshot Isolation (`Is_Tuple_Visible`)?**
+2. **Why can a subscriber wake up upon receiving an immediate (non-transactional) notification and fail to see the newly inserted row under MVCC Snapshot Isolation (`Is_Version_Visible`)?**
 3. **How does the SPARK precondition `Pre => Ctx.State = Tx_Committed` on `Flush_Committed_Notifications` guarantee that durable notifications respect the WAL Commit Barrier?**
 4. **When should an Agentic RAG application use immediate `Publish` (Redis mode) versus transactional `Stage_Notify` (PostgreSQL `NOTIFY` mode)?**
