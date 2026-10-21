@@ -22,7 +22,7 @@
 9. **100% SPARK Verification Mandate (`BR-001` / `ADR-002` / `ADR-005`)**:
    - **100% of specifications, bodies, and entrypoints** (all 26 files across 14 units in `src/`) operate under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)` and zero `pragma Assume` statements.
    - **4,246 / 4,246 Formal Checks Proved (100% SPARK Stone, Bronze, Silver & Gold Contracts)**: Verified by `gnatprove 16.1.0` (`Why3` + `Z3` + `cvc5` + `Alt-Ergo`) with `0 unproved` checks, `0 justified` checks, and `0 warnings` (max proof time `< 1s`).
-   - **Contract-Bound POSIX I/O (`src/nhe_o-io.adb`)**: Physical disk operations bypass exception-raising `Ada.Streams.Stream_IO` and bind directly in `SPARK_Mode (On)` to atomic POSIX kernel syscalls (`open` including `O_EXCL` creation, `pread`, `pwrite`, `lseek`, `fsync`, `ftruncate`, `close`, `unlink`, `rename`, `stat`, `fstat`, `flock`, `realpath`, `getcwd`, `getpid`, `access`, `signal`).
+   - **Contract-Bound POSIX I/O (`src/nhe_o-io.adb`)**: Physical disk operations bypass exception-raising `Ada.Streams.Stream_IO` and bind directly in `SPARK_Mode (On)` to atomic POSIX kernel syscalls (`open` including `O_EXCL` creation, `pread`, `pwrite`, `lseek`, `fsync`, `ftruncate`, `close`, `unlink`, `rename`, `stat`, `fstat`, `flock`, `realpath`, `readlink`, `getcwd`, `getpid`, `access`, `signal`).
 
 ---
 
@@ -71,7 +71,7 @@ Following professional Ada Quality & Style Guide (`Mixed_Case_With_Underscores` 
 | `Nhe_O.SQL` | `src/nhe_o-sql.ad[sb]` | `SPARK_Mode (On)` | PostgreSQL SQL dialect tokenizer, parser, and statement classifier |
 | `Nhe_O.RAG` | `src/nhe_o-rag.ad[sb]` | `SPARK_Mode (On)` | Universal Local LLM Hybrid RAG & 1-hop GraphRAG query executor with MVCC snapshot isolation |
 | `Nhe_O.C_API` | `src/nhe_o-c_api.ad[sb]` | `SPARK_Mode (On)` | Precondition-free defensive C ABI / FFI boundary with checkpoints and write-fault latch (`include/nhe_o.h`, `lib/libnhe_o.so`) |
-| `Nhe_O.IO` | `src/nhe_o-io.ad[sb]` | `SPARK_Mode (On)` | Contract-bound POSIX syscall I/O (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `ftruncate`, `close`, `unlink`, `rename`, `stat`, `fstat`, `flock`, `realpath`, `getcwd`, `getpid`, `access`, `signal`) |
+| `Nhe_O.IO` | `src/nhe_o-io.ad[sb]` | `SPARK_Mode (On)` | Contract-bound POSIX syscall I/O (`open`, `pread`, `pwrite`, `lseek`, `fsync`, `ftruncate`, `close`, `unlink`, `rename`, `stat`, `fstat`, `flock`, `realpath`, `readlink`, `getcwd`, `getpid`, `access`, `signal`) |
 | `Nhe_O_Main` | `src/nhe_o_main.adb` | `SPARK_Mode (On)` | 11-suite verification harness and interactive CLI (`--verify`, `--sql`, `--kv`, `--rag-demo`) |
 
 ---

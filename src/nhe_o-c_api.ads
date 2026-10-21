@@ -64,16 +64,18 @@ package Nhe_O.C_API is
    --  caller's stack)
    G_Scratch_Engine : RAG_Engine    := (others => <>);
    --  Set by an I/O failure on a durable write path (WAL append, commit materialization,
-   --  checkpoint rename). Once set, every write returns C_Status_IO_Error until
-   --  nhe_o_init_with_paths reopens the database and recovery re-derives the durable
-   --  state from disk. KV and Pub/Sub reads keep serving the in-memory state; RAG
-   --  queries read TOAST pages from G_DB_Path and fail while a commit's pages could
-   --  not be written there.
+   --  checkpoint rename). Once set, every durable write (KV writes, RAG ingests and
+   --  deletes, checkpoints) returns C_Status_IO_Error until nhe_o_init_with_paths
+   --  reopens the database and recovery re-derives the durable state from disk. Reads
+   --  keep serving the in-memory state and Pub/Sub (in memory) keeps working; RAG
+   --  queries read TOAST pages from G_DB_Path, so a query that needs pages a commit
+   --  could not write there fails.
    G_Write_Fault    : Boolean       := False;
    --  Exclusive flock(2) locks on the open database and WAL files: while they are held
    --  a second open of either file - by another process, or by this one through a
-   --  second descriptor - is refused. A checkpoint locks its new WAL before renaming it
-   --  over the old one, so the WAL lock never lapses.
+   --  second descriptor - is refused. A checkpoint holds the lock of its new WAL from
+   --  the file's creation until it renames it over the old one, so the WAL lock never
+   --  lapses.
    G_DB_Lock        : Nhe_O.IO.File_Lock := Nhe_O.IO.No_Lock;
    G_WAL_Lock       : Nhe_O.IO.File_Lock := Nhe_O.IO.No_Lock;
    --  Lock of the new WAL while a checkpoint writes it (No_Lock otherwise). A global,
@@ -107,10 +109,13 @@ package Nhe_O.C_API is
 
    --  Initialize / reset the embedded runtime as a scratch database (Dim = 3) on the
    --  per-process paths /tmp/nhe_o_c_api.<pid>.db / .wal: earlier contents of those
-   --  files are deleted and both are recreated with O_EXCL, so a link planted at the
-   --  predictable names is refused, never followed, then locked like any open database
-   --  (C_Status_IO_Error if a file cannot be removed, created or locked); nhe_o_close
-   --  removes them again
+   --  files are deleted and both are recreated with O_EXCL and locked like any open
+   --  database through the creating descriptor (Create_Locked_File). A symbolic link at
+   --  the predictable names (or at .wal.ckpt) is never followed: the link itself is
+   --  removed and its target never opened, and a link planted after the removal makes
+   --  the creation fail (C_Status_IO_Error if a file cannot be removed, created or
+   --  locked; a scratch file another open holds is never removed); nhe_o_close removes
+   --  them again
    procedure C_Init (Out_Status : out int)
      with Global        => (In_Out => (G_DB_Lock, G_WAL_Lock, G_Ckpt_Lock),
                             Output => (G_Initialized, G_Owner_Pid, G_Ephemeral, G_Next_Tx,
@@ -125,16 +130,19 @@ package Nhe_O.C_API is
    --  Initialize embedded Nhe_O C runtime state with caller-specified DB/WAL paths
    --  and embedding dimension Dim in 1 .. 4096, recovering existing state when present
    --  (the scratch files of a previous nhe_o_init database are deleted first).
-   --  Relative paths are resolved against the current directory and symbolic links
-   --  with realpath(3), once, here; the resolved WAL path must leave room for the
+   --  Relative paths are prefixed with the current directory (the result must fit in
+   --  Max_Text_Len bytes too) and symbolic links resolved with realpath(3), once, here;
+   --  the resolved paths must fit in Max_Text_Len bytes, the WAL's leaving room for the
    --  5-byte ".ckpt" checkpoint suffix (at most Max_Text_Len - 5 bytes). The database,
    --  the WAL and "<wal>.ckpt" must be three different files, also through links; an
    --  existing non-empty database must start with min (size, 4096) zero bytes (page 0
-   --  is never written, so swapped arguments and any other file are refused); and a
-   --  file at the reserved "<wal>.ckpt" must be a WAL (an interrupted checkpoint's
+   --  is never written, so swapped arguments and any other file that does not start
+   --  with 4096 zero bytes are refused); and the reserved "<wal>.ckpt" may hold no
+   --  symbolic link (never followed) and no file but a WAL (an interrupted checkpoint's
    --  leftover, which is removed) - C_Status_Invalid_Arg otherwise, with the files
    --  untouched. Both files are created when missing (with their directory fsynced) and
-   --  locked (Lock_File): a lock held by another open fails with C_Status_IO_Error.
+   --  locked (Lock_File): a lock held by another open fails with C_Status_IO_Error. A
+   --  refused call removes the files it created, each only while holding its lock.
    --  Recovery repairs a torn WAL / database tail left by a crash (a WAL path naming a
    --  file that is not a WAL fails with C_Status_IO_Error and is left untouched),
    --  replays KV and committed RAG work (a database of another dimension fails with
@@ -180,9 +188,14 @@ package Nhe_O.C_API is
    --  a commit frame carrying the frozen Page 1, atomically rename it over the old WAL,
    --  and fsync the directory. The rename is the commit point: a crash before it keeps
    --  the old WAL, a crash after it recovers from the new one, and both describe the
-   --  same logical database. Refused (C_Status_IO_Error) while G_Write_Fault is set; a
-   --  failed directory fsync after the rename sets it. Runs automatically after durable
-   --  writes once Checkpoint_WAL_Frames / Checkpoint_Tx_Id is reached.
+   --  same logical database. "<wal>.ckpt" is created with O_EXCL and locked through
+   --  the creating descriptor (Create_Locked_File), so no other open can take it; a WAL
+   --  left there by a failed checkpoint is removed while locked, and any other file, a
+   --  symbolic link (never followed) or a file another open holds refuses the
+   --  checkpoint (C_Status_IO_Error), untouched. Refused (C_Status_IO_Error) while
+   --  G_Write_Fault is set; a failed directory fsync after the rename sets it. Runs
+   --  automatically after durable writes that take an id, once Checkpoint_WAL_Frames /
+   --  Checkpoint_Tx_Id is reached.
    procedure C_Checkpoint (Out_Status : out int)
      with Global        => (Input  => (G_Initialized, G_Owner_Pid, G_DB_Path, G_WAL_Path, G_KV_Store),
                             In_Out => (G_Next_Tx, G_Next_KV_Seq, G_RAG_Engine,

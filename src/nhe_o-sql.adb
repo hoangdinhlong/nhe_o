@@ -491,7 +491,8 @@ package body Nhe_O.SQL is
    --  Scan a numeric literal starting at Pos: digits [. digits] [e [+-] digits]
    --  (or . digits ...).  Is_Int is set for a digits-only literal whose value
    --  fits Natural.  Trailing identifier characters ("123abc", "1e") are
-   --  rejected, as in PostgreSQL 15+.
+   --  rejected, as in PostgreSQL 15+, so PostgreSQL 16's "0x2A" / "0o52" /
+   --  "0b1" integers and "1_000" separators, outside the dialect, fail too.
    procedure Scan_Number
      (Q      : in     Bounded_Text;
       Pos    : in     Positive;

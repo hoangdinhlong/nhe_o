@@ -68,7 +68,11 @@ package Nhe_O.RAG is
    type RAG_Engine is record
       Dim             : Vector_Dim         := 3;
       Doc_Count       : RAG_Doc_Count      := 0;
-      Next_TOAST_Pg   : Valid_Page_Id      := 10;  --  one past the highest reserved TOAST page
+      --  An upper bound of the reserved TOAST pages: one past the highest after an
+      --  ingest, rollback, freeze or recovery (Recompute_TOAST_High_Water_Mark); a
+      --  commit keeps it, so it can stay above the pages a transaction released by
+      --  replacing its own version, until the next of those recomputes it
+      Next_TOAST_Pg   : Valid_Page_Id      := 10;
       CLOG            : Commit_Log         := Default_CLOG;
       Commit_Seqs     : Commit_Seq_Log     := [others => 0];
       Last_Commit_Seq : Commit_Seq_Number  := 0;
@@ -396,7 +400,9 @@ package Nhe_O.RAG is
    --  database file recovers an empty engine. Max_Seen_Tx is the largest transaction id
    --  found in the WAL (Redo_WAL_Recovery.Max_Seen_Tx), the Page 1 LSN, and any
    --  recovered tuple header: callers must seed Next_Tx above it. A document whose
-   --  vector has another dimension than Dim fails with Status_Dimension_Mismatch.
+   --  vector has another dimension than Dim fails with Status_Dimension_Mismatch, and
+   --  any damage (Page 1, TOAST, "RMET" or vector chains, tuples, the WAL) with
+   --  Status_IO_Error.
    procedure Recover_RAG_Engine
      (Engine      :    out RAG_Engine;
       Dim         : in     Vector_Dim;

@@ -253,7 +253,7 @@ Round 12 re-reviewed every subsystem from scratch with independent oracles; Roun
 | `R12-SQL-6` | Medium | `SQL` | Valid type spellings rejected (`TIMESTAMP WITH TIME ZONE`, `DOUBLE  PRECISION`, `VARCHAR(n)` maximum, `FLOAT(p)`). | ✅ `Resolve_Pg_Type` (`365eb8d`) |
 | `R12-SQL-7` | Medium | `SQL` | Trailing garbage after a `CREATE TABLE` column accepted. | ✅ Column constraint grammar (`365eb8d`) |
 | `R12-SQL-8` | Medium | `SQL` | Quoted identifiers truncated or rejected. | ✅ Delimited identifiers as one token (`365eb8d`) |
-| `R12-SQL-9` | Low | `SQL` | Form feed / vertical tab whitespace and `$01` rejected. | ✅ (`365eb8d`) |
+| `R12-SQL-9` | Low | `SQL` | Form feed / vertical tab whitespace and `$01` rejected. | ✅ (`365eb8d`); superseded by `R15-SQL-02`: a vertical tab is rejected again (PostgreSQL 16) |
 | `R12-SQL-10` | Low | `docs/` | `R7-HIGH-02` named functions that do not exist. | ✅ Superseded by `ADR-016` |
 | `R12-CA-1` | High | `C_API` / build | Stack frames of about 0.5 MB raised `Storage_Error` across the ABI. | ✅ Library built without `-gnata` (proved), stack need documented (`ADR-013`, `cd1fdf3`) |
 | `R12-CA-2` | High | Python SDK | Not thread-safe: concurrent calls aborted on assertions and lost writes. | ✅ Process-wide lock (`ADR-013`, `cd1fdf3`) |
@@ -289,7 +289,7 @@ Also fixed with Round 12: the RAG executor applies the SQL `OFFSET` window and r
 | `R13-KV-05` | Low | `docs/` | `"KVMG"` byte 8 undocumented. | ✅ Slot hint documented (`fca9d31`) |
 | `R13-KV-06` | Low | `C_API` | Buffer comments wrong. | ✅ (`fca9d31`) |
 | `R13-IDX-01` | Medium | `Vector` / `RAG` | `"VTST"` kept about 7 significant digits, so Stage-2 "exact" re-ranking and recovery used a different vector than the one ingested. | ✅ Exact `"VTS2"` binary32 payload (`ADR-018`, `e2578b0`) |
-| `R13-IDX-02` | Low | `Vector` | SQ8 zeroed every vector whose largest component was tiny. | ✅ Scale kept whenever the maximum is positive (`e2578b0`) |
+| `R13-IDX-02` | Low | `Vector` | SQ8 zeroed every vector whose largest component was tiny. | ✅ Scale kept for a positive maximum (`e2578b0`); corrected by `R14-IDX-03`: below ~8.9e-44 the scale stays `1.0` and the codes are `0` |
 | `R13-IDX-03` | Low | `docs/` | Lesson 06, `BR-006` and `ADR-006` described Stage 2 and `"VTST"` wrongly. | ✅ (`e2578b0`) |
 | `R13-IDX-04` | Low | `Vector` | `L2_Distance_Squared` labelled as pgvector `<->`. | ✅ (`e2578b0`) |
 | `R13-IDX-05` | Low | `docs/` | README and STATUS stated version `0.3.0`. | ✅ (`e2578b0`, docs pass) |
@@ -326,7 +326,7 @@ The SQL reviewer of Round 13 found no defect (PostgreSQL 16, `pglast` and `scan.
 | `R14-RAG-04` | Low | `RAG` / `docs/` | `BR-002` and `Commit_RAG_Tx` said a failed delete poisons its transaction. | ✅ Only a failed ingest poisons (docs pass) |
 | `R14-RAG-05` | Low | `docs/` | Lesson 07 described the old TOAST allocator. | ✅ Already rewritten in `cf872f4` |
 | `R14-TX-04` | Low | `Transaction` | A torn first WAL frame whose first block never reached the disk made the database unopenable for good. | ✅ A lone torn frame with zero bytes up to the end of its first 4096-byte block is a torn append (`9f5cde2`) |
-| `R14-TX-05` | Low | `Transaction` | A short foreign file starting like the frame magic was truncated as a torn WAL. | ✅ A whole plausible frame header is required; all-zero short files are documented (`9f5cde2`) |
+| `R14-TX-05` | Low | `Transaction` | A short foreign file starting like the frame magic was truncated as a torn WAL. | ✅ A whole plausible frame header is required; all-zero short files are documented (`9f5cde2`); relaxed by `R15-RAG-01`: a file shorter than the header may also be a prefix of a plausible one |
 | `R14-TX-06` | Low | `C_API` | Opening a database deleted any file at `"<wal>.ckpt"`. | ✅ Removed only when it classifies as a WAL (`Check_WAL_File`), refused otherwise (`9f5cde2`) |
 | `R14-CA-06` (= `R14-TX-07`) | Low | `RAG` / `C_API` | Reopening with another dimension returned `IO_ERROR`, which looks like corruption. | ✅ `DIMENSION_MISMATCH` (`9f5cde2`) |
 | `R14-CA-05` | Low | build | Without stack probes an undersized host stack was overrun past its guard page before the crash. | ✅ `-fstack-check` (`9f5cde2`) |

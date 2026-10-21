@@ -10,7 +10,8 @@ with Nhe_O.Types; use Nhe_O.Types;
 --  characters contain no ASCII byte; in client encodings such as SJIS, BIG5, GBK
 --  or GB18030 a backslash byte can be the second half of a character.
 --
---  Lexical (PostgreSQL 16 scan.l, standard_conforming_strings = on):
+--  Lexical (PostgreSQL 16 scan.l, standard_conforming_strings = on; numbers
+--  keep PostgreSQL 15's decimal-only form):
 --    * whitespace: space, HT, LF, FF, CR (a vertical tab, whitespace only from
 --      PostgreSQL 17 on, is rejected); comments "--" to end of line and
 --      nested "/* ... */"; unterminated comments / literals are rejected
@@ -22,6 +23,9 @@ with Nhe_O.Types; use Nhe_O.Types;
 --      is rejected
 --    * "..." delimited identifiers ("" doubles; "" is rejected), unquoted
 --      identifiers [A-Za-z\200-\377_][A-Za-z\200-\377_0-9$]*
+--    * numbers: digits [. digits] [e [+-] digits] (or . digits ...); the
+--      non-decimal integers (0x / 0o / 0b) and "_" digit separators of
+--      PostgreSQL 16 are rejected
 --    * $n positional parameters with n >= 1 ($01 = $1); $0, a stray '$' and
 --      trailing junk after numbers / parameters ("1abc", "$1x") are rejected
 --    * ( ) and [ ] must nest properly; one optional final ';' (multiple

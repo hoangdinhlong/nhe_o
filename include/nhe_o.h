@@ -33,19 +33,22 @@
  *    handler installed before loading is replaced by the default action. The library
  *    cannot be unloaded (it is linked with -z nodelete, so dlclose keeps it mapped and
  *    those handlers and that stack stay valid).
- *  - nhe_o_analyze_sql, the vector-distance calls and the version queries need no open
- *    engine; every other call returns NHE_O_STATUS_NOT_INITIALIZED without one.
+ *  - nhe_o_analyze_sql, the vector-distance calls, the version queries, nhe_o_init,
+ *    nhe_o_init_with_paths and nhe_o_close (NHE_O_STATUS_OK without an engine, and in
+ *    a forked child) need no open engine; every other call returns
+ *    NHE_O_STATUS_NOT_INITIALIZED without one.
  *  - Input buffers are read only up to the given length (no NUL terminator needed).
  *    Output text buffers must have the full capacity listed for each call: at most
  *    *out_*_len bytes are written, plus a trailing NUL only when the text is shorter
  *    than the capacity, so always use the returned length.
  *  - Durability: a write that returns NHE_O_STATUS_OK is durable in the WAL. After an
- *    I/O error on a durable write path the engine refuses every further write with
- *    NHE_O_STATUS_IO_ERROR until nhe_o_init_with_paths reopens the database; recovery
- *    then decides from disk whether the failed write survived. KV and Pub/Sub reads
- *    keep working meanwhile; RAG queries read TOAST pages from the database file, so
- *    when a durable commit's pages could not be written there they fail with
- *    NHE_O_STATUS_IO_ERROR until the reopen.
+ *    I/O error on a durable write path the engine refuses every further durable write
+ *    (KV writes, RAG ingests and deletes, checkpoints) with NHE_O_STATUS_IO_ERROR until
+ *    nhe_o_init_with_paths reopens the database; recovery then decides from disk
+ *    whether the failed write survived. Reads keep working meanwhile, and so does
+ *    Pub/Sub, which lives in memory; RAG queries read TOAST pages from the database
+ *    file, so when a durable commit's pages could not be written there, a query that
+ *    needs those pages fails with NHE_O_STATUS_IO_ERROR until the reopen.
  */
 
 #ifndef NHE_O_H
@@ -111,12 +114,14 @@ int nhe_o_version_minor(void);
 
 /* Initialize / reset the runtime as a scratch database (3-D vectors) on the per-process
  * files /tmp/nhe_o_c_api.<pid>.db and .wal: earlier contents are deleted and both files
- * are recreated with O_EXCL, so a link planted at these predictable names is refused,
- * and locked like any open database (NHE_O_STATUS_IO_ERROR if a file cannot be removed,
- * created or locked; an existing scratch file another open holds, such as a process
- * with the same pid in another PID namespace sharing /tmp, is never removed). A
- * database opened before is released without a checkpoint. For data that must
- * persist, use nhe_o_init_with_paths with paths inside a private directory. */
+ * are recreated with O_EXCL and locked like any open database through the creating
+ * descriptor. A symbolic link at these predictable names (or at .wal.ckpt) is never
+ * followed: the link itself is removed, its target never opened, and a link planted
+ * after the removal makes the creation fail. NHE_O_STATUS_IO_ERROR if a file cannot be
+ * removed, created or locked; an existing scratch file another open holds, such as one
+ * of a process with the same pid in another PID namespace sharing /tmp, is never
+ * removed. A database opened before is released without a checkpoint. For data that
+ * must persist, use nhe_o_init_with_paths with paths inside a private directory. */
 void nhe_o_init(int *out_status);
 
 /* Initialize the runtime on caller-specified DB/WAL paths with dimension 1..4096,
@@ -125,20 +130,26 @@ void nhe_o_init(int *out_status);
  *  - Paths: relative paths are resolved against the current directory, and symbolic
  *    links are resolved, once, here: the engine then works on the real files (a
  *    checkpoint renames over the WAL itself, never over a link). Both lengths are
- *    1..512 bytes and the resolved WAL path at most 507 bytes (room for ".ckpt").
+ *    1..512 bytes, also once a relative path is prefixed with the current directory,
+ *    and the resolved paths at most 512 bytes, the WAL's at most 507 (room for
+ *    ".ckpt"); NHE_O_STATUS_INVALID_ARG otherwise.
  *    Keep the files in a directory other users cannot write, and do not hard-link the
  *    WAL: a checkpoint replaces only the name in use, so other links keep the old WAL.
  *  - NHE_O_STATUS_INVALID_ARG, files untouched: the database, the WAL and "<wal>.ckpt"
  *    are not three different files (also through links); an existing database file
  *    is not empty and its first min(size, 4096) bytes are not all zero (the engine
- *    never writes page 0, so this refuses swapped arguments and any other file); or
- *    "<wal>.ckpt", a name reserved for the checkpoint, holds a file that is not a WAL
+ *    never writes page 0, so this refuses swapped arguments and any other file that
+ *    does not start with 4096 zero bytes; a file that does is taken as a database,
+ *    and its partial trailing page is cut); or "<wal>.ckpt", a name reserved for the
+ *    checkpoint, holds a symbolic link (never followed) or a file that is not a WAL
  *    (a leftover of an interrupted checkpoint is removed; a file there that another
  *    open holds, such as another database's WAL, fails with NHE_O_STATUS_IO_ERROR).
  *  - Missing files are created (directory fsynced) and both files are locked (see
  *    "One process per database"); a refused call removes the files it created, except
- *    when the refusal is a lock held elsewhere or comes after the open's own
- *    checkpoint replaced the WAL.
+ *    when the refusal is a lock held elsewhere, comes after the open's own checkpoint
+ *    replaced the WAL, or the file was created through a dangling symbolic link whose
+ *    target resolves beyond PATH_MAX (4096 bytes); a file another open locked
+ *    meanwhile is left to that open.
  *  - A WAL path naming a file that is not a WAL fails with NHE_O_STATUS_IO_ERROR and
  *    is never truncated; only a file of at most 4120 bytes that starts with a frame
  *    header (or is a shorter prefix of one), or with zero bytes up to its first 4096,
@@ -161,10 +172,11 @@ void nhe_o_init_with_paths(
  * inherited copy (no checkpoint, no file removed). */
 void nhe_o_close(int *out_status);
 
-/* Compact the WAL: write "<wal>.ckpt" with the KV entries and the frozen RAG page,
- * lock it, then rename it over the WAL and fsync the directory (a file at "<wal>.ckpt"
- * that is not a WAL, or that another open holds, makes the checkpoint fail with
- * NHE_O_STATUS_IO_ERROR, untouched).
+/* Compact the WAL: create "<wal>.ckpt" (O_EXCL, locked from its creation on), write the
+ * KV entries and the frozen RAG page into it, then rename it over the WAL and fsync the
+ * directory. A leftover WAL there is replaced; a file at "<wal>.ckpt" that is not a
+ * WAL, a symbolic link there (never followed), or a file another open holds makes the
+ * checkpoint fail with NHE_O_STATUS_IO_ERROR, untouched.
  * Transaction ids restart at 2.
  * Runs automatically after a durable write once the WAL holds 512 frames or an id
  * reaches 4096; an explicit call is only needed to compact earlier. */
@@ -190,6 +202,8 @@ typedef enum {
  * statement, NHE_O_STATUS_INVALID_SYNTAX otherwise (including multi-statement input).
  * The query must be UTF-8 (anything else is NHE_O_STATUS_INVALID_SYNTAX): do not pass
  * text in SJIS, BIG5, GBK or GB18030, whose characters can contain a backslash byte.
+ * Numeric literals are decimal only (PostgreSQL 16's 0x / 0o / 0b integers and "_"
+ * digit separators are rejected).
  * out_has_vector: <->, <=> or <#> outside literals; out_has_jsonb: ->, ->>, #>, #>>,
  * @>, <@, ?, ?|, ?&, @? or #- outside literals. */
 void nhe_o_analyze_sql(
@@ -230,7 +244,8 @@ void nhe_o_vector_distance_nd(
 /* Redis-compatible Key-Value Cache operations (keys 1..64 bytes, values 0..512 bytes,
  * at most NHE_O_MAX_KV_KEYS keys with LRU eviction). The engine has no clock: every call
  * takes the caller's now_sec (>= 0, never decreasing). A GET of an expired key returns
- * NHE_O_STATUS_EXPIRED (until a write reuses its slot). Read recency is saved only by
+ * NHE_O_STATUS_EXPIRED (until a DEL of the key, or a write that reuses its slot, frees
+ * it; NHE_O_STATUS_NOT_FOUND then). Read recency is saved only by
  * a checkpoint (nhe_o_close and the automatic checkpoint run one): after a reopen, LRU
  * order follows the recency saved by the last checkpoint, updated by later writes.
  * Deliberate Redis deviations: EXPIRE with ttl_sec <= 0 is NHE_O_STATUS_INVALID_ARG

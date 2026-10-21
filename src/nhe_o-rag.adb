@@ -700,7 +700,8 @@ package body Nhe_O.RAG is
       and then Engine.Docs (S).Staged_End > Engine.Docs (S).Staged_First);
 
    --  Next_TOAST_Pg := one past the highest page of any live or prior chain and of any
-   --  page range staged by a transaction that is still active
+   --  page range staged by a transaction that is still active (run after an ingest, a
+   --  rollback, a freeze and a recovery; a commit keeps the value, an upper bound)
    procedure Recompute_TOAST_High_Water_Mark
      (Engine : in out RAG_Engine)
      with Pre  => Engine.Vector_Graph.Dim = Engine.Dim

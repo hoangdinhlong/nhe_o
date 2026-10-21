@@ -1730,6 +1730,11 @@ begin
    Check (SQL_Status = Status_Ok and then SQL_Desc.Has_Positional_Param);
    Analyze_SQL (Make_Text ("SELECT $0 FROM t"), SQL_Desc, SQL_Status);
    Check (SQL_Status = Status_Invalid_Syntax);
+   --  R16-SQL-01: numbers are decimal only (no PostgreSQL 16 0x / 0o / 0b or "_")
+   Analyze_SQL (Make_Text ("SELECT 0x2A"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
+   Analyze_SQL (Make_Text ("SELECT 1_000"), SQL_Desc, SQL_Status);
+   Check (SQL_Status = Status_Invalid_Syntax);
    Print_Line ("  => Passed: PostgreSQL SELECT/DDL, clause grammar, and VECTOR(1..4096) verified.");
 
    --  2. Verify Vector Similarity & 4096-D Int8 / Binary Quantization (`ADR-003`)

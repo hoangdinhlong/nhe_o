@@ -34,7 +34,7 @@ What does `with Side_Effects` mean in SPARK?
 - Normally, SPARK requires functions to be pure mathematical functions (no side effects, no `in out` parameters).
 - Marking a function `with Side_Effects` tells `GNATprove` to treat calls to that function like a **procedure call** (it may only appear on the right-hand side of a single assignment statement `Result := Syscall (...);`, cannot be nested inside expressions, and is tracked for data-flow initialization and aliasing).
 
-By binding directly to POSIX syscalls with `Side_Effects`, **nothing in the I/O layer ever raises an Ada exception**, allowing the entire `Nhe_O.IO` body (`src/nhe_o-io.adb`) to remain in **`pragma SPARK_Mode (On);`**.
+By binding directly to POSIX syscalls with `Side_Effects`, **no file or WAL operation of the I/O layer ever raises an Ada exception**, allowing the entire `Nhe_O.IO` body (`src/nhe_o-io.adb`) to remain in **`pragma SPARK_Mode (On);`**. The console helpers `Print_Line` and `Print_Blank_Line`, which only the CLI uses, are the exception: they go through `Ada.Text_IO`, which raises `Device_Error` when standard output fails (a full or closed stdout).
 
 ---
 

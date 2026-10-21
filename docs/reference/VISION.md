@@ -12,7 +12,7 @@ record why it is superseded in `../DECISIONS.md`.
 > Redis, and the multi-hop relational traversal of Labeled Property Graphs (`ADR-008`) inside a
 > single formally verified Ada/SPARK codebase. **100% of all specifications and
 > bodies in `src/` operate under `pragma SPARK_Mode (On);`**, including physical I/O (`src/nhe_o-io.adb`)
-> via contract-bound POSIX kernel syscalls (`open` including `O_EXCL` creation, `pread`, `pwrite`, `lseek`, `fsync`, `ftruncate`, `close`, `unlink`, `rename`, `stat`, `getcwd`, `getpid`, `access`).
+> via contract-bound POSIX kernel syscalls (`open` including `O_EXCL` creation, `pread`, `pwrite`, `lseek`, `fsync`, `ftruncate`, `close`, `unlink`, `rename`, `stat`, `fstat`, `flock`, `realpath`, `readlink`, `getcwd`, `getpid`, `access`, `signal`).
 
 ---
 
@@ -59,7 +59,7 @@ Developers are forced either to run a heavy fleet of external server daemons (Po
 
 ## 4. Principles
 
-1. **100% `SPARK_Mode (On)` Everywhere (`BR-001` / `ADR-002`)**: No specification or body in `src/` may disable `SPARK_Mode`. Physical disk I/O in `Nhe_O.IO` binds directly to exception-free POSIX syscalls (`open` including `O_EXCL` creation, `pread`, `pwrite`, `lseek`, `fsync`, `ftruncate`, `close`, `unlink`, `rename`, `stat`, `getcwd`, `getpid`, `access`) under `SPARK_Mode (On)`.
+1. **100% `SPARK_Mode (On)` Everywhere (`BR-001` / `ADR-002`)**: No specification or body in `src/` may disable `SPARK_Mode`. Physical disk I/O in `Nhe_O.IO` binds directly to exception-free POSIX syscalls (`open` including `O_EXCL` creation, `pread`, `pwrite`, `lseek`, `fsync`, `ftruncate`, `close`, `unlink`, `rename`, `stat`, `fstat`, `flock`, `realpath`, `readlink`, `getcwd`, `getpid`, `access`, `signal`) under `SPARK_Mode (On)`.
 2. **Bounded & Deterministic Memory**: Avoid unbounded heap allocations inside the verified engine. Use bounded structures, fixed-size slotted pages (4096 bytes), and explicit capacity contracts (`Pre` / `Post` / `Type_Invariant`).
 3. **PostgreSQL Ergonomics in an Embedded Package**: Users should write familiar PostgreSQL queries, JSONB expressions, and `pgvector` operators without managing a database server.
 4. **ACID Without Compromise**: Caching speed must never corrupt durable state; MVCC visibility and WAL checksum invariants are enforced by formal contracts.

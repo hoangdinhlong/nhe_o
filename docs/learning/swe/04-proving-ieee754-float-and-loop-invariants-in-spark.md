@@ -162,7 +162,7 @@ In [`src/nhe_o-vector.adb`](../../../src/nhe_o-vector.adb), `Sqrt_Bounded` compu
 ```
 
 Why did splitting `0.5 * (Guess + X / Guess)` into `0.5 * Guess + 0.5 * (X / Guess)` matter?
-Because if `Guess = X` and `X > Float'Last / 2.0`, then `Guess + X / Guess` (`X + 1.0`) could overflow before multiplying by `0.5`! By multiplying each term by `0.5` first and clamping it (`Term1 <= 0.5 * X` and `Term2 <= 0.5 * X` hold by construction, Principle 5), `Term1 + Term2 <= X <= Float'Last` is guaranteed overflow-free for all `X`!
+Because the prover reasons with bounds, not with values: from the loop invariant `Guess in 1.0 .. X` it only knows `Guess <= X` and `X / Guess <= X`, so the unsplit sum `Guess + X / Guess` is only bounded by `2 * X`, which exceeds `Float'Last` once `X > Float'Last / 2.0`. The concrete sum never overflows (at `Guess = X` it is `X + 1.0`, which rounds to `X`), but its overflow check cannot be proved. By multiplying each term by `0.5` first and clamping it (`Term1 <= 0.5 * X` and `Term2 <= 0.5 * X` hold by construction, Principle 5), `Term1 + Term2 <= X <= Float'Last` is provably overflow-free for all `X`.
 
 ---
 

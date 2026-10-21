@@ -13,7 +13,7 @@ During the post-Epic-03 adversarial review ([`ADVERSARIAL-REVIEW.md`](../../epic
 
 1. **RAM vs. Precision Trade-off for 4096-D Embeddings (`Q-003`)**:
    - A single 4096-D `Float32` vector requires `16,384 bytes` (`16 KB`), which is $4\times$ larger than a 4096-byte database page!
-   - To keep the in-memory `HNSW_Node` compact (`~1.1 KB`), each node stores a 64-D `Float32` Matryoshka prefix (`Float_Pref`), a 64-D `Int8` SQ8 prefix (`Int8_Pref`), and a full 4096-bit `Binary` signature (`Bin_Vec`).
+   - To keep the in-memory `HNSW_Node` compact (`~0.9 KB`), each node stores a 64-D `Float32` Matryoshka prefix (`Float_Pref`), a 64-D `Int8` SQ8 prefix (`Int8_Pref`), and a full 4096-bit `Binary` signature (`Bin_Vec`).
    - However, if two documents share an identical 64-D prefix and differ only in dimensions `65..4096`, Stage-1 HNSW alone cannot distinguish them in `Float32` or `Int8` mode!
 2. **Unscaled `Int8` SQ8 Distance Distortion**:
    - Scalar quantization (`Quantize_To_Int8`) normalizes each vector $V$ by its own dynamic range $\text{Scale}_V = \max_i |V_i| / 127$.
@@ -48,7 +48,7 @@ To support full 4096-D precision without blowing up HNSW RAM:
   - For every document, whatever its dimension, `Encode_Vector_TOAST` serializes the full `Dim`-dimensional `Float32` embedding (`"VTS2"` 4-byte magic + big-endian `Dim` + one big-endian IEEE 754 binary32 word per component) into a `TOAST_Payload_Buffer` (`up to 16,392 bytes`) and writes it to a 4KB TOAST overflow chain (`Vec_Toast_Ptr`), persisted inside the document's primary `"SLOT"` tuple on Page 1.
 - **On `Execute_Hybrid_RAG_Query`**:
   - **Stage 1 (Fast RAM Candidate Generation)**: `HNSW.Search_KNN` (plus MVCC-visible `PK_Tree`-verified document evaluation) scores candidates in RAM.
-  - **Stage 2 (On-Disk TOAST Exact Re-Ranking)**: For every visible candidate, at every dimension, `Evaluate_Doc_Candidate` reads its vector chain via `Read_TOAST_Chain`, decodes the full `Vector_Value` via `Decode_Vector_TOAST` (the identical vector that was ingested), and recomputes the distance in the query's encoding (`L2_Distance`, full-dimension `Int8_L2_Distance`, or `Hamming_Distance`) before inserting the candidate into the sorted top-$k$ result list. A missing or damaged chain fails the whole query closed with `Status_IO_Error` rather than ranking on partial data.
+  - **Stage 2 (On-Disk TOAST Exact Re-Ranking)**: For every visible candidate, at every dimension, `Evaluate_Doc_Candidate` reads its vector chain via `Read_TOAST_Chain`, decodes the full `Vector_Value` via `Decode_Vector_TOAST` (a vector equal to the one ingested: `-0.0` reads back as `+0.0`, and legacy `"VTST"` payloads keep about 7 significant digits), and recomputes the distance in the query's encoding (`L2_Distance`, full-dimension `Int8_L2_Distance`, or `Hamming_Distance`) before inserting the candidate into the sorted top-$k$ result list. A missing or damaged chain fails the whole query closed with `Status_IO_Error` rather than ranking on partial data.
 
 ```text
 Query Vector (4096-D)
@@ -83,8 +83,8 @@ In [`src/nhe_o-vector.adb`](../../../src/nhe_o-vector.adb), `Encode_Vector_TOAST
 | Design Choice | RAM per 32-Node Graph | 4096-D Tail Precision (`dims 65..4096`) | Disk I/O During Query |
 |---|---|---|---|
 | **1. Full 4096-D `Float32` in HNSW RAM** | `> 550 KB` (exceeds stack frame budget) | Exact | 0 page reads |
-| **2. 64-D Prefix Only in HNSW RAM** | `~36 KB` | Blind to dimensions `65..4096` in `Float32`/`Int8` mode | 0 page reads |
-| **3. Two-Stage HNSW RAM + `"VTS2"` TOAST Re-Ranking (Nhé O's choice)** | `~36 KB` | **Exact (bit-identical stored vector; `-0.0` stored as `+0.0`)** | Reads the vector TOAST chain of every visible candidate |
+| **2. 64-D Prefix Only in HNSW RAM** | `~30 KB` | Blind to dimensions `65..4096` in `Float32`/`Int8` mode | 0 page reads |
+| **3. Two-Stage HNSW RAM + `"VTS2"` TOAST Re-Ranking (Nhé O's choice)** | `~30 KB` | **Exact (the stored vector equals the ingested one; `-0.0` is stored as `+0.0`)** | Reads the vector TOAST chain of every visible candidate |
 
 ---
 
