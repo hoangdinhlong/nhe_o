@@ -319,7 +319,12 @@ class NheOEngine:
         self.close()
 
     def close(self) -> None:
-        """Release the process-wide engine (scratch files are removed). Idempotent."""
+        """Release the process-wide engine (scratch files are removed). Idempotent.
+
+        Raises NheOError (STATUS_IO_ERROR) when a scratch file could not be removed,
+        e.g. one another open holds at the scratch "<wal>.ckpt" name; the engine is
+        released either way.
+        """
         global _open_engine
         with _ENGINE_LOCK:
             if self._closed:
