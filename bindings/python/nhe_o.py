@@ -1010,10 +1010,11 @@ def run_self_test() -> None:
                   "Expected ValueError for an out-of-range timestamp")
     _expect_error(ValueError, lambda: engine.pubsub_poll(2**32 + 1),
                   "Expected ValueError for an out-of-range subscriber id")
-    # Without now_sec the current time is used, so a TTL can elapse
-    engine.kv_set("clock:key", "v", ttl_sec=1)
+    # Without now_sec the current time is used, so a TTL can elapse (5 s: the two clock
+    # reads of SET and GET may fall on either side of a whole second)
+    engine.kv_set("clock:key", "v", ttl_sec=5)
     _check(engine.kv_get("clock:key") == "v", "real-clock key is live")
-    _check(engine.kv_get("clock:key", now_sec=int(time.time()) + 5) is None, "real-clock TTL elapses")
+    _check(engine.kv_get("clock:key", now_sec=int(time.time()) + 10) is None, "real-clock TTL elapses")
     # INCRBY follows Redis string2ll (no "+", no leading zeros)
     engine.kv_set("llm:plus", "+5", now_sec=200)
     exc = _expect_error(NheOError, lambda: engine.kv_incr_by("llm:plus", 1, now_sec=200),
