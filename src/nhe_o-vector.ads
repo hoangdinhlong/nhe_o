@@ -103,7 +103,9 @@ package Nhe_O.Vector is
    --  Scale-invariant: each vector is normalized by its own largest absolute
    --  component first, so tiny (down to subnormal) and huge vectors are handled
    --  exactly like their rescaled versions. Only an exact all-zero vector (no
-   --  direction) yields the documented value 1.0.
+   --  direction) yields the documented value 1.0. The norms are combined by one
+   --  Long_Float square root of their exact product, so a vector is at distance
+   --  exactly 0.0 from itself and 2.0 from its negation.
    function Cosine_Distance
      (A, B : Vector_Value) return Float
      with Global => null,
