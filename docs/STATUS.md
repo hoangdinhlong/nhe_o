@@ -5,6 +5,8 @@
 
 _Last updated: 2026-10-22_
 
+> **Ecosystem Umbrella (`ouronic_meta`)**: See [`../../ouronic_meta/docs/STATUS.md`](../../ouronic_meta/docs/STATUS.md) and [`../../ouronic_meta/docs/reference/ARCHITECTURE.md`](../../ouronic_meta/docs/reference/ARCHITECTURE.md) for the master 5-stage Concentric Rings roadmap, cross-crate zero-copy contracts, and algorithmic distillation in [`ouronic_alembic`](../../ouronic_alembic).
+
 ---
 
 ## Where we are

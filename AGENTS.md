@@ -12,7 +12,10 @@ English.
 ## Start of a session
 
 Read `docs/STATUS.md` first to learn where the project stands, which epic is active, and the
-next task.
+next task. For the overarching multi-crate roadmap across the Ouronic ecosystem (`nhe_o`, `mofia`,
+`ee_json`, `ee_http`, `mc3_ada`, `ouronic_alembic`), also consult the ecosystem umbrella at
+[`../ouronic_meta/docs/STATUS.md`](../ouronic_meta/docs/STATUS.md) and
+[`../ouronic_meta/docs/reference/ARCHITECTURE.md`](../ouronic_meta/docs/reference/ARCHITECTURE.md).
 
 ## After completing a task — update these docs (in order)
 
