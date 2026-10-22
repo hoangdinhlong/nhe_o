@@ -1138,7 +1138,7 @@ package body Nhe_O.SQL is
       L         : Natural;
       Max_Parts : Positive) return Natural
      with Global => null,
-          Pre    => L <= T.Count,
+          Pre    => L <= T.Count and then I <= Integer'Last - 1,
           Post   => Qualified_Name_End'Result = 0
                     or else Qualified_Name_End'Result in I + 1 .. L + 1
    is
@@ -1168,7 +1168,7 @@ package body Nhe_O.SQL is
       L         : Natural;
       Max_Parts : Positive) return Natural
      with Global => null,
-          Pre    => L <= T.Count,
+          Pre    => L <= T.Count and then I <= Integer'Last - 1,
           Post   => Name_List_End'Result = 0 or else Name_List_End'Result in I + 1 .. L + 1
    is
       K : Positive := I;
@@ -1245,7 +1245,7 @@ package body Nhe_O.SQL is
       Next      :    out Natural)
      with Global => null,
           Always_Terminates,
-          Pre    => L <= T.Count,
+          Pre    => L <= T.Count and then I <= Integer'Last - 1,
           Post   => (if Next /= 0 then Next in I + 1 .. L + 1 and then Name.Length > 0)
    is
       J       : Positive := I + 1;
@@ -1522,7 +1522,7 @@ package body Nhe_O.SQL is
       Next :    out Natural)
      with Global => null,
           Always_Terminates,
-          Pre    => L <= T.Count,
+          Pre    => L <= T.Count and then I <= Integer'Last - 2,
           Post   => (if Next /= 0 then Next in I + 1 .. L + 1)
    is
       J         : Positive := I;
@@ -1982,7 +1982,7 @@ package body Nhe_O.SQL is
    --  index after the last row
    function Values_Rows_End (T : Token_List; F : Positive; L : Natural) return Natural
      with Global => null,
-          Pre    => L <= T.Count,
+          Pre    => L <= T.Count and then F <= Integer'Last - 1,
           Post   => Values_Rows_End'Result = 0 or else Values_Rows_End'Result in F + 2 .. L + 1
    is
       I     : Positive := F + 1;
@@ -2010,7 +2010,7 @@ package body Nhe_O.SQL is
    --  CTEs are outside the dialect).  Returns the index of the main statement.
    function With_Clause_End (T : Token_List; F : Positive; L : Natural) return Natural
      with Global => null,
-          Pre    => L <= T.Count,
+          Pre    => L <= T.Count and then F <= Integer'Last - 1,
           Post   => With_Clause_End'Result = 0 or else With_Clause_End'Result in F + 1 .. L
    is
       I     : Positive := F + 1;
@@ -2146,7 +2146,7 @@ package body Nhe_O.SQL is
    --  (DO UPDATE requires a conflict target); index after the clause
    function On_Conflict_End (T : Token_List; I : Positive; L : Natural) return Natural
      with Global => null,
-          Pre    => L <= T.Count,
+          Pre    => L <= T.Count and then I <= Integer'Last - 4,
           Post   => On_Conflict_End'Result = 0 or else On_Conflict_End'Result in I + 4 .. L + 1
    is
       J          : Positive := I + 2;
@@ -2338,7 +2338,7 @@ package body Nhe_O.SQL is
       OK     :    out Boolean)
      with Global => null,
           Always_Terminates,
-          Pre    => L <= T.Count,
+          Pre    => L <= T.Count and then F <= Integer'Last - 1,
           Post   => (if OK then Target.Length > 0)
    is
       I     : Positive := F + 1;
@@ -2417,7 +2417,7 @@ package body Nhe_O.SQL is
       OK     :    out Boolean)
      with Global => null,
           Always_Terminates,
-          Pre    => L <= T.Count,
+          Pre    => L <= T.Count and then F <= Integer'Last - 2,
           Post   => (if OK then Target.Length > 0)
    is
       I     : Positive := F + 2;
@@ -2631,7 +2631,7 @@ package body Nhe_O.SQL is
    --  order, each at most once) starting at I, after the REFERENCES key word
    function References_End (T : Token_List; I : Positive; L : Natural) return Natural
      with Global => null,
-          Pre    => L <= T.Count,
+          Pre    => L <= T.Count and then I <= Integer'Last - 1,
           Post   => References_End'Result = 0 or else References_End'Result in I + 1 .. L + 1
    is
       N        : Natural := Qualified_Name_End (T, I, L, 2);
@@ -3081,13 +3081,13 @@ package body Nhe_O.SQL is
       Last     : Natural;
       Start    : Natural := 1;
       Info     : Query_Info := (others => <>);
-      OK       : Boolean := False;
+      OK       : Boolean;
       Conflict : Boolean := False;
       Ret      : Boolean := False;
       Name     : Bounded_Ident;
       Columns  : Natural;
       Next     : Natural;
-      Kind     : SQL_Statement_Kind := Stmt_Unknown;
+      Kind     : SQL_Statement_Kind;
    begin
       Result := (others => <>);
       Status := Status_Invalid_Syntax;

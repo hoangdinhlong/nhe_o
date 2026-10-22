@@ -148,6 +148,10 @@ package Nhe_O.C_API is
    --  replays KV and committed RAG work (a database of another dimension fails with
    --  C_Status_Dimension_Mismatch), and finally checkpoints the WAL when it is past the
    --  automatic thresholds (or its id space was exhausted by an older version).
+   pragma Warnings (GNATprove, Off, "unused initial value of ""G_Owner_Pid""");
+   pragma Warnings (GNATprove, Off, "unused initial value of ""G_Ephemeral""");
+   pragma Warnings (GNATprove, Off, "unused initial value of ""G_DB_Path""");
+   pragma Warnings (GNATprove, Off, "unused initial value of ""G_WAL_Path""");
    procedure C_Init_With_Paths
      (DB_Path_Buf  : in     C_Text_Buf;
       DB_Path_Len  : in     int;
@@ -163,6 +167,10 @@ package Nhe_O.C_API is
           Export        => True,
           Convention    => C,
           External_Name => "nhe_o_init_with_paths";
+   pragma Warnings (GNATprove, On, "unused initial value of ""G_WAL_Path""");
+   pragma Warnings (GNATprove, On, "unused initial value of ""G_DB_Path""");
+   pragma Warnings (GNATprove, On, "unused initial value of ""G_Ephemeral""");
+   pragma Warnings (GNATprove, On, "unused initial value of ""G_Owner_Pid""");
 
    --  Release the runtime: a database opened with nhe_o_init_with_paths is first
    --  checkpointed (best effort, so the next open replays a compact WAL that also

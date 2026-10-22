@@ -191,6 +191,7 @@ package Nhe_O.RAG is
                     and then Engine.PK_Tree.Root_Node = 1
                     and then Engine.Next_TOAST_Pg = 10
                     and then Engine.Last_Commit_Seq = 0
+                    and then (for all S in RAG_Doc_Slot => not Engine.Docs (S).Active)
                     and then Is_Valid_RAG_Engine (Engine);
 
    --  Case-insensitive substring check for Hybrid Lexical + Vector RAG. Case folding

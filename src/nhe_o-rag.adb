@@ -1076,6 +1076,7 @@ package body Nhe_O.RAG is
       Meta_Kind      : JSONB_Value_Kind;
       End_Page       : Natural;
       HNSW_Snap      : HNSW_Node;
+      Local_Doc      : RAG_Document_Entry;
       Expected_VLen  : constant Valid_TOAST_Length := Vector_TOAST_Byte_Length (Dim);
       pragma Warnings (Off, Replayed);
       pragma Warnings (Off, Max_Rec_Tx);
@@ -1119,7 +1120,11 @@ package body Nhe_O.RAG is
       if not Read_Ok then
          if Read_EOF then
             --  Page 1 is past EOF: only a completely empty file is a valid empty database
+            pragma Warnings (GNATprove, Off, """Raw_Page"" is set by ""Read_Page"" but not used after the call");
+            pragma Warnings (GNATprove, Off, """P0_Ok"" is set by ""Read_Page"" but not used after the call");
             Read_Page (DB_Path, 0, Raw_Page, P0_Ok, P0_EOF);
+            pragma Warnings (GNATprove, On, """P0_Ok"" is set by ""Read_Page"" but not used after the call");
+            pragma Warnings (GNATprove, On, """Raw_Page"" is set by ""Read_Page"" but not used after the call");
             Status := (if P0_EOF then Status_Ok else Status_IO_Error);
          else
             Status := Status_IO_Error;
@@ -1144,11 +1149,14 @@ package body Nhe_O.RAG is
          pragma Loop_Invariant (Engine.PK_Tree.Node_Count in 1 .. Max_BTree_Nodes);
          pragma Loop_Invariant (Engine.PK_Tree.Root_Node in 1 .. Engine.PK_Tree.Node_Count);
          pragma Loop_Invariant (Engine.Next_TOAST_Pg <= Max_Safe_TOAST_Page);
+         pragma Loop_Invariant (Max_Seen_Tx >= Max_Seen_Tx'Loop_Entry);
          pragma Loop_Invariant
-           (for all S in RAG_Doc_Slot =>
+           (for all S in 1 .. Slot - 1 =>
               (if Engine.Docs (S).Active then
                  Engine.Docs (S).Tuple_Hdr.Xmin <= Max_Seen_Tx
                  and then Engine.Docs (S).Tuple_Hdr.Xmax <= Max_Seen_Tx));
+         pragma Loop_Invariant
+           (for all S in Slot .. RAG_Doc_Slot'Last => not Engine.Docs (S).Active);
 
          if Page_Rec.Tuples (Slot).Occupied then
             if Page_Rec.Tuples (Slot).Row_Id /= Slot
@@ -1220,14 +1228,15 @@ package body Nhe_O.RAG is
                return;
             end if;
 
+            Local_Doc := (others => <>);
             Sum_Len := Natural (Page_Rec.Tuples (Slot).Inline_Data (17));
-            Engine.Docs (Slot).Summary_Text := (Length => Sum_Len, Data => [others => ' ']);
+            Local_Doc.Summary_Text := (Length => Sum_Len, Data => [others => ' ']);
             for I in 1 .. Sum_Len loop
-               Engine.Docs (Slot).Summary_Text.Data (I) :=
+               Local_Doc.Summary_Text.Data (I) :=
                  Character'Val (Natural (Page_Rec.Tuples (Slot).Inline_Data (17 + I)));
             end loop;
 
-            Engine.Docs (Slot).Metadata := (others => <>);
+            Local_Doc.Metadata := (others => <>);
             Stored_Fields := Natural (Page_Rec.Tuples (Slot).Inline_Data (97));
             Cur_Off := 98;
             for F_Idx in 1 .. Stored_Fields loop
@@ -1262,7 +1271,7 @@ package body Nhe_O.RAG is
                     Character'Val (Natural
                       (Page_Rec.Tuples (Slot).Inline_Data (Cur_Off + 2 + Key_Len + I)));
                end loop;
-               Put_Field (Engine.Docs (Slot).Metadata, Meta_Key, Meta_Val, Meta_Kind, Sub_Stat);
+               Put_Field (Local_Doc.Metadata, Meta_Key, Meta_Val, Meta_Kind, Sub_Stat);
                if Sub_Stat /= Status_Ok then
                   Init_RAG_Engine (Engine, Dim);
                   Status := Status_IO_Error;
@@ -1306,8 +1315,8 @@ package body Nhe_O.RAG is
                   Status := Status_IO_Error;
                   return;
                end if;
-               Engine.Docs (Slot).Summary_Text := Rec_Sum;
-               Engine.Docs (Slot).Metadata     := Rec_Meta;
+               Local_Doc.Summary_Text := Rec_Sum;
+               Local_Doc.Metadata     := Rec_Meta;
             end if;
 
             if Page_Rec.Tuples (Slot).Tuple_Hdr.Xmin > Max_Seen_Tx then
@@ -1317,13 +1326,13 @@ package body Nhe_O.RAG is
                Max_Seen_Tx := Page_Rec.Tuples (Slot).Tuple_Hdr.Xmax;
             end if;
 
-            Engine.Docs (Slot).Active         := True;
-            Engine.Docs (Slot).Doc_Id         := Slot;
-            Engine.Docs (Slot).Tuple_Hdr      := Page_Rec.Tuples (Slot).Tuple_Hdr;
-            Engine.Docs (Slot).Toast_Ptr      := Page_Rec.Tuples (Slot).Toast_Ptr;
-            Engine.Docs (Slot).Vec_Toast_Ptr  := Vec_Ptr;
-            Engine.Docs (Slot).Meta_Toast_Ptr := Meta_Ptr;
-            Engine.Docs (Slot).Related_Doc_Id := Page_Rec.Tuples (Slot).Related_Id;
+            Local_Doc.Active         := True;
+            Local_Doc.Doc_Id         := Slot;
+            Local_Doc.Tuple_Hdr      := Page_Rec.Tuples (Slot).Tuple_Hdr;
+            Local_Doc.Toast_Ptr      := Page_Rec.Tuples (Slot).Toast_Ptr;
+            Local_Doc.Vec_Toast_Ptr  := Vec_Ptr;
+            Local_Doc.Meta_Toast_Ptr := Meta_Ptr;
+            Local_Doc.Related_Doc_Id := Page_Rec.Tuples (Slot).Related_Id;
 
             --  Mark recovered tuple's Xmin (and Xmax if deleted) as committed in CLOG
             Set_CLOG_State
@@ -1410,7 +1419,7 @@ package body Nhe_O.RAG is
                return;
             end if;
             Capture_Doc_HNSW_Node (Engine.Vector_Graph, Slot, HNSW_Snap);
-            Engine.Docs (Slot).Cur_HNSW_Node := HNSW_Snap;
+            Local_Doc.Cur_HNSW_Node := HNSW_Snap;
 
             --  Only index non-deleted tuples (Xmax = 0) in PK_Tree and Vector_Graph
             if Page_Rec.Tuples (Slot).Tuple_Hdr.Xmax = 0 then
@@ -1429,6 +1438,8 @@ package body Nhe_O.RAG is
             else
                Remove_Vector (Engine.Vector_Graph, Slot);
             end if;
+
+            Engine.Docs (Slot) := Local_Doc;
          end if;
       end loop;
 
@@ -1478,7 +1489,12 @@ package body Nhe_O.RAG is
       --  A transaction id that the engine already knows as committed can never commit
       --  again (reused id); nothing of the engine is touched
       if Engine.CLOG (Ctx.Id) = Tx_Committed then
-         Rollback_Tx (Ctx);
+         declare
+            Old_Id : constant Valid_Tx_Id := Ctx.Id;
+         begin
+            Rollback_Tx (Ctx);
+            Ctx.Id := Old_Id;
+         end;
          Discard_Staged_Notifications (Ctx, Staging);
          Status := Status_Tx_Aborted;
          return;
@@ -1488,7 +1504,12 @@ package body Nhe_O.RAG is
       --  not be truncated) must not reach Commit_Tx, which would materialize them
       if Engine.CLOG (Ctx.Id) = Tx_Aborted then
          Rollback_RAG_Tx (Engine, Ctx.Id);
-         Rollback_Tx (Ctx);
+         declare
+            Old_Id : constant Valid_Tx_Id := Ctx.Id;
+         begin
+            Rollback_Tx (Ctx);
+            Ctx.Id := Old_Id;
+         end;
          Discard_Staged_Notifications (Ctx, Staging);
          Status := Status_Tx_Aborted;
          return;
@@ -1524,6 +1545,36 @@ package body Nhe_O.RAG is
      (Engine : in out RAG_Engine;
       Status :    out Engine_Status)
    is
+      procedure Freeze_Slot (Doc : in out RAG_Document_Entry)
+        with Post => (if Doc.Active then
+                        Doc.Tuple_Hdr.Xmin = 1
+                        and then Doc.Tuple_Hdr.Xmax = 0
+                        and then not Doc.Has_Prior_Version)
+      is
+      begin
+         --  No transaction is active, so no staged page stays reserved
+         Doc.Staged_Tx    := 0;
+         Doc.Staged_First := 10;
+         Doc.Staged_End   := 10;
+         if Doc.Active then
+            if Doc.Tuple_Hdr.Xmax > 0 then
+               --  Committed delete: no snapshot can see this document any more (its
+               --  PK_Tree / Vector_Graph entries were already removed by the delete)
+               Doc := (others => <>);
+            else
+               Doc.Tuple_Hdr            := (Xmin => 1, Xmax => 0);
+               Doc.Has_Prior_Version    := False;
+               Doc.Prior_Tuple_Hdr      := (Xmin => 1, Xmax => 0);
+               Doc.Prior_Metadata       := (others => <>);
+               Doc.Prior_Summary        := (Length => 0, Data => [others => ' ']);
+               Doc.Prior_Toast_Ptr      := (others => <>);
+               Doc.Prior_Vec_Toast_Ptr  := (others => <>);
+               Doc.Prior_Meta_Toast_Ptr := (others => <>);
+               Doc.Prior_Related_Id     := 0;
+               Doc.Prior_HNSW_Node      := (others => <>);
+            end if;
+         end if;
+      end Freeze_Slot;
    begin
       --  The WAL a checkpoint replaces would hold the only copy of committed pages
       if Engine.Pages_Pending then
@@ -1551,7 +1602,9 @@ package body Nhe_O.RAG is
          end if;
       end loop;
 
+      Engine.Doc_Count := 0;
       for S in RAG_Doc_Slot loop
+         pragma Loop_Invariant (Engine.Doc_Count < S);
          pragma Loop_Invariant (Engine.Dim = Engine.Dim'Loop_Entry);
          pragma Loop_Invariant (Engine.Vector_Graph = Engine.Vector_Graph'Loop_Entry);
          pragma Loop_Invariant (Engine.PK_Tree = Engine.PK_Tree'Loop_Entry);
@@ -1561,27 +1614,9 @@ package body Nhe_O.RAG is
                  Engine.Docs (P).Tuple_Hdr.Xmin = 1
                  and then Engine.Docs (P).Tuple_Hdr.Xmax = 0
                  and then not Engine.Docs (P).Has_Prior_Version));
-         --  No transaction is active, so no staged page stays reserved
-         Engine.Docs (S).Staged_Tx    := 0;
-         Engine.Docs (S).Staged_First := 10;
-         Engine.Docs (S).Staged_End   := 10;
+         Freeze_Slot (Engine.Docs (S));
          if Engine.Docs (S).Active then
-            if Engine.Docs (S).Tuple_Hdr.Xmax > 0 then
-               --  Committed delete: no snapshot can see this document any more (its
-               --  PK_Tree / Vector_Graph entries were already removed by the delete)
-               Engine.Docs (S) := (others => <>);
-            else
-               Engine.Docs (S).Tuple_Hdr            := (Xmin => 1, Xmax => 0);
-               Engine.Docs (S).Has_Prior_Version    := False;
-               Engine.Docs (S).Prior_Tuple_Hdr      := (Xmin => 1, Xmax => 0);
-               Engine.Docs (S).Prior_Metadata       := (others => <>);
-               Engine.Docs (S).Prior_Summary        := (Length => 0, Data => [others => ' ']);
-               Engine.Docs (S).Prior_Toast_Ptr      := (others => <>);
-               Engine.Docs (S).Prior_Vec_Toast_Ptr  := (others => <>);
-               Engine.Docs (S).Prior_Meta_Toast_Ptr := (others => <>);
-               Engine.Docs (S).Prior_Related_Id     := 0;
-               Engine.Docs (S).Prior_HNSW_Node      := (others => <>);
-            end if;
+            Engine.Doc_Count := Engine.Doc_Count + 1;
          end if;
       end loop;
 
@@ -1590,14 +1625,6 @@ package body Nhe_O.RAG is
       Engine.Commit_Seqs     := [others => 0];
       Engine.Last_Commit_Seq := 0;
       Engine.Read_Horizon    := 0;
-
-      Engine.Doc_Count := 0;
-      for S in RAG_Doc_Slot loop
-         pragma Loop_Invariant (Engine.Doc_Count < S);
-         if Engine.Docs (S).Active then
-            Engine.Doc_Count := Engine.Doc_Count + 1;
-         end if;
-      end loop;
 
       Recompute_TOAST_High_Water_Mark (Engine);
       Status := Status_Ok;
@@ -1681,7 +1708,7 @@ package body Nhe_O.RAG is
       Needed_Vec_Chunks  : TOAST_Run;
       Meta_Payload       : TOAST_Payload_Buffer        := [others => 0];
       Meta_Byte_Len      : Valid_TOAST_Length          := 1;
-      Needed_Meta_Chunks : TOAST_Run                   := 1;
+      Needed_Meta_Chunks : TOAST_Run;
       Start_Pg           : Valid_Page_Id;
       Vec_Start_Pg       : Valid_Page_Id;
       Meta_Start_Pg      : Valid_Page_Id               := 10;
@@ -2252,7 +2279,7 @@ package body Nhe_O.RAG is
       SQL_Desc     : Parsed_SQL_Descriptor;
       SQL_Stat     : Engine_Status;
       Effective_K  : RAG_Hit_Index := Top_K;
-      Skip_Count   : RAG_Hit_Count := 0;
+      Skip_Count   : RAG_Hit_Count;
       Window_K     : RAG_Hit_Index;
       KNN_Res      : HNSW_Search_Result;
       Cand_Id      : Positive;

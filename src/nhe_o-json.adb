@@ -31,7 +31,7 @@ package body Nhe_O.JSON is
       then -1
       else Hex_Value (T.Data (P)) * 16#1000# + Hex_Value (T.Data (P + 1)) * 16#100#
            + Hex_Value (T.Data (P + 2)) * 16#10# + Hex_Value (T.Data (P + 3)))
-     with Pre  => P + 3 <= T.Length,
+     with Pre  => P <= Positive'Last - 3 and then P + 3 <= T.Length,
           Post => Hex4'Result in -1 .. 16#FFFF#;
 
    --  JSON value kind announced by the first character of a validated value

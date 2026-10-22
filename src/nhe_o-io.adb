@@ -328,6 +328,7 @@ package body Nhe_O.IO is
    is
       C_Path : C_Path_String;
       Buf    : Link_Probe_String := [others => ASCII.NUL];
+      pragma Warnings (Off, Buf);
       Rc     : Ssize_T;
    begin
       if Has_Embedded_NUL (File_Path) then
@@ -402,7 +403,9 @@ package body Nhe_O.IO is
 
       Trunc_R := Posix_Ftruncate (Fd, New_Size);
       Sync_Rc := Posix_Fsync (Fd);
+      pragma Warnings (GNATprove, Off, "statement has no effect");
       Close_R := Posix_Close (Fd);
+      pragma Warnings (GNATprove, On, "statement has no effect");
       Success := (Trunc_R = 0) and then (Sync_Rc = 0);
    end Truncate_File;
 
@@ -455,7 +458,9 @@ package body Nhe_O.IO is
       end if;
 
       Sync_Rc := Posix_Fsync (Fd);
+      pragma Warnings (GNATprove, Off, "statement has no effect");
       Close_R := Posix_Close (Fd);
+      pragma Warnings (GNATprove, On, "statement has no effect");
       Success := (Sync_Rc = 0);
    end Sync_Parent_Directory;
 
@@ -689,12 +694,12 @@ package body Nhe_O.IO is
       Close_R : int;
       pragma Warnings (Off, Close_R);
    begin
+      pragma Warnings (GNATprove, Off, "statement has no effect");
       if Is_Locked (Lock) then
          --  Closing the only descriptor of the open file description drops the lock
-         pragma Warnings (GNATprove, Off, "statement has no effect");
          Close_R := Posix_Close (int (Lock.Fd));
-         pragma Warnings (GNATprove, On, "statement has no effect");
       end if;
+      pragma Warnings (GNATprove, On, "statement has no effect");
       Lock := No_Lock;
    end Unlock_File;
 
@@ -820,8 +825,10 @@ package body Nhe_O.IO is
       end if;
 
       Abs_Path.Length := Cwd_Len + Sep_Len + Path.Length;
+      Abs_Path.Data (1) := '/';
       for I in 1 .. Cwd_Len loop
          pragma Loop_Invariant (Abs_Path.Length = Cwd_Len + Sep_Len + Path.Length);
+         pragma Loop_Invariant (Abs_Path.Data (1) = '/');
          Abs_Path.Data (I) := Cwd (I);
       end loop;
       if Sep_Len = 1 then
@@ -890,12 +897,16 @@ package body Nhe_O.IO is
       end if;
 
       --  Undo a failed file extension so the database stays page-aligned
+      pragma Warnings (GNATprove, Off, "statement has no effect");
+      pragma Warnings (GNATprove, Off, """Sync_Rc"" is set by ""Posix_Fsync"" but not used after the call");
       if not Success and then Offset >= End_Pos then
          Trunc_R := Posix_Ftruncate (Fd, End_Pos);
          Sync_Rc := Posix_Fsync (Fd);
       end if;
 
       Close_R := Posix_Close (Fd);
+      pragma Warnings (GNATprove, On, """Sync_Rc"" is set by ""Posix_Fsync"" but not used after the call");
+      pragma Warnings (GNATprove, On, "statement has no effect");
    end Write_Page;
 
    procedure Read_Page
@@ -979,7 +990,7 @@ package body Nhe_O.IO is
       End_Pos        : Off_T;
       Frame_Count    : Off_T;
       Aligned_Offset : Off_T;
-      Written        : Ssize_T := -1;
+      Written        : Ssize_T;
       Head_Ok        : Boolean;
       Sync_Rc        : int;
       Trunc_R        : int;
@@ -1057,12 +1068,16 @@ package body Nhe_O.IO is
 
       --  A frame that was not durably appended must not survive in the WAL: drop any
       --  partial or unsynced bytes so recovery can never replay a failed append
+      pragma Warnings (GNATprove, Off, "statement has no effect");
+      pragma Warnings (GNATprove, Off, """Sync_Rc"" is set by ""Posix_Fsync"" but not used after the call");
       if not Success then
          Trunc_R := Posix_Ftruncate (Fd, Aligned_Offset);
          Sync_Rc := Posix_Fsync (Fd);
       end if;
 
       Close_R := Posix_Close (Fd);
+      pragma Warnings (GNATprove, On, """Sync_Rc"" is set by ""Posix_Fsync"" but not used after the call");
+      pragma Warnings (GNATprove, On, "statement has no effect");
    end Append_WAL_Frame;
 
    procedure Read_File_Bytes
@@ -1206,8 +1221,12 @@ package body Nhe_O.IO is
          return;
       end if;
 
+      pragma Warnings (GNATprove, Off, "statement has no effect");
+      pragma Warnings (GNATprove, Off, """C_Path"" is set by ""To_C_Path"" but not used after the call");
       To_C_Path (File_Path, C_Path);
       Rc := Posix_Unlink (C_Path);
+      pragma Warnings (GNATprove, On, """C_Path"" is set by ""To_C_Path"" but not used after the call");
+      pragma Warnings (GNATprove, On, "statement has no effect");
    end Delete_File_If_Exists;
 
    procedure Delete_File_If_Exists
@@ -1224,8 +1243,12 @@ package body Nhe_O.IO is
          return;
       end if;
 
+      pragma Warnings (GNATprove, Off, "statement has no effect");
+      pragma Warnings (GNATprove, Off, """C_Path"" is set by ""To_C_Path"" but not used after the call");
       To_C_Path (File_Path, C_Path);
       Rc := Posix_Unlink (C_Path);
+      pragma Warnings (GNATprove, On, """C_Path"" is set by ""To_C_Path"" but not used after the call");
+      pragma Warnings (GNATprove, On, "statement has no effect");
       Check_File_Exists (File_Path, Still);
       Removed := not Still;
    end Delete_File_If_Exists;

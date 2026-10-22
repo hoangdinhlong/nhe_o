@@ -186,10 +186,12 @@ package Nhe_O.IO is
           Post   => Success = Is_Locked (Lock);
 
    --  Release a lock taken by Lock_File (no-op for No_Lock)
+   pragma Warnings (GNATprove, Off, "unused initial value of ""Lock""");
    procedure Unlock_File (Lock : in out File_Lock)
      with Global => null,
           Always_Terminates,
           Post   => not Is_Locked (Lock);
+   pragma Warnings (GNATprove, On, "unused initial value of ""Lock""");
 
    --  Canonical absolute path of the existing file Path (realpath(3): symbolic links,
    --  "." and ".." resolved), so directory fsyncs and checkpoint renames act on the

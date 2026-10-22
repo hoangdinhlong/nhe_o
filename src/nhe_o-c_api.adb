@@ -119,7 +119,7 @@ package body Nhe_O.C_API is
    is
       Prefix : constant String := "/tmp/nhe_o_c_api.";
       subtype Digit_Index is Positive range 1 .. 10; --  Natural'Last has 10 digits
-      Dec    : String (Digit_Index) := [others => '0'];
+      Dec    : String (Digit_Index);
       V      : Natural              := Pid;
       First  : Digit_Index          := Digit_Index'Last;
       Res    : Bounded_Text         := Make_Text (Prefix);
@@ -224,6 +224,9 @@ package body Nhe_O.C_API is
          Delete_File_If_Exists (File_Path, Removed);
          return;
       end if;
+      pragma Warnings (GNATprove, Off, """Lock"" is set by ""Lock_File"" but not used after the call");
+      pragma Warnings (GNATprove, Off, """Lock"" is set by ""Unlock_File"" but not used after the call");
+      pragma Warnings (GNATprove, Off, "statement has no effect");
       Lock_File (File_Path, Lock, Locked);
       if Locked then
          Delete_File_If_Exists (File_Path, Removed);
@@ -233,6 +236,9 @@ package body Nhe_O.C_API is
          Check_File_Exists (File_Path, Exists);
          Removed := not Exists;
       end if;
+      pragma Warnings (GNATprove, On, "statement has no effect");
+      pragma Warnings (GNATprove, On, """Lock"" is set by ""Unlock_File"" but not used after the call");
+      pragma Warnings (GNATprove, On, """Lock"" is set by ""Lock_File"" but not used after the call");
    end Remove_Unused_File;
 
    --  Remove a file this call created before locking it, unless another open locked
@@ -283,7 +289,9 @@ package body Nhe_O.C_API is
       Ckpt_Gone : Boolean;
       Ready     : Boolean := False;
    begin
+      pragma Warnings (GNATprove, Off, "is set by ""Reset_Runtime"" but not used after the call");
       Reset_Runtime;
+      pragma Warnings (GNATprove, On, "is set by ""Reset_Runtime"" but not used after the call");
       G_DB_Path  := Scratch_Path (Pid, ".db");
       G_WAL_Path := Scratch_Path (Pid, ".wal");
       Remove_Unused_File (G_DB_Path, DB_Gone);
@@ -317,7 +325,9 @@ package body Nhe_O.C_API is
       pragma Warnings (Off, Ckpt_Status);
    begin
       if Engine_Ready and then not G_Ephemeral then
+         pragma Warnings (GNATprove, Off, "is set by ""C_Checkpoint"" but not used after the call");
          C_Checkpoint (Ckpt_Status);
+         pragma Warnings (GNATprove, On, "is set by ""C_Checkpoint"" but not used after the call");
       end if;
       Remove_Scratch_Files (Removed);
       Reset_Runtime;
@@ -433,7 +443,11 @@ package body Nhe_O.C_API is
       end if;
 
       --  The old WAL is unlinked; the lock taken on the new one replaces its lock
+      pragma Warnings (GNATprove, Off, "statement has no effect");
+      pragma Warnings (GNATprove, Off, """G_WAL_Lock"" is set by ""Unlock_File"" but not used after the call");
       Unlock_File (G_WAL_Lock);
+      pragma Warnings (GNATprove, On, """G_WAL_Lock"" is set by ""Unlock_File"" but not used after the call");
+      pragma Warnings (GNATprove, On, "statement has no effect");
       G_WAL_Lock  := G_Ckpt_Lock;
       G_Ckpt_Lock := No_Lock;
 
@@ -553,7 +567,11 @@ package body Nhe_O.C_API is
       end Refuse;
    begin
       --  Opening a database releases an nhe_o_init scratch database (best effort)
+      pragma Warnings (GNATprove, Off, "statement has no effect");
+      pragma Warnings (GNATprove, Off, """Scratch_Gone"" is set by ""Remove_Scratch_Files"" but not used after the call");
       Remove_Scratch_Files (Scratch_Gone);
+      pragma Warnings (GNATprove, On, """Scratch_Gone"" is set by ""Remove_Scratch_Files"" but not used after the call");
+      pragma Warnings (GNATprove, On, "statement has no effect");
       Reset_Runtime;
 
       if DB_Path_Len <= 0 or else DB_Path_Len > int (Max_Text_Len)
@@ -714,6 +732,9 @@ package body Nhe_O.C_API is
          Refuse (C_Status_Invalid_Arg);
          return;
       end if;
+      pragma Warnings (GNATprove, Off, """Ckpt_Lock"" is set by ""Lock_File"" but not used after the call");
+      pragma Warnings (GNATprove, Off, """Ckpt_Lock"" is set by ""Unlock_File"" but not used after the call");
+      pragma Warnings (GNATprove, Off, "statement has no effect");
       Lock_File (Ckpt_P, Ckpt_Lock, Locked);
       if Locked then
          Check_WAL_File (Ckpt_P, Ckpt_Is_WAL);
@@ -732,6 +753,9 @@ package body Nhe_O.C_API is
             return;
          end if;
       end if;
+      pragma Warnings (GNATprove, On, "statement has no effect");
+      pragma Warnings (GNATprove, On, """Ckpt_Lock"" is set by ""Unlock_File"" but not used after the call");
+      pragma Warnings (GNATprove, On, """Ckpt_Lock"" is set by ""Lock_File"" but not used after the call");
 
       --  KV replay (repairs a torn WAL tail first)
       Recover_KV_From_WAL
@@ -1447,7 +1471,7 @@ package body Nhe_O.C_API is
       Vec            : Vector_Value;
       D              : Vector_Dim;
       Parent_Payload : TOAST_Payload_Buffer   := [others => 0];
-      Eff_Parent_Len : Valid_TOAST_Length     := 1;
+      Eff_Parent_Len : Valid_TOAST_Length;
       Status         : Engine_Status;
       Delivered      : Natural;
       Flush_Pending  : Boolean;
@@ -1551,14 +1575,20 @@ package body Nhe_O.C_API is
             Rollback_RAG_Tx (G_RAG_Engine, Tx.Id);
          end if;
          pragma Warnings (GNATprove, Off, "statement has no effect");
+         pragma Warnings (GNATprove, Off, """Tx"" is set by ""Rollback_Tx"" but not used after the call");
+         pragma Warnings (GNATprove, Off, """Staging"" is set by ""Discard_Staged_Notifications"" but not used after the call");
          Rollback_Tx (Tx);
          Discard_Staged_Notifications (Tx, Staging);
+         pragma Warnings (GNATprove, On, """Staging"" is set by ""Discard_Staged_Notifications"" but not used after the call");
+         pragma Warnings (GNATprove, On, """Tx"" is set by ""Rollback_Tx"" but not used after the call");
          pragma Warnings (GNATprove, On, "statement has no effect");
          After_Durable_Write (Status);
          Out_Status := To_C_Status (Status);
          return;
       end if;
 
+      pragma Warnings (GNATprove, Off, """Tx"" is set by ""Commit_RAG_Tx"" but not used after the call");
+      pragma Warnings (GNATprove, Off, """Staging"" is set by ""Commit_RAG_Tx"" but not used after the call");
       Commit_RAG_Tx
         (Engine        => G_RAG_Engine,
          Ctx           => Tx,
@@ -1569,6 +1599,8 @@ package body Nhe_O.C_API is
          Delivered     => Delivered,
          Status        => Status,
          Flush_Pending => Flush_Pending);
+      pragma Warnings (GNATprove, On, """Staging"" is set by ""Commit_RAG_Tx"" but not used after the call");
+      pragma Warnings (GNATprove, On, """Tx"" is set by ""Commit_RAG_Tx"" but not used after the call");
       if Flush_Pending then
          --  Durably committed, but G_DB_Path could not be brought up to date
          G_Write_Fault := True;
@@ -1662,13 +1694,17 @@ package body Nhe_O.C_API is
             Rollback_RAG_Tx (G_RAG_Engine, Tx.Id);
          end if;
          pragma Warnings (GNATprove, Off, "statement has no effect");
+         pragma Warnings (GNATprove, Off, """Tx"" is set by ""Rollback_Tx"" but not used after the call");
          Rollback_Tx (Tx);
+         pragma Warnings (GNATprove, On, """Tx"" is set by ""Rollback_Tx"" but not used after the call");
          pragma Warnings (GNATprove, On, "statement has no effect");
          After_Durable_Write (Status);
          Out_Status := To_C_Status (Status);
          return;
       end if;
 
+      pragma Warnings (GNATprove, Off, """Tx"" is set by ""Commit_RAG_Tx"" but not used after the call");
+      pragma Warnings (GNATprove, Off, """Staging"" is set by ""Commit_RAG_Tx"" but not used after the call");
       Commit_RAG_Tx
         (Engine        => G_RAG_Engine,
          Ctx           => Tx,
@@ -1679,6 +1715,8 @@ package body Nhe_O.C_API is
          Delivered     => Delivered,
          Status        => Status,
          Flush_Pending => Flush_Pending);
+      pragma Warnings (GNATprove, On, """Staging"" is set by ""Commit_RAG_Tx"" but not used after the call");
+      pragma Warnings (GNATprove, On, """Tx"" is set by ""Commit_RAG_Tx"" but not used after the call");
       if Flush_Pending then
          G_Write_Fault := True;
       else

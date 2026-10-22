@@ -21,8 +21,8 @@
 8. **Universal Local LLM Hybrid RAG, Property Graph & C/Python SDK**: Two-stage Hybrid RAG execution combining B+Tree PK lookup, Stage-1 HNSW candidate generation, Stage-2 exact re-ranking of every candidate from its stored `"VTS2"` binary32 vector (`ADR-018`), `"RMET"` lossless summary/JSONB metadata TOAST chains, `@>` pre-filtering, lexical keyword boosting (Unicode Latin case folding), SQL `LIMIT` / `OFFSET` windows, and 1-hop GraphRAG expansion — evolving into a full bi-directional CSR **Labeled Property Graph & Multi-Hop Knowledge GraphRAG Engine (`Nhe_O.Graph`, `SQL/PGQ MATCH` in Epic 06 / `ADR-008`)** — exposed via a formally verified C ABI 0.4 (`include/nhe_o.h`, `lib/libnhe_o.so`; one process-wide engine with serialized calls, `ADR-013`) and Python `ctypes` SDK (`bindings/python/nhe_o.py`).
 9. **100% SPARK Verification Mandate (`BR-001` / `ADR-002` / `ADR-005`)**:
    - **100% of specifications, bodies, and entrypoints** (all 26 files across 14 units in `src/`) operate under `pragma SPARK_Mode (On);` with zero occurrences of `SPARK_Mode (Off)` and zero `pragma Assume` statements.
-   - **4,246 / 4,246 Formal Checks Proved (100% SPARK Stone, Bronze, Silver & Gold Contracts)**: Verified by `gnatprove 16.1.0` (`Why3` + `Z3` + `cvc5` + `Alt-Ergo`) with `0 unproved` checks, `0 justified` checks, and `0 warnings` (max proof time `< 1s`).
-   - **Contract-Bound POSIX I/O (`src/nhe_o-io.adb`)**: Physical disk operations bypass exception-raising `Ada.Streams.Stream_IO` and bind directly in `SPARK_Mode (On)` to atomic POSIX kernel syscalls (`open` including `O_EXCL` creation, `pread`, `pwrite`, `lseek`, `fsync`, `ftruncate`, `close`, `unlink`, `rename`, `stat`, `fstat`, `flock`, `realpath`, `readlink`, `getcwd`, `getpid`, `access`, `signal`).
+    - **6,629 / 6,629 Formal Checks Proved (100% SPARK Stone, Bronze, Silver & Gold Contracts)**: Verified by `gnatprove 16.1.0` (`Why3` + `Z3` + `cvc5` + `Alt-Ergo`) with `0 unproved` checks, `0 justified` checks, and `0 warnings` (max proof time `< 1s`).
+    - **Contract-Bound POSIX I/O (`src/nhe_o-io.adb`)**: Physical disk operations bypass exception-raising `Ada.Streams.Stream_IO` and bind directly in `SPARK_Mode (On)` to atomic POSIX kernel syscalls (`open` including `O_EXCL` creation, `pread`, `pwrite`, `lseek`, `fsync`, `ftruncate`, `close`, `unlink`, `rename`, `stat`, `fstat`, `flock`, `realpath`, `readlink`, `getcwd`, `getpid`, `access`, `signal`).
 
 ---
 
@@ -32,24 +32,24 @@ Evaluated across all **14 compilation units (26 `.ads`/`.adb` files)** in `src/`
 
 | SPARK Level | Assurance Objective | Coverage / Proved % | Proved Checks (`gnatprove`) | Details |
 |---|---|---|---|---|
-| **Stone** | Valid SPARK 2022 Subset (`SPARK_Mode (On)`) | **100.0%** (`26 / 26` files) | `14 / 14` units (`257 / 257` Ada subprograms/packages at `v0.3.0` + `17` POSIX C bindings) | Zero `SPARK_Mode (Off)` anywhere in `src/` (`BR-001`). |
-| **Bronze** | Initialization & Correct Data Flow (`--mode=flow`) | **100.0%** | **`1,316 / 1,316`** (`0 unproved`) | `171` Data Dependencies, `920` Initialization, `2` Non-Aliasing, `223` Flow Termination. |
-| **Silver** | Absence of Run-Time Errors (AoRTE) & Termination | **100.0%** | **`1,587 / 1,587`** prover checks (`2,903 / 2,903` incl. Bronze) | `1,519` Run-time Checks (overflow, range, index, division, discriminant) + `68` Prover Termination checks (`0` `pragma Assume`). |
-| **Gold** | Proof of Key Integrity Properties & Functional Contracts | **100.0%** of specified contracts | **`1,343 / 1,343`** prover checks (`4,246 / 4,246` cumulative) | `807` Functional Contracts (`Pre`/`Post`) + `536` Inductive Loop Invariants & Assertions (`0 unproved`, `0 justified`, `0` `Post => True` tautologies). |
+| **Stone** | Valid SPARK 2022 Subset (`SPARK_Mode (On)`) | **100.0%** (`26 / 26` files) | `14 / 14` units (`26` source files, all Ada subprograms/packages + `17` POSIX C bindings) | Zero `SPARK_Mode (Off)` anywhere in `src/` (`BR-001`). |
+| **Bronze** | Initialization & Correct Data Flow (`--mode=flow`) | **100.0%** | **`1,982 / 1,982`** (`0 unproved`) | `296` Data Dependencies, `1,307` Initialization, `2` Non-Aliasing, `377` Flow Termination. |
+| **Silver** | Absence of Run-Time Errors (AoRTE) & Termination | **100.0%** | **`2,350 / 2,350`** prover checks (`4,332 / 4,332` incl. Bronze) | `2,296` Run-time Checks (overflow, range, index, division, discriminant) + `54` Prover Termination checks (`0` `pragma Assume`). |
+| **Gold** | Proof of Key Integrity Properties & Functional Contracts | **100.0%** of specified contracts | **`2,297 / 2,297`** prover checks (`6,629 / 6,629` cumulative) | `1,651` Functional Contracts (`Pre`/`Post`) + `646` Inductive Loop Invariants & Assertions (`0 unproved`, `0 justified`, `0` `Post => True` tautologies). |
 | **Platinum** | Full Functional Equivalence & Complete Ghost Model Proof | **~35%** *(Scoped to Core Invariants)* | Proven on core state machines; full Ghost relational model planned for Epic 05+ | Proves `CLOG` state machine, `BTree.Total_Keys` conservation, `KV` `WAL-before-Data` rollback (`Store = Store'Old`), and C ABI defensive bounds. |
 
-### `gnatprove` Check Breakdown (`4,246 / 4,246` Total — `0 Unproved`, `0 Warnings`)
+### `gnatprove` Check Breakdown (`6,629 / 6,629` Total — `0 Unproved`, `0 Warnings`)
 
 | Category | Total | Flow Analysis | SMT Provers (`cvc5`, `Z3`, `Alt-Ergo`) | Justified | Unproved |
 |---|---:|---:|---:|---:|---:|
-| Data Dependencies | `171` | `171` | — | `0` | `0` |
-| Initialization | `920` | `920` | — | `0` | `0` |
+| Data Dependencies | `296` | `296` | — | `0` | `0` |
+| Initialization | `1,307` | `1,307` | — | `0` | `0` |
 | Non-Aliasing | `2` | `2` | — | `0` | `0` |
-| Run-time Checks (AoRTE) | `1,519` | — | `1,519` (`cvc5` 96%, `Trivial` 4%, `Z3` 1%) | `0` | `0` |
-| Assertions & Loop Invariants | `536` | — | `536` (`cvc5` 99%, `Z3` 1%, `Trivial` <1%) | `0` | `0` |
-| Functional Contracts (`Pre`/`Post`) | `807` | — | `807` (`cvc5` 95%, `Z3` 3%, `Trivial` 2%) | `0` | `0` |
-| Termination | `291` | `223` | `68` (`cvc5` 100%) | `0` | `0` |
-| **Total** | **`4,246`** | **`1,316` (31%)** | **`2,930` (69%)** | **`0`** | **`0`** |
+| Run-time Checks (AoRTE) | `2,296` | — | `2,296` (`cvc5` 26%, `Trivial` 3%, `Z3` 70%, `Alt-Ergo` 1%) | `0` | `0` |
+| Assertions & Loop Invariants | `646` | — | `646` (`cvc5` 36%, `Trivial` 3%, `Z3` 59%, `Alt-Ergo` 2%) | `0` | `0` |
+| Functional Contracts (`Pre`/`Post`) | `1,651` | — | `1,651` (`cvc5` 64%, `Trivial` 4%, `Z3` 32%, `Alt-Ergo` <1%) | `0` | `0` |
+| Termination | `431` | `377` | `54` (`cvc5` 2%, `Z3` 98%) | `0` | `0` |
+| **Total** | **`6,629`** | **`1,982` (30%)** | **`4,647` (70%)** | **`0`** | **`0`** |
 
 ---
 

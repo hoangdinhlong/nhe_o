@@ -17,7 +17,7 @@ How we build the vision in `VISION.md`. This is the **map** for design decisions
                                       | (Precondition-Free Defensive C ABI)
 +-------------------------------------v---------------------------------------+
 |            Nhé O (`Nhe_O`) Embedded DBMS — 100% pragma SPARK_Mode (On)      |
-|      [4,246 / 4,246 Checks Proved: 100% SPARK Silver + Gold Contracts]      |
+|      [6,629 / 6,629 Checks Proved: 100% SPARK Silver + Gold Contracts]      |
 |                                                                             |
 |  +----------------------+ +-------------------+ +------------------------+  |
 |  |  PostgreSQL SQL &    | |   Redis-Compatible| |  Dual-Mode Pub/Sub     |  |
@@ -85,7 +85,7 @@ How we build the vision in `VISION.md`. This is the **map** for design decisions
 | Concern | Choice |
 |---------|--------|
 | **Language** | Ada 2022 (`-gnat2022`) |
-| **Formal Verification** | 100% SPARK 2022 (`pragma SPARK_Mode (On);` in all 26 files — **100% Stone, Bronze, Silver AoRTE & Gold Contracts**: `4,246 / 4,246` checks proved by `gnatprove 16.1.0` with `Z3`, `cvc5`, `Alt-Ergo`) |
+| **Formal Verification** | 100% SPARK 2022 (`pragma SPARK_Mode (On);` in all 26 files — **100% Stone, Bronze, Silver AoRTE & Gold Contracts**: `6,629 / 6,629` checks proved by `gnatprove 16.1.0` with `Z3`, `cvc5`, `Alt-Ergo`, `0 unproved`, `0 warnings`) |
 | **Compiler & Build** | Alire `2.1.1` / GNAT `16.1.0` / `gprbuild 26.0.1` (`nhe_o.gpr` & `nhe_o_lib.gpr`) |
 | **Storage Layout** | 4096-byte Primary Slotted Pages + 4KB TOAST Overflow Chains (`pread`/`pwrite`) + Positional CRC32 WAL (`lseek`/`pwrite`/`fsync`) |
 | **Concurrency / Isolation** | MVCC snapshot isolation by commit sequence numbers with first-updater-wins / no-lost-update write conflicts (`ADR-010`); one process-wide engine per process, calls serialized by the caller (`ADR-013`); one process per database, enforced with exclusive `flock` locks on the database and WAL files (`ADR-020`) |
@@ -106,6 +106,8 @@ How we build the vision in `VISION.md`. This is the **map** for design decisions
 3. **Professional Ada / Alire / GNAT Naming**:
    - Alire crate and GPR project file use lowercase `snake_case`: `nhe_o` (`nhe_o.gpr`).
    - Hierarchical Ada identifiers use `Mixed_Case_With_Underscores`: `Nhe_O.<Module>`, mapped to GNAT krunched filenames `src/nhe_o-<module>.ads` and `src/nhe_o-<module>.adb` (`_` inside identifier, `-` for child package hierarchy).
+4. **Modular Why3 AST Verification Architecture**:
+   - Test harness procedures (`src/nhe_o_main.adb`) are decomposed into discrete internal subprograms with `Always_Terminates`, avoiding monolithic Why3 AST memory explosion and enabling parallel verification across 24 cores in under 60 seconds.
 
 ---
 

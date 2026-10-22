@@ -321,7 +321,7 @@ package body Nhe_O.Vector is
       --  normalized vector has a component of magnitude 1.0 (up to one rounding), so
       --  Prod is ~>= 1.0; the guard only keeps the quotient below provably bounded.
       Prod := Long_Float (Sq_A) * Long_Float (Sq_B);
-      if Prod < 0.25 then
+      if Prod not in 0.25 .. 67_108_864.0 then
          return 1.0;
       end if;
       Sim := Long_Float (Dot) / Sqrt_Long (Prod);
