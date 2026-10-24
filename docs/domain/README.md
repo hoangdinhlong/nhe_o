@@ -30,4 +30,5 @@ Follow the 4-step reverse-engineering / codification cycle:
 |---|---|---|---|
 | `RULE-001` | [Core Business Rules Index](business-rules.md) | Business Stakeholders | Active |
 | `DOM-001` | [Binary Storage, Slotted-Page, TOAST, B+Tree & WAL Format Specification](storage-and-wal-format.md) | Storage Engine Architecture (`ADR-001`..`ADR-007`) | Active |
+| `DOM-002` | [Alembic Algorithmic Traceability & Gap-Analysis Matrix](alembic-traceability.md) | Ecosystem Architecture & Alembic Subsystems 01..14 (`ADR-001`..`ADR-020`) | Active |
 

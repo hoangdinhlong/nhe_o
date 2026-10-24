@@ -3,7 +3,7 @@
 > **Start here.** Entry point for any session (per `../AGENTS.md`).
 > States where the project stands, the active epic, and the next task.
 
-_Last updated: 2026-10-22_
+_Last updated: 2026-10-24_
 
 > **Ecosystem Umbrella (`ouronic_meta`)**: See [`../../ouronic_meta/docs/STATUS.md`](../../ouronic_meta/docs/STATUS.md) and [`../../ouronic_meta/docs/reference/ARCHITECTURE.md`](../../ouronic_meta/docs/reference/ARCHITECTURE.md) for the master 5-stage Concentric Rings roadmap, cross-crate zero-copy contracts, and algorithmic distillation in [`ouronic_alembic`](../../ouronic_alembic).
 
@@ -25,7 +25,14 @@ The project has completed **Epic 01 (Scaffold and Architecture)**, **Epic 02 (B+
 - ✅ C ABI `0.4` (`Nhe_O.C_API`, `include/nhe_o.h`, `lib/libnhe_o.so`): one process-wide engine with serialized calls, one process per database (`flock` locks on both files, per-process ownership, safe in forked children), `nhe_o_close` / `nhe_o_checkpoint`, automatic checkpoints, write-fault latch, `O_EXCL` per-process scratch files created and locked in one step, absolute and symlink-resolved paths, alias refusal, page-0 database check, reserved `"<wal>.ckpt"` (a link at a reserved or scratch name is never followed, and no file there is unlinked without its lock); Python SDK (`bindings/python/nhe_o.py`) with a process-wide lock, `close()`, an at-fork hook and the interpreter's signal handlers kept; CLI modes (`--verify`, `--sql`, `--kv`, `--rag-demo`).
 - ✅ Contract-bound POSIX I/O substrate (`Nhe_O.IO`, spec and body in `SPARK_Mode => On`): `open` (including `O_EXCL`), `pread`, `pwrite`, `lseek`, `fsync` (files and directories), `ftruncate`, `close`, `unlink`, `rename`, `stat`, `fstat`, `flock`, `realpath`, `readlink`, `getcwd`, `getpid`, `access`, `signal`, with alignment checks and `EINTR` / short-read retries.
 
+## Upstream Algorithmic Reference & Gap Analysis (ouronic_alembic)
+
+- **Domain Master Index**: [`../../ouronic_alembic/docs/domains/dbms/INDEX.md`](../../ouronic_alembic/docs/domains/dbms/INDEX.md)
+- **Local Traceability Matrix**: [`domain/alembic-traceability.md`](domain/alembic-traceability.md)
+- **Traceability Status**: Audited against Subsystems `01..14` (all 512 checklist items: 308 Upstream Edge Cases `EC-XX-UYY` + 204 Universal Invariants `EC-XX-IYY`, mapped across all 26 packages and epics).
+
 ## Epic overview
+
 
 | Epic | Goal | Status |
 |------|------|--------|

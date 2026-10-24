@@ -59,7 +59,30 @@ Every **Feature Epic** (or group of feature epics) must be followed by a dedicat
 - Before invoking `gnatprove` or heavy build/verification commands (directly or via a subagent), **inspect the current CPU core count and system load** (e.g., `nproc`, `uptime` / `/proc/loadavg`).
 - Set the thread count (`-j<N>`) appropriately for the available CPU capacity, and **always use at least 16 threads (`-j16` minimum; `-j0` or `-j24`..`-j32` on this 32-thread workstation when idle)**. Never throttle `gnatprove` to low thread counts like `-j2` or `-j4`, and explicitly enforce this rule in every subagent prompt.
 
+## Upstream Algorithmic Reference & Gap Analysis (ouronic_alembic)
+
+Ouronic adopts a strict pre-implementation distillation architecture: complex data structures, protocols, and algorithms must be distilled into language-agnostic, edge-case-hardened specifications inside **Ouronic Alembic (`ouronic_alembic`)** before implementation or enhancement.
+
+### Upstream Anchors
+- **Upstream Domain Index**: [`../ouronic_alembic/docs/domains/dbms/INDEX.md`](../ouronic_alembic/docs/domains/dbms/INDEX.md)
+- **Local Traceability Matrix**: [`docs/domain/alembic-traceability.md`](docs/domain/alembic-traceability.md)
+- **Upstream Conservatory Root**: [`../ouronic_alembic/docs/domains/`](../ouronic_alembic/docs/domains/)
+
+### Step-by-Step Discovery & Query Protocol
+Whenever the owner or an agent investigates algorithms, missing features, unhandled edge cases, or optimization opportunities:
+1. **Query the Upstream Master Index**: Inspect `../ouronic_alembic/docs/domains/dbms/INDEX.md` to locate the target subsystem, the canonical algorithm identifier (`ALG-DBMS-*`), and the categorized edge-case checklist (`EC-*`).
+2. **Consult the Local Traceability Matrix**: Open `docs/domain/alembic-traceability.md` to check the current implementation status:
+   - `Implemented`: Verified with concrete source lines (`src/*.ad[sb]`).
+   - `Partial / Improvable`: Implemented with simplified bounds or heuristics; note the documented enhancement opportunity.
+   - `Missing`: Unimplemented upstream feature/algorithm/edge case; note target epic and priority.
+   - `Omitted by Design`: Intentionally omitted due to architectural scope; cites governing `ADR-*`.
+3. **Inspect Original Reference Code**: If investigating low-level mechanics, follow Section 4 source pointers (`repos/<repo>/<path>#Lstart-Lend`) in `ouronic_alembic` against pinned commit SHAs.
+4. **Preserve Repository Purity**:
+   - **Never** copy Ada/SPARK source code, compiler pragmas, or downstream crate names into `ouronic_alembic`.
+   - Record gap analyses, implementation mappings, and enhancement roadmaps exclusively in this repository's `docs/domain/alembic-traceability.md`.
+
 ## Core rule
+
 
 Reference docs are *not authoritative*. If work in a session contradicts a reference doc, the agent
 must either (a) update the reference doc in the same session, or (b) append a note to

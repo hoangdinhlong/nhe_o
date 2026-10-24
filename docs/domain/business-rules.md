@@ -4,6 +4,7 @@ Authoritative index of key domain rules, database invariants, binary storage for
 
 ### Domain Specifications Index
 - [`storage-and-wal-format.md`](storage-and-wal-format.md) — Exact binary byte layouts and CRC32 invariants for 4,120-byte `"NHEO"` WAL frames (`WAL_Frame_Kind`), 4,096-byte `"SLOT"` primary slotted pages, 16-byte inline `TOAST_Pointer` + 4,096-byte `"TOAS"` overflow pages, 4,096-byte `"BTRE"` B+Tree node pages, and 4,096-byte `"KVMG"` durable KV WAL pages.
+- [`alembic-traceability.md`](alembic-traceability.md) — Authoritative Alembic algorithmic traceability matrix and gap-analysis census mapping all 26 packages across 14 compilation units in `src/` to Alembic Subsystems 01..14, cataloging all 14 `ALG-DBMS-*` core algorithms, and auditing 100% of the 512 checklist items (308 Upstream Edge Cases `EC-XX-UYY` and 204 Universal Formal Invariants `EC-XX-IYY`).
 
 ---
 
